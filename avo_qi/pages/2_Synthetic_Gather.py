@@ -97,11 +97,11 @@ c3.caption(
     f"TWT {twt[0]:.3f}–{twt[-1]:.3f} s"
 )
 
-left, right = st.columns([1, 2])
+left, right = st.columns([1, 1.7])
 with left:
     tw_derived = add_derived_curves(tw)
     st.plotly_chart(
-        log_track_figure(tw_derived, depth_col="TWT", curves=["VP", "RHOB", "VPVS"],
+        log_track_figure(tw_derived, depth_col="TWT", curves=["VP", "VPVS"],
                          height=720),
         use_container_width=True,
     )

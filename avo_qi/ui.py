@@ -321,6 +321,16 @@ def gather_figure(gather, angles, twt, mode="Variable density", height=720,
         scale = gain * spacing / (limit if limit else 1.0)
         for j, ang in enumerate(angles):
             trace = ang + gather[:, j] * scale
+            # Variable area: the positive lobe is shaded, seismic convention.
+            fig.add_trace(go.Scatter(
+                x=np.full(twt.size, float(ang)), y=twt, mode="lines",
+                line=dict(width=0), showlegend=False, hoverinfo="skip",
+            ))
+            fig.add_trace(go.Scatter(
+                x=np.maximum(trace, ang), y=twt, mode="lines", line=dict(width=0),
+                fill="tonextx", fillcolor="rgba(20,20,20,0.85)",
+                showlegend=False, hoverinfo="skip",
+            ))
             fig.add_trace(go.Scatter(
                 x=trace, y=twt, mode="lines", line=dict(color="#222", width=0.9),
                 name=f"{ang:.0f} deg", showlegend=False,
@@ -329,6 +339,8 @@ def gather_figure(gather, angles, twt, mode="Variable density", height=720,
         fig.update_xaxes(title_text="Incidence angle (deg)")
 
     if markers is not None and len(markers):
+        # The class legend would otherwise sit on top of the amplitude colour bar.
+        fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
         for label, sub in markers.groupby("avo_class"):
             fig.add_trace(go.Scatter(
                 x=np.full(len(sub), float(angles[0])), y=sub["twt"], mode="markers",

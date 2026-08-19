@@ -141,7 +141,11 @@ def _label(row):
     return f"{where}{when} — Class {row['avo_class']} (A {row['A_shuey']:+.3f}, B {row['B_shuey']:+.3f})"
 
 labels = [_label(r) for _, r in table.iterrows()]
-pick = st.selectbox("Reflector", range(len(labels)), format_func=lambda i: labels[i])
+# Open on the strongest reflector rather than the shallowest, which on a noisy
+# log is often a near-zero interface that happens to clear the threshold.
+strongest = int(np.argmax(np.abs(table["R0"].to_numpy(float))))
+pick = st.selectbox("Reflector", range(len(labels)), index=strongest,
+                    format_func=lambda i: labels[i])
 row = table.iloc[pick]
 i = int(row["sample"])
 
@@ -179,11 +183,12 @@ fig.update_layout(xaxis_title="Incidence angle (deg)", yaxis_title="Rpp",
                   legend=dict(orientation="h", yanchor="bottom", y=1.02))
 st.plotly_chart(fig, use_container_width=True)
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Class", row["avo_class"])
 c2.metric("Intercept A", f"{row['A_shuey']:+.4f}")
 c3.metric("Gradient B", f"{row['B_shuey']:+.4f}")
-c4.metric("Shuey − Aki-R", f"ΔA {row['dA']:+.1e} / ΔB {row['dB']:+.1e}")
+c4.metric("ΔA Shuey−AkiR", f"{row['dA']:+.1e}")
+c5.metric("ΔB Shuey−AkiR", f"{row['dB']:+.1e}")
 
 if i + 1 < vp.size:
     st.caption(
