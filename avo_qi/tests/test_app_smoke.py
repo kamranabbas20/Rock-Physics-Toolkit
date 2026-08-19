@@ -68,6 +68,11 @@ def avo_page():
     return run_page(os.path.join(PAGES, "3_AVO_Classification.py"))
 
 
+@pytest.fixture(scope="module")
+def rock_physics_page():
+    return run_page(os.path.join(PAGES, "4_Rock_Physics.py"))
+
+
 class TestDataAndCrossplotsPage:
     def test_runs_clean(self, crossplots_page):
         assert not crossplots_page.exception
@@ -142,5 +147,34 @@ class TestAvoClassificationPage:
 
     def test_stops_politely_without_a_well(self):
         at = run_page(os.path.join(PAGES, "3_AVO_Classification.py"), with_well=False)
+        assert not at.exception
+        assert at.warning
+
+
+class TestRockPhysicsPage:
+    def test_runs_clean(self, rock_physics_page):
+        assert not rock_physics_page.exception
+
+    def test_renders_every_diagnostic_tab(self, rock_physics_page):
+        # Vp-Vs trends, Gardner, velocity-porosity, moduli & bounds.
+        assert len(rock_physics_page.tabs) >= 4
+
+    def test_exposes_the_frame_model_controls(self, rock_physics_page):
+        labels = {s.label for s in rock_physics_page.slider}
+        assert "Critical porosity \u03c6c" in labels
+        assert "Coordination number n" in labels
+        assert "Effective pressure (MPa)" in labels
+        assert any(r.label == "Modulus" for r in rock_physics_page.radio)
+
+    def test_reports_the_mineral_and_pack_moduli(self, rock_physics_page):
+        labels = {m.label for m in rock_physics_page.metric}
+        assert "Mineral K" in labels
+        assert "Hertz-Mindlin K (dry)" in labels
+
+    def test_warns_that_the_frame_models_are_dry(self, rock_physics_page):
+        assert any("dry-frame" in w.value for w in rock_physics_page.warning)
+
+    def test_stops_politely_without_a_well(self):
+        at = run_page(os.path.join(PAGES, "4_Rock_Physics.py"), with_well=False)
         assert not at.exception
         assert at.warning

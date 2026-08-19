@@ -13,11 +13,33 @@ import os
 
 import numpy as np
 
-# (name, vp m/s, vs m/s, rho g/cc, gr API, vsh, phi, sw)
-SHALE = ("shale", 2400.0, 1200.0, 2.35, 95.0, 0.85, 0.12, 1.00)
-GAS_SAND = ("gas sand", 2100.0, 1300.0, 2.10, 25.0, 0.10, 0.28, 0.20)
-BRINE_SAND = ("brine sand", 2500.0, 1450.0, 2.30, 30.0, 0.12, 0.26, 1.00)
-HARD_STREAK = ("cemented sand", 3000.0, 1800.0, 2.45, 40.0, 0.15, 0.08, 1.00)
+# Matrix and fluid densities (g/cc) used to derive porosity; see `density_porosity`.
+RHO_CLAY, RHO_QUARTZ = 2.58, 2.65
+RHO_BRINE, RHO_GAS = 1.09, 0.25
+
+
+def density_porosity(rho, rho_matrix, rho_fluid):
+    """Standard density porosity: phi = (rho_ma - rho_b) / (rho_ma - rho_fl).
+
+    Deriving porosity this way keeps the demo well internally consistent —
+    PHI and RHOB tell the same story — instead of carrying an invented
+    porosity curve that the density contradicts.
+    """
+    return (rho_matrix - rho) / (rho_matrix - rho_fluid)
+
+
+# (name, vp m/s, vs m/s, rho g/cc, gr API, vsh, rho_matrix, rho_fluid, sw)
+#
+# The elastic values for shale and gas sand are fixed by the validated AVO
+# cross-check in SPEC.md section 4.1 and must not be changed.  They describe a
+# shallow, poorly consolidated section, so they are softer than a consolidated
+# quartz/brine rock physics model would predict at these porosities — some
+# layers therefore plot below the suspension bound on the Rock Physics page,
+# which is the diagnostic doing its job rather than a defect.
+SHALE = ("shale", 2400.0, 1200.0, 2.35, 95.0, 0.85, RHO_CLAY, RHO_BRINE, 1.00)
+GAS_SAND = ("gas sand", 2100.0, 1300.0, 2.10, 25.0, 0.10, RHO_QUARTZ, RHO_GAS, 0.20)
+BRINE_SAND = ("brine sand", 2500.0, 1450.0, 2.30, 30.0, 0.12, RHO_QUARTZ, RHO_BRINE, 1.00)
+HARD_STREAK = ("cemented sand", 3000.0, 1800.0, 2.45, 40.0, 0.15, RHO_QUARTZ, RHO_BRINE, 1.00)
 
 #: (top_md, base_md, layer) — depths in metres.
 LAYERS = [
@@ -43,7 +65,8 @@ def build_logs(step=STEP, layers=LAYERS, noise=True, seed=NOISE_SEED):
 
     curves = {k: np.full(depth.size, np.nan) for k in ("VP", "VS", "RHOB", "GR", "VSH", "PHI", "SW")}
     for z_top, z_base, layer in layers:
-        _, vp, vs, rho, gr, vsh, phi, sw = layer
+        _, vp, vs, rho, gr, vsh, rho_ma, rho_fl, sw = layer
+        phi = density_porosity(rho, rho_ma, rho_fl)
         sel = (depth >= z_top) & (depth < z_base)
         for key, value in zip(curves, (vp, vs, rho, gr, vsh, phi, sw)):
             curves[key][sel] = value
