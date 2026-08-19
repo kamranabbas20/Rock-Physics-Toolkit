@@ -1,0 +1,9 @@
+streamlit
+numpy
+scipy
+pandas
+lasio
+plotly
+openpyxl
+segyio        # optional gather export
+pytest        # dev
