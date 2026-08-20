@@ -23,6 +23,7 @@ __all__ = [
     "reflector_avo",
     "background_trend",
     "BackgroundTrend",
+    "compare_cases",
 ]
 
 #: Class labels in display order.
@@ -213,6 +214,7 @@ def reflector_avo(
     threshold=0.01,
     a_tol=0.02,
     third_term=False,
+    samples=None,
 ):
     """Fit and classify every reflector in a well.
 
@@ -236,7 +238,12 @@ def reflector_avo(
         reflectors.  Interface ``i`` is labelled with sample ``i``.
     threshold : float
         Minimum peak ``|R|`` across angles for an interface to count as a
-        reflector.  Use 0 to keep every non-trivial interface.
+        reflector.  Use 0 to keep every non-trivial interface.  Ignored when
+        ``samples`` is given.
+    samples : array_like, optional
+        Explicit interface indices to fit, bypassing detection.  Pass the same
+        indices for every fluid case so the cases are compared at identical
+        interfaces rather than at whatever each one happens to detect.
     a_tol : float
         Intercept tolerance band passed to :func:`classify`.
     third_term : bool
@@ -263,7 +270,12 @@ def reflector_avo(
     if rc.shape[1] != angles.size:
         raise ValueError("rc must have one column per angle")
 
-    idx = _detect_reflectors(rc, threshold)
+    if samples is None:
+        idx = _detect_reflectors(rc, threshold)
+    else:
+        idx = np.unique(np.asarray(samples, dtype=int))
+        if idx.size and (idx.min() < 0 or idx.max() >= rc.shape[0]):
+            raise ValueError("samples fall outside the reflection-coefficient matrix")
     cols = {"sample": idx.astype(int)}
 
     if depth is not None:
@@ -307,3 +319,68 @@ def reflector_avo(
         )
 
     return pd.DataFrame(cols)
+
+
+def compare_cases(tables, reference=None, a_tol=0.02):
+    """Merge per-fluid-case reflector tables into one comparison table.
+
+    Parameters
+    ----------
+    tables : dict
+        ``{case_name: DataFrame}``, each from :func:`reflector_avo`.  Fit the
+        cases at the same interfaces (see ``reflector_avo``'s ``samples``) so
+        the rows line up.
+    reference : str, optional
+        Case the fluid vector is measured *from*.  Defaults to ``'brine'``
+        when present, otherwise the first case given.
+    a_tol : float
+        Intercept band, used only to re-report the reference classification.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per reflector with ``A_<case>``, ``B_<case>`` and
+        ``class_<case>`` for every case, the fluid vector from the reference
+        case to each other case (``dA_<case>``, ``dB_<case>``), the length of
+        the largest such vector, and ``class_changed`` — whether the AVO class
+        is the same in every case.
+    """
+    if not tables:
+        raise ValueError("no case tables given")
+    names = list(tables)
+    if reference is None:
+        reference = "brine" if "brine" in names else names[0]
+    if reference not in tables:
+        raise ValueError(f"reference case {reference!r} is not among {names}")
+
+    keys = [c for c in ("sample", "depth", "twt") if c in tables[reference].columns]
+    merged = tables[reference][keys].copy()
+
+    for case in names:
+        table = tables[case].set_index("sample")
+        idx = merged["sample"].to_numpy()
+        for src, dst in (("A_shuey", f"A_{case}"), ("B_shuey", f"B_{case}"),
+                         ("avo_class", f"class_{case}")):
+            merged[dst] = table[src].reindex(idx).to_numpy()
+
+    for case in names:
+        if case == reference:
+            continue
+        merged[f"dA_{case}"] = merged[f"A_{case}"] - merged[f"A_{reference}"]
+        merged[f"dB_{case}"] = merged[f"B_{case}"] - merged[f"B_{reference}"]
+
+    others = [c for c in names if c != reference]
+    if others:
+        lengths = np.vstack([
+            np.hypot(merged[f"dA_{c}"].to_numpy(float), merged[f"dB_{c}"].to_numpy(float))
+            for c in others
+        ])
+        merged["fluid_vector"] = np.nanmax(lengths, axis=0)
+    else:
+        merged["fluid_vector"] = 0.0
+
+    class_cols = [f"class_{c}" for c in names]
+    merged["class_changed"] = merged[class_cols].nunique(axis=1) > 1
+    merged.attrs["reference_case"] = reference
+    merged.attrs["cases"] = names
+    return merged

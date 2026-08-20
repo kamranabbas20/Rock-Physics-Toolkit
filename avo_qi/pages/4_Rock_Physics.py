@@ -43,14 +43,22 @@ from avo_qi.core.rockphysics import (  # noqa: E402
 from avo_qi.ui import add_derived_curves, page_setup, require_well, sidebar  # noqa: E402
 
 page_setup("Rock Physics", icon=":rock:")
-sidebar(show_wavelet=False, show_angles=False, show_classifier=False)
+settings = sidebar(show_wavelet=False, show_angles=False, show_classifier=False)
 well = require_well()
 
-df = add_derived_curves(well.complete().reset_index(drop=True))
+df = add_derived_curves(well.complete(settings.case).reset_index(drop=True))
 vp = df["VP"].to_numpy(float)
 vs = df["VS"].to_numpy(float)
 rho = df["RHOB"].to_numpy(float)
 has_phi = "PHI" in df.columns and np.isfinite(df["PHI"]).any()
+
+if well.has_fluid_cases:
+    st.info(
+        f"Showing the **{settings.case}** case. The pore fluid below follows the "
+        "case name where it can, so the bounds are drawn for the fluid the logs "
+        "were substituted to.",
+        icon=":material/water_drop:",
+    )
 
 st.caption(
     "Model overlays for diagnosing the well — mixture bounds, empirical trends "
@@ -67,7 +75,13 @@ with st.expander("Model parameters", expanded=True):
     m2 = c1.selectbox("Mineral 2", mineral_names, index=mineral_names.index("clay"))
     frac1 = c2.slider(f"Fraction {m1}", 0.0, 1.0, 1.0, 0.05,
                       help=f"The remainder is {m2}.")
-    fluid_name = c2.selectbox("Pore fluid", list(FLUIDS), index=0)
+    # A substituted case names its own pore fluid, so follow it by default.
+    fluid_options = list(FLUIDS)
+    case_fluid = settings.case if settings.case in fluid_options else "brine"
+    fluid_name = c2.selectbox(
+        "Pore fluid", fluid_options, index=fluid_options.index(case_fluid),
+        help="Defaults to the fluid named by the selected case in the sidebar.",
+    )
     phi_c = c3.slider("Critical porosity φc", 0.20, 0.50, 0.36, 0.01)
     pressure_mpa = c3.slider("Effective pressure (MPa)", 1.0, 60.0, 10.0, 1.0)
     n_default = float(coordination_number(phi_c))

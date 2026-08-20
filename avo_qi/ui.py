@@ -22,6 +22,14 @@ from avo_qi.io.loader import depth_to_twt, read_well, resample_to_time, standard
 
 DEMO_WELL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data", "demo_well.las")
 
+#: Fixed colours per fluid case, shared by every plot in the app.
+CASE_COLOURS = {
+    "in situ": "#333333",
+    "brine": "#1f77b4",
+    "oil": "#2ca02c",
+    "gas": "#d62728",
+}
+
 #: Fixed colours per AVO class, shared by every plot in the app.
 CLASS_COLOURS = {
     "I": "#1f77b4",
@@ -56,6 +64,7 @@ class Settings:
     ormsby: tuple = (5.0, 10.0, 60.0, 80.0)
     wavelet_length: float = 0.128
     threshold: float = 0.01
+    case: str = None
     near: tuple = (0.0, 12.0)
     mid: tuple = (13.0, 26.0)
     far: tuple = (27.0, 40.0)
@@ -87,7 +96,10 @@ def set_well(well, raw=None, units=None):
     st.session_state["well"] = well
     st.session_state["raw_df"] = raw
     st.session_state["raw_units"] = units or {}
-    st.session_state.pop("time_well", None)
+    st.session_state.pop("time_well_cache", None)
+    settings = st.session_state.get("settings")
+    if settings is not None:
+        settings.case = well.active_case if well is not None else None
 
 
 def load_demo_well():
@@ -116,19 +128,36 @@ def load_uploaded_well(uploaded, mapping=None, depth_unit="m"):
     return well
 
 
-def time_well(well, settings):
-    """Resample the well onto a regular two-way-time grid, cached in state."""
-    key = ("time_well", id(well), settings.dt, settings.t0)
-    cached = st.session_state.get("time_well")
-    if cached is not None and cached[0] == key:
-        return cached[1]
+def time_well(well, settings, case=None):
+    """Resample one fluid case onto a regular two-way-time grid.
 
-    df = well.complete().reset_index(drop=True)
-    if df.empty:
+    The time axis is always integrated from the **active** case's Vp, never
+    from the requested case's.  Every case then lands on the same grid, so
+    sample *i* is the same interface in all of them — which is what makes a
+    cross-case comparison meaningful.  Re-timing the well per fluid scenario
+    would silently misalign the reflectors.
+    """
+    case = case or well.active_case
+    key = ("time_well", id(well), settings.dt, settings.t0, well.active_case, case)
+    cache = st.session_state.setdefault("time_well_cache", {})
+    if key in cache:
+        return cache[key]
+
+    reference = well.frame(well.active_case)
+    keep = reference[["VP", "VS", "RHOB"]].notna().all(axis=1)
+    reference = reference[keep].reset_index(drop=True)
+    if reference.empty:
         raise ValueError("the well has no samples with Vp, Vs and RHOB all present")
-    twt = depth_to_twt(df["DEPTH"].to_numpy(float), df["VP"].to_numpy(float), t0=settings.t0)
-    out = resample_to_time(df, twt, dt=settings.dt)
-    st.session_state["time_well"] = (key, out)
+
+    twt = depth_to_twt(reference["DEPTH"].to_numpy(float),
+                       reference["VP"].to_numpy(float), t0=settings.t0)
+
+    target = well.frame(case)[keep.to_numpy()].reset_index(drop=True)
+    out = resample_to_time(target, twt, dt=settings.dt)
+
+    if len(cache) > 24:                      # bounded: a handful of cases only
+        cache.clear()
+    cache[key] = out
     return out
 
 
@@ -164,6 +193,19 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
         if st.button("Load demo well", use_container_width=True):
             load_demo_well()
             st.rerun()
+
+        if well is not None and well.has_fluid_cases:
+            st.header("Fluid case")
+            options = list(well.cases)
+            current = s.case if s.case in options else well.active_case
+            s.case = st.selectbox(
+                "Substituted case", options, index=options.index(current),
+                help="Logs substituted upstream. The two-way-time axis always "
+                     "comes from the well's in-situ case so the cases stay "
+                     "aligned sample for sample.",
+            )
+        elif well is not None:
+            s.case = well.active_case
 
         st.header("Time axis")
         s.dt = st.number_input("Sample rate dt (s)", 0.0002, 0.008, float(s.dt), 0.0002,
@@ -427,3 +469,73 @@ def add_derived_curves(df, chi_deg=None):
     if chi_deg is not None:
         out["EEI"] = eei(vp, vs, rho, chi_deg)
     return out
+
+
+def case_colour(case):
+    """Stable colour for a fluid case, falling back for unrecognised names."""
+    return CASE_COLOURS.get(case, "#7f7f7f")
+
+
+def fluid_vector_crossplot(comparison, reference, targets, a_tol=0.02, height=640):
+    """A-B crossplot of every fluid case, with the fluid vectors drawn.
+
+    Each reflector appears once per case; an arrow runs from the reference
+    case to each target case, so the length and direction of the fluid effect
+    are readable directly off the intercept-gradient plane.
+    """
+    cases = [reference] + [c for c in targets if c != reference]
+    a_vals = np.concatenate([comparison[f"A_{c}"].to_numpy(float) for c in cases])
+    b_vals = np.concatenate([comparison[f"B_{c}"].to_numpy(float) for c in cases])
+    a_lim = max(float(np.nanmax(np.abs(a_vals))) * 1.3, 0.25)
+    b_lim = max(float(np.nanmax(np.abs(b_vals))) * 1.3, 0.5)
+
+    fig = go.Figure()
+    regions = [
+        ("I", a_tol, a_lim, -b_lim, 0.0),
+        ("IIp", 0.0, a_tol, -b_lim, 0.0),
+        ("IIn", -a_tol, 0.0, -b_lim, 0.0),
+        ("III", -a_lim, -a_tol, -b_lim, 0.0),
+        ("IV", -a_lim, 0.0, 0.0, b_lim),
+    ]
+    for label, x0, x1, y0, y1 in regions:
+        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, layer="below",
+                      line=dict(width=0), fillcolor=CLASS_COLOURS[label], opacity=0.08)
+        fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2, text=label, showarrow=False,
+                           font=dict(size=12, color=CLASS_COLOURS[label]), opacity=0.7)
+    fig.add_hline(y=0, line=dict(color="#666", width=1))
+    fig.add_vline(x=0, line=dict(color="#666", width=1))
+
+    label_col = "depth" if "depth" in comparison.columns else "sample"
+    for case in cases:
+        fig.add_trace(go.Scatter(
+            x=comparison[f"A_{case}"], y=comparison[f"B_{case}"], mode="markers",
+            name=case,
+            marker=dict(size=11 if case == reference else 9, color=case_colour(case),
+                        line=dict(width=1, color="#fff"),
+                        symbol="circle" if case == reference else "diamond"),
+            text=[f"{label_col} {v:.4g} — class {c}"
+                  for v, c in zip(comparison[label_col], comparison[f"class_{case}"])],
+            hovertemplate="A %{x:.4f}<br>B %{y:.4f}<br>%{text}<extra></extra>",
+        ))
+
+    # One arrow per reflector per target case: the fluid vector itself.
+    for case in cases[1:]:
+        for _, row in comparison.iterrows():
+            if not np.all(np.isfinite([row[f"A_{reference}"], row[f"B_{reference}"],
+                                       row[f"A_{case}"], row[f"B_{case}"]])):
+                continue
+            fig.add_annotation(
+                x=row[f"A_{case}"], y=row[f"B_{case}"],
+                ax=row[f"A_{reference}"], ay=row[f"B_{reference}"],
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=2, arrowsize=1.1, arrowwidth=1.4,
+                arrowcolor=case_colour(case), opacity=0.75,
+            )
+
+    fig.update_layout(
+        xaxis_title="Intercept A", yaxis_title="Gradient B",
+        xaxis_range=[-a_lim, a_lim], yaxis_range=[-b_lim, b_lim],
+        height=height, margin=dict(l=60, r=20, t=40, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    return fig

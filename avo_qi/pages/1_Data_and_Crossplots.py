@@ -16,6 +16,7 @@ from avo_qi.core.attributes import eei  # noqa: E402
 from avo_qi.io.loader import CANONICAL, guess_mnemonics, standardise  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     add_derived_curves,
+    case_colour,
     crossplot,
     get_well,
     load_demo_well,
@@ -94,7 +95,15 @@ if missing:
 
 # ----------------------------------------------------------- attributes ----
 chi = st.session_state.get("chi_deg", 0.0)
-df = add_derived_curves(well.complete().reset_index(drop=True))
+df = add_derived_curves(well.complete(settings.case).reset_index(drop=True))
+
+if well.has_fluid_cases:
+    st.info(
+        f"This well carries **{len(well.cases)} fluid cases** — "
+        f"{', '.join(well.cases)}. Showing **{settings.case}**; switch in the "
+        "sidebar, or overlay them all on the crossplots below.",
+        icon=":material/water_drop:",
+    )
 
 st.divider()
 st.subheader("Log tracks")
@@ -115,8 +124,35 @@ st.subheader("QI crossplots")
 
 colour_options = [c for c in ("DEPTH", "GR", "VSH", "PHI", "SW", "VPVS", "POISSON", "FACIES")
                   if c in df.columns]
-colour = st.selectbox("Colour by", colour_options,
+c1, c2 = st.columns([2, 1])
+colour = c1.selectbox("Colour by", colour_options,
                       index=colour_options.index("GR") if "GR" in colour_options else 0)
+overlay_cases = c2.toggle(
+    "Overlay all fluid cases", value=False, disabled=not well.has_fluid_cases,
+    help="Plot every substituted case together, coloured by case instead of by curve.",
+) if well.has_fluid_cases else False
+
+
+def qi_plot(x, y, title, log_x=False):
+    """One crossplot, either coloured by a curve or split by fluid case."""
+    if not overlay_cases:
+        return crossplot(df, x, y, colour, title=title, log_x=log_x)
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+    for case in well.cases:
+        sub = add_derived_curves(well.complete(case).reset_index(drop=True))
+        fig.add_trace(go.Scatter(
+            x=sub[x], y=sub[y], mode="markers", name=case,
+            marker=dict(size=4, opacity=0.7, color=case_colour(case)),
+            hovertemplate=f"{x}: %{{x:.4g}}<br>{y}: %{{y:.4g}}<extra>{case}</extra>",
+        ))
+    fig.update_layout(title=title, xaxis_title=x, yaxis_title=y, height=520,
+                      margin=dict(l=60, r=20, t=50, b=50),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    if log_x:
+        fig.update_xaxes(type="log")
+    return fig
 
 tab_ai, tab_lmr, tab_ipis, tab_pr, tab_eei = st.tabs(
     ["AI vs Vp/Vs", "λρ – μρ (LMR)", "IP – IS", "Poisson vs AI", "EEI"]
@@ -124,7 +160,7 @@ tab_ai, tab_lmr, tab_ipis, tab_pr, tab_eei = st.tabs(
 
 with tab_ai:
     st.plotly_chart(
-        crossplot(df, "AI", "VPVS", colour, title="Vp/Vs vs acoustic impedance"),
+        qi_plot("AI", "VPVS", title="Vp/Vs vs acoustic impedance"),
         use_container_width=True,
     )
     st.caption(
@@ -133,20 +169,20 @@ with tab_ai:
 
 with tab_lmr:
     st.plotly_chart(
-        crossplot(df, "LAMBDA_RHO", "MU_RHO", colour, title="LMR: μρ vs λρ"),
+        qi_plot("LAMBDA_RHO", "MU_RHO", title="LMR: μρ vs λρ"),
         use_container_width=True,
     )
     st.caption("λρ is the fluid-sensitive axis; μρ responds to the rock frame.")
 
 with tab_ipis:
     st.plotly_chart(
-        crossplot(df, "AI", "SI", colour, title="S-impedance vs P-impedance"),
+        qi_plot("AI", "SI", title="S-impedance vs P-impedance"),
         use_container_width=True,
     )
 
 with tab_pr:
     st.plotly_chart(
-        crossplot(df, "AI", "POISSON", colour, title="Poisson's ratio vs acoustic impedance"),
+        qi_plot("AI", "POISSON", title="Poisson's ratio vs acoustic impedance"),
         use_container_width=True,
     )
 

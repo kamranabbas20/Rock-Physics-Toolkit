@@ -28,6 +28,10 @@ __all__ = [
     "depth_to_twt",
     "resample_to_time",
     "WellData",
+    "FLUID_CASES",
+    "FLUID_CASE_ALIASES",
+    "detect_fluid_cases",
+    "case_column",
 ]
 
 #: The curves ``core/`` needs, plus the optional ones the crossplots colour by.
@@ -50,6 +54,34 @@ MNEMONIC_MAP = {
 #: Mnemonics that carry slowness rather than velocity.
 SONIC_MNEMONICS = {"DT", "DTC", "DTCO", "AC", "SONIC", "DTS", "DTSM", "DTSH", "ACS"}
 
+#: Canonical fluid-case names, in the order they are offered in the UI.
+FLUID_CASES = ["in situ", "brine", "oil", "gas"]
+
+#: Suffixes seen on fluid-substituted curves, e.g. ``VP_BR``, ``VS_GAS``,
+#: ``RHOB_OIL``.  Substitution itself happens upstream — this toolkit only
+#: recognises the results, it never computes them.
+FLUID_CASE_ALIASES = {
+    "in situ": ["INSITU", "IN_SITU", "IS", "INSIT", "ORIG", "ORIGINAL", "INSITU1"],
+    "brine": ["BR", "BRINE", "BRI", "WET", "W", "WATER", "SW100", "SW1", "B"],
+    "oil": ["OIL", "OI", "O"],
+    "gas": ["GAS", "GS", "G"],
+}
+
+#: The three curves that together make up one fluid case.
+_CASE_CURVES = ("VP", "VS", "RHOB")
+
+#: Prefixes accepted for each case curve when splitting off a fluid suffix.
+#: Longest first, so ``RHOB_GAS`` matches ``RHOB`` before ``RHO``.
+_CASE_PREFIXES = {
+    "VP": ["VP", "DTCO", "DTC", "DT", "VELP", "PVEL"],
+    "VS": ["VS", "DTSM", "DTS", "VELS", "SVEL"],
+    "RHOB": ["RHOB", "RHOZ", "RHO", "DENS", "DEN"],
+}
+
+_ALIAS_TO_CASE = {
+    alias: case for case, aliases in FLUID_CASE_ALIASES.items() for alias in aliases
+}
+
 _FT_PER_M = 3.280839895013123
 
 #: Unit spellings that already are the core unit, so no note is worth raising.
@@ -63,6 +95,64 @@ def _clean_unit(unit):
 
 def _norm(name):
     return str(name).strip().upper()
+
+
+def _split_fluid_suffix(name):
+    """Split a mnemonic into ``(curve, case)``, or ``(None, None)``.
+
+    ``VP_BR`` -> ``("VP", "brine")``; ``VP`` -> ``("VP", None)``.  A suffix is
+    only accepted when it is a *known* fluid token, which is what keeps
+    ``VSH`` from being read as a shear log for some fluid called "H".
+    """
+    upper = _norm(name)
+    for curve, prefixes in _CASE_PREFIXES.items():
+        for prefix in prefixes:
+            if upper == prefix:
+                return curve, None
+            if not upper.startswith(prefix):
+                continue
+            rest = upper[len(prefix):].lstrip("_-. ")
+            if not rest or rest == upper[len(prefix):]:
+                # No delimiter at all: only accept a bare, known fluid token
+                # (VPGAS), never an arbitrary tail (VSH).
+                rest = upper[len(prefix):]
+            case = _ALIAS_TO_CASE.get(rest)
+            if case is not None:
+                return curve, case
+    return None, None
+
+
+def case_column(curve, case):
+    """Column name a fluid case's curve is stored under in a standardised well.
+
+    The active case always occupies the plain ``VP``/``VS``/``RHOB`` columns;
+    every case additionally gets its own suffixed column, e.g. ``VP_GAS``.
+    """
+    return f"{curve}_{str(case).upper().replace(' ', '')}"
+
+
+def detect_fluid_cases(columns):
+    """Group fluid-substituted curves by case.
+
+    Returns
+    -------
+    dict
+        ``{case_name: {"VP": col, "VS": col, "RHOB": col}}``, keeping only
+        cases that carry all three curves.  Curves with no fluid suffix are
+        collected under ``"in situ"``.
+    """
+    found = {}
+    for col in columns:
+        curve, case = _split_fluid_suffix(col)
+        if curve is None:
+            continue
+        case = case or "in situ"
+        slot = found.setdefault(case, {})
+        slot.setdefault(curve, col)      # first match wins, per priority order
+
+    complete = {c: v for c, v in found.items() if all(k in v for k in _CASE_CURVES)}
+    order = {name: i for i, name in enumerate(FLUID_CASES)}
+    return dict(sorted(complete.items(), key=lambda kv: order.get(kv[0], 99)))
 
 
 def guess_mnemonics(columns):
@@ -190,32 +280,63 @@ def _auto_density_unit(values, declared):
 
 @dataclass
 class WellData:
-    """A standardised well: canonical curve names, canonical units."""
+    """A standardised well: canonical curve names, canonical units.
+
+    A well may carry several **fluid cases** — in situ plus brine, oil and gas
+    logs substituted upstream.  The active case occupies the plain
+    ``VP``/``VS``/``RHOB`` columns; every case also keeps its own suffixed
+    columns, so :meth:`frame` can swap between them without re-reading.
+    """
 
     df: pd.DataFrame
     mapping: dict = field(default_factory=dict)
     units: dict = field(default_factory=dict)
     notes: list = field(default_factory=list)
     name: str = "well"
+    cases: list = field(default_factory=list)
+    active_case: str = "in situ"
 
     @property
     def depth(self):
         return self.df["DEPTH"].to_numpy(dtype=float)
 
-    def logs(self):
-        """``(vp, vs, rho)`` as float arrays in core units."""
+    @property
+    def has_fluid_cases(self):
+        """True when the well carries more than one fluid case."""
+        return len(self.cases) > 1
+
+    def _resolve(self, case):
+        if case is None:
+            return self.active_case
+        if self.cases and case not in self.cases:
+            raise ValueError(f"case {case!r} is not in this well; have {self.cases}")
+        return case
+
+    def frame(self, case=None):
+        """The well table with ``VP``/``VS``/``RHOB`` set to one fluid case."""
+        case = self._resolve(case)
+        out = self.df.copy()
+        for curve in _CASE_CURVES:
+            col = case_column(curve, case)
+            if col in out.columns:
+                out[curve] = out[col]
+        return out
+
+    def logs(self, case=None):
+        """``(vp, vs, rho)`` as float arrays in core units, for one case."""
+        frame = self.frame(case)
         return (
-            self.df["VP"].to_numpy(dtype=float),
-            self.df["VS"].to_numpy(dtype=float),
-            self.df["RHOB"].to_numpy(dtype=float),
+            frame["VP"].to_numpy(dtype=float),
+            frame["VS"].to_numpy(dtype=float),
+            frame["RHOB"].to_numpy(dtype=float),
         )
 
-    def complete(self):
-        """Rows where Vp, Vs and RHOB are all present."""
-        return self.df.dropna(subset=["VP", "VS", "RHOB"])
+    def complete(self, case=None):
+        """Rows where Vp, Vs and RHOB are all present, for one case."""
+        return self.frame(case).dropna(subset=["VP", "VS", "RHOB"])
 
 
-def standardise(df, mapping=None, units=None, depth_unit="m", name="well"):
+def standardise(df, mapping=None, units=None, depth_unit="m", name="well", case=None):
     """Rename to canonical mnemonics and convert every curve to core units.
 
     Parameters
@@ -241,46 +362,75 @@ def standardise(df, mapping=None, units=None, depth_unit="m", name="well"):
     notes = []
     out_units = {}
 
-    for canonical, source in mapping.items():
-        if source is None or source not in df.columns:
-            continue
+    def convert(canonical, source, label=None):
+        """Read one source column and put it in core units, noting any change."""
+        label = label or canonical
         values = pd.to_numeric(df[source], errors="coerce").to_numpy(dtype=float)
         declared = str(units.get(_norm(source), "") or "").strip()
         src_upper = _norm(source)
 
         if canonical in ("VP", "VS"):
             is_sonic = any(src_upper.startswith(m) for m in SONIC_MNEMONICS) or (
-                "us/" in declared.lower().replace("µ", "u")
+                "us/" in declared.lower().replace("\u00b5", "u")
             )
             if is_sonic:
                 unit = declared if "/" in declared else "us/ft"
-                unit = unit.replace("µ", "u").replace("USEC", "us")
+                unit = unit.replace("\u00b5", "u").replace("USEC", "us")
                 values = sonic_to_velocity(values, unit=unit)
-                notes.append(f"{canonical}: converted sonic {source} ({unit}) to m/s")
+                notes.append(f"{label}: converted sonic {source} ({unit}) to m/s")
             else:
                 unit = _auto_velocity_unit(values, declared)
                 values = velocity_to_si(values, unit=unit)
                 if _clean_unit(unit) not in _NATIVE_VELOCITY:
-                    notes.append(f"{canonical}: converted {source} from {unit} to m/s")
-            out_units[canonical] = "m/s"
+                    notes.append(f"{label}: converted {source} from {unit} to m/s")
+            return values, "m/s"
 
-        elif canonical == "RHOB":
+        if canonical == "RHOB":
             unit = _auto_density_unit(values, declared)
             values = density_to_gcc(values, unit=unit)
             if _clean_unit(unit) not in _NATIVE_DENSITY:
-                notes.append(f"RHOB: converted {source} from {unit} to g/cc")
-            out_units[canonical] = "g/cc"
+                notes.append(f"{label}: converted {source} from {unit} to g/cc")
+            return values, "g/cc"
 
-        elif canonical == "DEPTH":
+        if canonical == "DEPTH":
             if str(depth_unit).lower().startswith("f"):
                 values = values / _FT_PER_M
                 notes.append("DEPTH: converted from ft to m")
-            out_units[canonical] = "m"
+            return values, "m"
 
-        else:
-            out_units[canonical] = declared
+        return values, declared
 
-        out[canonical] = values
+    for canonical, source in mapping.items():
+        if source is None or source not in df.columns:
+            continue
+        out[canonical], out_units[canonical] = convert(canonical, source)
+
+    # Fluid-substituted cases (VP_BR, VS_OIL, RHOB_GAS, ...).  Substitution is
+    # done upstream; all that happens here is recognising and standardising the
+    # results so every page can switch between them.
+    detected = detect_fluid_cases(df.columns)
+    for case_name, curves in detected.items():
+        for curve, source in curves.items():
+            col = case_column(curve, case_name)
+            out[col], out_units[col] = convert(curve, source, label=f"{curve} [{case_name}]")
+
+    if detected:
+        if case is not None and case not in detected:
+            raise ValueError(
+                f"case {case!r} is not in this well; found {sorted(detected)}"
+            )
+        active = case or ("in situ" if "in situ" in detected else next(iter(detected)))
+        for curve in _CASE_CURVES:
+            col = case_column(curve, active)
+            if col in out.columns:
+                out[curve] = out[col]
+                out_units[curve] = out_units.get(col, "")
+        if len(detected) > 1:
+            notes.append(
+                f"fluid cases found: {', '.join(detected)} — active case is {active!r}"
+            )
+    else:
+        active = "in situ"
 
     missing = [c for c in ("VP", "VS", "RHOB") if c not in out.columns]
     if missing:
@@ -292,7 +442,7 @@ def standardise(df, mapping=None, units=None, depth_unit="m", name="well"):
     ordered = [c for c in CANONICAL if c in out.columns]
     out = out[ordered + [c for c in out.columns if c not in ordered]]
     return WellData(df=out.reset_index(drop=True), mapping=mapping, units=out_units,
-                    notes=notes, name=name)
+                    notes=notes, name=name, cases=list(detected), active_case=active)
 
 
 def depth_to_twt(depth, vp, t0=0.0):

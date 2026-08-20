@@ -178,3 +178,32 @@ class TestRockPhysicsPage:
         at = run_page(os.path.join(PAGES, "4_Rock_Physics.py"), with_well=False)
         assert not at.exception
         assert at.warning
+
+
+class TestFluidCasesInTheApp:
+    """The demo well carries four cases; the pages must pick them up."""
+
+    def test_sidebar_offers_the_case_selector(self, crossplots_page):
+        labels = {sb.label for sb in crossplots_page.selectbox}
+        assert "Substituted case" in labels
+
+    def test_crossplots_page_reports_the_cases(self, crossplots_page):
+        assert any("fluid cases" in i.value for i in crossplots_page.info)
+
+    def test_gather_page_builds_a_difference_gather(self, gather_page):
+        labels = {m.label for m in gather_page.metric}
+        assert "Peak |difference|" in labels
+
+    def test_avo_page_compares_every_case(self, avo_page):
+        labels = {m.label for m in avo_page.metric}
+        assert "Reflectors compared" in labels
+        assert "Change class with fluid" in labels
+        assert "Largest fluid vector" in labels
+
+    def test_avo_page_lists_the_class_changes(self, avo_page):
+        headers = {h.value for h in avo_page.subheader}
+        assert "Reflectors that change class" in headers
+        assert "Amplitude vs angle, by fluid case" in headers
+
+    def test_rock_physics_page_follows_the_case(self, rock_physics_page):
+        assert any("case" in i.value for i in rock_physics_page.info)

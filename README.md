@@ -20,13 +20,14 @@ streamlit run avo_qi/app.py
 ```
 
 Click **Load demo well** in the sidebar to work with the bundled three-layer
-model, or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
+model — which carries brine, oil and gas cases alongside its in-situ logs —
+or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 
 ## Pages
 
 | Page | What it does |
 |------|--------------|
-| **Data & Crossplots** | Upload and mnemonic remap, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
+| **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
 | **AVO Classification** | Per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, and per-reflector amplitude-vs-angle curves. |
 | **Rock Physics** | Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus dry-frame Hertz-Mindlin soft-sand, stiff-sand and critical-porosity models. |
@@ -55,10 +56,42 @@ avo_qi/
 assemble the reflector table. It imports no Streamlit and no plotting library,
 so it stays unit-testable on its own.
 
+## Fluid cases
+
+A well that arrives with substitution already done — `VP_BR`, `VS_OIL`,
+`RHOB_GAS` and friends — is recognised automatically and every case becomes
+selectable in the sidebar. Recognised suffixes cover brine (`_BR`, `_BRINE`,
+`_WET`, ...), oil, gas and in situ, with or without the underscore; a case is
+only kept when all three of Vp, Vs and RHOB are present for it. Curves like
+`VSH` are never mistaken for a shear log, because a suffix has to be a known
+fluid token.
+
+What the cases unlock:
+
+- **Data & Crossplots** — overlay every case on the QI crossplots to see the
+  fluid vector in AI–Vp/Vs space.
+- **Synthetic Gather** — a gather per case, a difference gather between any
+  two, and their full stacks superimposed.
+- **AVO Classification** — every reflector fitted in every case, an A–B
+  crossplot with an arrow along each reflector's fluid vector, a table of the
+  class each reflector takes in each case, and a list of the reflectors whose
+  class changes with fluid at all.
+- **Rock Physics** — the pore fluid used for the bounds follows the case.
+
+One thing matters more than it looks: the **two-way-time axis is integrated
+once, from the well's in-situ case, and every other case is resampled onto
+that same grid.** Letting each case integrate its own Vp gives each one a
+different time axis, so sample *i* is a different interface in each — the
+reflectors silently misalign, and only the shallowest one, above the first
+reservoir, still lines up. `reflector_avo` takes an explicit `samples`
+argument for the same reason, so all cases are fitted at identical
+interfaces rather than at whatever each happens to detect.
+
 ## No fluid substitution
 
 There is no Gassmann and no Batzle-Wang anywhere in this toolkit, by design —
-the input well is taken as-is. The Rock Physics page stays inside that
+the input well is taken as-is, fluid cases included. The toolkit recognises
+substituted curves; it never produces them. The Rock Physics page stays inside that
 boundary: the Hashin-Shtrikman and Voigt-Reuss-Hill bounds are computed on a
 mineral-plus-fluid mixture, so they bracket the **saturated** rock directly
 without a substitution step, and the granular models (Hertz-Mindlin, soft
@@ -96,6 +129,8 @@ pytest
 Zoeppritz vs Aki-Richards agreement, normal-incidence equivalence to the AI
 reflectivity, Shuey A/B recovery, the classifier truth table, the three-layer
 gather signature, wavelet zero-phase behaviour, and both-fit consistency.
+`test_fluid_cases.py` covers suffix detection (including the `VSH` trap), the
+shared time axis, and the cross-case comparison.
 `test_rockphysics.py` covers the diagnostic models: bound ordering
 (Reuss ≤ HS⁻ ≤ HS⁺ ≤ Voigt), end-member collapse, the frame models bracketing
 each other and meeting at the Hertz-Mindlin pack, and the empirical trends.

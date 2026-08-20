@@ -13,7 +13,11 @@ import numpy as np  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from avo_qi.core.avo import background_trend, reflector_avo  # noqa: E402
+from avo_qi.core.avo import (  # noqa: E402
+    background_trend,
+    compare_cases,
+    reflector_avo,
+)
 from avo_qi.core.reflectivity import (  # noqa: E402
     aki_richards_rpp,
     reflectivity_series,
@@ -24,6 +28,8 @@ from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     ab_crossplot,
     build_wavelet,
+    case_colour,
+    fluid_vector_crossplot,
     gather_figure,
     page_setup,
     require_well,
@@ -36,7 +42,7 @@ settings = sidebar()
 well = require_well()
 
 try:
-    tw = time_well(well, settings)
+    tw = time_well(well, settings, settings.case)
 except ValueError as exc:
     st.error(str(exc))
     st.stop()
@@ -210,3 +216,116 @@ markers = table[["twt", "avo_class"]] if "twt" in table.columns else None
 st.plotly_chart(gather_figure(gather, angles, twt, mode=mode, markers=markers),
                 use_container_width=True)
 st.caption("Triangles on the left edge mark classified reflectors.")
+
+
+# ---------------------------------------------------- fluid-case compare ----
+if well.has_fluid_cases:
+    st.divider()
+    st.header("Fluid case comparison")
+    st.caption(
+        "Every case is fitted at the **same** interfaces, on a time axis "
+        f"integrated once from the *{well.active_case}* case. Without that, each "
+        "case would carry its own time axis and the reflectors would not line up."
+    )
+
+    reference = st.selectbox(
+        "Reference case", list(well.cases),
+        index=well.cases.index("brine") if "brine" in well.cases else 0,
+        help="The fluid vectors are drawn from this case to each of the others.",
+    )
+
+    case_tables = {}
+    failed = []
+    for case_name in well.cases:
+        try:
+            frame = time_well(well, settings, case_name)
+        except ValueError:
+            failed.append(case_name)
+            continue
+        case_rc = reflectivity_series(
+            frame["VP"].to_numpy(float), frame["VS"].to_numpy(float),
+            frame["RHOB"].to_numpy(float), angles, method=settings.method,
+        )
+        case_tables[case_name] = reflector_avo(
+            case_rc, angles=angles, method=settings.method,
+            depth=frame["DEPTH"].to_numpy(float) if "DEPTH" in frame.columns else None,
+            twt=frame["TWT"].to_numpy(float),
+            samples=table["sample"].to_numpy(), a_tol=settings.a_tol,
+        )
+    if failed:
+        st.warning(f"Skipped case(s) with no usable samples: {', '.join(failed)}.")
+
+    comparison = compare_cases(case_tables, reference=reference, a_tol=settings.a_tol)
+    targets = [c for c in well.cases if c != reference and c in case_tables]
+
+    changed = int(comparison["class_changed"].sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Reflectors compared", len(comparison))
+    c2.metric("Change class with fluid", changed,
+              f"{changed / max(len(comparison), 1):.0%} of reflectors")
+    c3.metric("Largest fluid vector", f"{comparison['fluid_vector'].max():.4f}")
+
+    st.plotly_chart(
+        fluid_vector_crossplot(comparison, reference, targets, a_tol=settings.a_tol),
+        use_container_width=True,
+    )
+    st.caption(
+        f"Circles are the **{reference}** case; diamonds are the substituted cases, "
+        "with an arrow along each reflector's fluid vector. A long arrow crossing a "
+        "class boundary is a reflector whose AVO signature depends on what is in the "
+        "pore space — the ones worth trusting a fluid interpretation on."
+    )
+
+    show_cmp = comparison.copy()
+    for col in show_cmp.columns:
+        if show_cmp[col].dtype.kind == "f":
+            show_cmp[col] = show_cmp[col].round(4)
+    st.dataframe(show_cmp, use_container_width=True, height=320)
+    st.download_button(
+        "Download fluid comparison (CSV)", show_cmp.to_csv(index=False).encode(),
+        file_name=f"{well.name}_fluid_case_comparison.csv", mime="text/csv",
+    )
+
+    # Read the class path in fluid order — brine to oil to gas — with the
+    # in-situ case noted at the end rather than interleaved.
+    fluid_order = [c for c in ("brine", "oil", "gas") if c in case_tables]
+    fluid_order += [c for c in case_tables if c not in fluid_order]
+
+    movers = comparison[comparison["class_changed"]]
+    if len(movers):
+        st.subheader("Reflectors that change class")
+        for _, row in movers.iterrows():
+            where = (f"{row['depth']:.1f} m" if "depth" in comparison.columns
+                     else f"sample {int(row['sample'])}")
+            path = "  →  ".join(
+                f"**{c}** {row[f'class_{c}']}" for c in fluid_order if c != "in situ"
+            )
+            if "in situ" in case_tables:
+                path += f"   (in situ: {row['class_in situ']})"
+            st.write(f"- {where} · {path}")
+    else:
+        st.info("No reflector changes AVO class across the fluid cases.")
+
+    st.subheader("Amplitude vs angle, by fluid case")
+    pick_cmp = st.selectbox(
+        "Reflector", range(len(comparison)),
+        format_func=lambda i: (
+            f"{comparison.iloc[i]['depth']:.1f} m"
+            if "depth" in comparison.columns else f"sample {int(comparison.iloc[i]['sample'])}"
+        ) + (" — class changes" if comparison.iloc[i]["class_changed"] else ""),
+        key="fluid_reflector",
+    )
+    row_cmp = comparison.iloc[pick_cmp]
+    fig = go.Figure()
+    for case_name in fluid_order:
+        a_c, b_c = row_cmp[f"A_{case_name}"], row_cmp[f"B_{case_name}"]
+        fig.add_trace(go.Scatter(
+            x=fine, y=a_c + b_c * sin2_fine, mode="lines",
+            name=f"{case_name} — class {row_cmp[f'class_{case_name}']}",
+            line=dict(width=2.4, color=case_colour(case_name)),
+        ))
+    fig.add_hline(y=0, line=dict(color="#bbb", width=1))
+    fig.update_layout(xaxis_title="Incidence angle (deg)", yaxis_title="Rpp",
+                      height=440, margin=dict(l=60, r=20, t=30, b=45),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    st.plotly_chart(fig, use_container_width=True)
