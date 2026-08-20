@@ -16,8 +16,11 @@ from avo_qi.core.attributes import eei  # noqa: E402
 from avo_qi.io.loader import CANONICAL, guess_mnemonics, standardise  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     add_derived_curves,
+    apply_lithology_filter,
     case_colour,
     crossplot,
+    lithology_crossplot,
+    lithology_labels,
     get_well,
     load_demo_well,
     load_uploaded_well,
@@ -122,11 +125,23 @@ with st.expander("Curve statistics"):
 st.divider()
 st.subheader("QI crossplots")
 
-colour_options = [c for c in ("DEPTH", "GR", "VSH", "PHI", "SW", "VPVS", "POISSON", "FACIES")
-                  if c in df.columns]
+litho = lithology_labels(df, settings)
+keep = apply_lithology_filter(df, litho, settings)
+if not keep.all():
+    hidden = int((~keep).sum())
+    st.caption(f"Lithology filter is hiding {hidden} of {len(df)} samples "
+               f"({', '.join(settings.lithologies) or 'nothing selected'}).")
+df = df[keep].reset_index(drop=True)
+litho = litho[keep]
+if df.empty:
+    st.warning("The lithology filter has excluded every sample. Widen it in the sidebar.")
+    st.stop()
+
+colour_options = ["LITHOLOGY"] + [c for c in ("DEPTH", "GR", "VSH", "PHI", "SW",
+                                              "VPVS", "POISSON", "FACIES")
+                                  if c in df.columns]
 c1, c2 = st.columns([2, 1])
-colour = c1.selectbox("Colour by", colour_options,
-                      index=colour_options.index("GR") if "GR" in colour_options else 0)
+colour = c1.selectbox("Colour by", colour_options, index=0)
 overlay_cases = c2.toggle(
     "Overlay all fluid cases", value=False, disabled=not well.has_fluid_cases,
     help="Plot every substituted case together, coloured by case instead of by curve.",
@@ -134,8 +149,10 @@ overlay_cases = c2.toggle(
 
 
 def qi_plot(x, y, title, log_x=False):
-    """One crossplot, either coloured by a curve or split by fluid case."""
+    """One crossplot: by lithology, by a curve, or split by fluid case."""
     if not overlay_cases:
+        if colour == "LITHOLOGY":
+            return lithology_crossplot(df, litho, x, y, title=title)
         return crossplot(df, x, y, colour, title=title, log_x=log_x)
     import plotly.graph_objects as go
 

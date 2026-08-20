@@ -17,10 +17,26 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from avo_qi.core.attributes import acoustic_impedance, vpvs
+from avo_qi.core.lithology import (
+    DEFAULT_VSH_CUTOFFS,
+    LITHOLOGIES,
+    UNDEFINED,
+    classify_lithology,
+    vsh_from_gr,
+)
 from avo_qi.core.wavelet import bandpass_ormsby, load_wavelet, ricker
 from avo_qi.io.loader import depth_to_twt, read_well, resample_to_time, standardise
 
 DEMO_WELL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data", "demo_well.las")
+
+#: Fixed colours per lithology, cleanest to shaliest.
+LITHOLOGY_COLOURS = {
+    "sand": "#f0c419",
+    "silty sand": "#d99a3a",
+    "silt": "#8c8060",
+    "shale": "#5b6b73",
+    UNDEFINED: "#c9c9c9",
+}
 
 #: Fixed colours per fluid case, shared by every plot in the app.
 CASE_COLOURS = {
@@ -65,6 +81,9 @@ class Settings:
     wavelet_length: float = 0.128
     threshold: float = 0.01
     case: str = None
+    vsh_cutoffs: dict = field(default_factory=lambda: dict(DEFAULT_VSH_CUTOFFS))
+    lithologies: list = field(default_factory=lambda: list(LITHOLOGIES) + [UNDEFINED])
+    gr_method: str = "linear"
     near: tuple = (0.0, 12.0)
     mid: tuple = (13.0, 26.0)
     far: tuple = (27.0, 40.0)
@@ -254,6 +273,41 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
                     st.caption("Upload a wavelet, or the Ricker default is used.")
             s.wavelet_length = st.number_input("Wavelet length (s)", 0.032, 0.512,
                                                float(s.wavelet_length), 0.016, format="%.3f")
+
+        if well is not None:
+            st.header("Lithology")
+            if "VSH" in well.df.columns or "GR" in well.df.columns:
+                if "VSH" not in well.df.columns:
+                    st.caption("No VSH curve — deriving it from GR.")
+                    s.gr_method = st.selectbox(
+                        "GR to VSH", list(GR_METHOD_LABELS),
+                        index=list(GR_METHOD_LABELS).index(s.gr_method),
+                        format_func=lambda m: GR_METHOD_LABELS[m],
+                    )
+                cuts = dict(s.vsh_cutoffs)
+                c1, c2, c3 = st.columns(3)
+                cuts["sand"] = c1.number_input("Sand ≤", 0.01, 0.90,
+                                               float(cuts["sand"]), 0.01,
+                                               key="cut_sand")
+                cuts["silty sand"] = c2.number_input("Silty ≤", 0.02, 0.95,
+                                                     float(cuts["silty sand"]), 0.01,
+                                                     key="cut_silty")
+                cuts["silt"] = c3.number_input("Silt ≤", 0.03, 0.99,
+                                               float(cuts["silt"]), 0.01,
+                                               key="cut_silt")
+                if cuts["sand"] < cuts["silty sand"] < cuts["silt"]:
+                    s.vsh_cutoffs = cuts
+                else:
+                    st.warning("VSH cutoffs must increase; keeping the last valid set.")
+                s.lithologies = st.multiselect(
+                    "Show lithologies", LITHOLOGIES + [UNDEFINED],
+                    default=[c for c in s.lithologies if c in LITHOLOGIES + [UNDEFINED]],
+                    help="Filters the crossplots, the reflector table and the "
+                         "A-B crossplot. A reflector is kept when either side "
+                         "of it is a selected lithology.",
+                )
+            else:
+                st.caption("No VSH or GR curve, so lithology is unavailable.")
 
         if show_classifier:
             st.header("Classifier")
@@ -660,3 +714,61 @@ def selected_reflector_index(selection, marker_twt):
     if marker_twt.size == 0:
         return None
     return int(np.argmin(np.abs(marker_twt - float(y))))
+
+
+#: Human-readable names for the gamma-ray shale-volume transforms.
+GR_METHOD_LABELS = {
+    "linear": "Linear (gamma-ray index)",
+    "larionov_tertiary": "Larionov — Tertiary",
+    "larionov_older": "Larionov — older rocks",
+    "steiber": "Steiber",
+    "clavier": "Clavier",
+}
+
+
+def lithology_labels(frame, settings):
+    """Lithology per sample for a well frame, from VSH or derived from GR.
+
+    Returns all-``undefined`` when the well carries neither curve, so a
+    missing curve never silently reads as clean sand.
+    """
+    if "VSH" in frame.columns and np.isfinite(frame["VSH"].to_numpy(float)).any():
+        vsh = frame["VSH"].to_numpy(float)
+    elif "GR" in frame.columns and np.isfinite(frame["GR"].to_numpy(float)).any():
+        vsh = vsh_from_gr(frame["GR"].to_numpy(float), method=settings.gr_method)
+    else:
+        return np.full(len(frame), UNDEFINED, dtype=object)
+    return classify_lithology(vsh, cutoffs=settings.vsh_cutoffs)
+
+
+def lithology_colour(label):
+    """Stable colour for a lithology label."""
+    return LITHOLOGY_COLOURS.get(label, "#c9c9c9")
+
+
+def apply_lithology_filter(frame, labels, settings):
+    """Boolean mask of samples whose lithology is currently selected."""
+    selected = set(settings.lithologies or (LITHOLOGIES + [UNDEFINED]))
+    return np.array([label in selected for label in labels], dtype=bool)
+
+
+def lithology_crossplot(frame, labels, x, y, title=None, height=520, size=4):
+    """Crossplot coloured by lithology rather than by a continuous curve."""
+    fig = go.Figure()
+    for label in LITHOLOGIES + [UNDEFINED]:
+        mask = np.asarray(labels, dtype=object) == label
+        if not mask.any():
+            continue
+        fig.add_trace(go.Scatter(
+            x=frame[x].to_numpy()[mask], y=frame[y].to_numpy()[mask],
+            mode="markers", name=label,
+            marker=dict(size=size, opacity=0.8, color=lithology_colour(label),
+                        line=dict(width=0.3, color="#555")),
+            hovertemplate=f"{x}: %{{x:.4g}}<br>{y}: %{{y:.4g}}<extra>{label}</extra>",
+        ))
+    fig.update_layout(
+        title=title or f"{y} vs {x}", xaxis_title=x, yaxis_title=y, height=height,
+        margin=dict(l=60, r=20, t=50, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    return fig

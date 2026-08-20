@@ -125,6 +125,19 @@ class TestSyntheticGatherPage:
         assert at.warning
 
 
+def reflector_table(page):
+    """The reflector table, found by its columns rather than by position.
+
+    The page renders other tables too (the lithology pair summary), so an
+    index would break whenever one is added.
+    """
+    for element in page.dataframe:
+        frame = element.value
+        if hasattr(frame, "columns") and {"avo_class", "A_shuey"} <= set(frame.columns):
+            return frame
+    raise AssertionError("no reflector table on the page")
+
+
 class TestAvoClassificationPage:
     def test_runs_clean(self, avo_page):
         assert not avo_page.exception
@@ -134,14 +147,14 @@ class TestAvoClassificationPage:
         assert len(avo_page.dataframe) >= 1
 
     def test_finds_the_class_three_gas_sand(self, avo_page):
-        table = avo_page.dataframe[0].value
+        table = reflector_table(avo_page)
         assert "avo_class" in table.columns
         assert (table["avo_class"] == "III").any()
 
     def test_shuey_and_aki_richards_agree_in_the_table(self, avo_page):
         import numpy as np
 
-        table = avo_page.dataframe[0].value
+        table = reflector_table(avo_page)
         assert np.nanmax(np.abs(table["dA"].to_numpy(float))) < 1e-6
         assert np.nanmax(np.abs(table["dB"].to_numpy(float))) < 1e-6
 
@@ -250,3 +263,48 @@ class TestClassifiedTraceSelection:
         at.run()
         assert not at.exception
         assert at.session_state["reflector_pick"] == target
+
+
+class TestLithologyFilter:
+    """Lithology is cut from VSH and filters the crossplots and reflectors."""
+
+    def test_sidebar_exposes_the_cutoffs_and_the_filter(self, crossplots_page):
+        labels = {w.label for w in crossplots_page.number_input}
+        assert {"Sand \u2264", "Silty \u2264", "Silt \u2264"}.issubset(labels)
+        assert any(m.label == "Show lithologies" for m in crossplots_page.multiselect)
+
+    def test_crossplots_offer_lithology_as_a_colour(self, crossplots_page):
+        colour = next(sb for sb in crossplots_page.selectbox if sb.label == "Colour by")
+        assert "LITHOLOGY" in colour.options
+
+    def test_reflector_table_carries_the_lithology_pair(self, avo_page):
+        table = reflector_table(avo_page)
+        for column in ("litho_upper", "litho_lower", "litho_pair"):
+            assert column in table.columns
+
+    def test_the_gas_sand_top_is_a_shale_over_sand_pair(self, avo_page):
+        table = reflector_table(avo_page)
+        pairs = set(table["litho_pair"])
+        assert "shale over sand" in pairs
+        assert "sand over shale" in pairs
+
+    def test_rock_physics_page_offers_lithology_colouring(self, rock_physics_page):
+        colour = next(sb for sb in rock_physics_page.selectbox
+                      if sb.label == "Colour the well data by")
+        assert "LITHOLOGY" in colour.options
+
+    def test_filtering_to_one_lithology_drops_reflectors(self):
+        at = AppTest.from_file(os.path.join(PAGES, "3_AVO_Classification.py"),
+                               default_timeout=120)
+        well, raw, units = demo_well()
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = raw
+        at.session_state["raw_units"] = units
+        at.run()
+        assert not at.exception
+        everything = len(reflector_table(at))
+
+        at.session_state["settings"].lithologies = ["sand"]
+        at.run()
+        assert not at.exception
+        assert len(reflector_table(at)) < everything

@@ -13,6 +13,7 @@ import numpy as np  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from avo_qi.core.lithology import interface_lithology  # noqa: E402
 from avo_qi.core.avo import (  # noqa: E402
     background_trend,
     compare_cases,
@@ -33,6 +34,7 @@ from avo_qi.core.synthetic import (  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     ab_crossplot,
+    lithology_labels,
     build_wavelet,
     case_colour,
     classified_trace_figure,
@@ -79,6 +81,31 @@ if table.empty:
     )
     st.stop()
 
+# Lithology either side of each reflector.  For AVO the pair is what matters:
+# a "shale over sand" top is a different event from a "sand over shale" base.
+litho = lithology_labels(tw, settings)
+pairs = interface_lithology(litho, table["sample"].to_numpy())
+table = table.assign(litho_upper=pairs["upper"], litho_lower=pairs["lower"],
+                     litho_pair=pairs["pair"])
+
+selected_litho = set(settings.lithologies or [])
+if selected_litho:
+    keep = np.array([(u in selected_litho) or (lo in selected_litho)
+                     for u, lo in zip(pairs["upper"], pairs["lower"])], dtype=bool)
+    if not keep.all():
+        st.caption(
+            f"Lithology filter is hiding {int((~keep).sum())} of {len(table)} "
+            "reflectors — a reflector is kept when either side of it is a "
+            "selected lithology."
+        )
+    table = table[keep].reset_index(drop=True)
+    if table.empty:
+        st.warning(
+            "No reflector has a selected lithology on either side. Widen the "
+            "lithology filter in the sidebar."
+        )
+        st.stop()
+
 trend = background_trend(table["A_shuey"], table["B_shuey"])
 
 # ------------------------------------------------------------- summary -----
@@ -94,6 +121,21 @@ st.caption(
     f"{settings.method.replace('_', '-')} reflectivity over "
     f"{angles[0]:.0f}–{angles[-1]:.0f}°."
 )
+
+known_pairs = [p for p in table["litho_pair"].unique() if "undefined" not in p]
+if known_pairs:
+    with st.expander(f"Lithology pairs ({len(known_pairs)} distinct)"):
+        summary = (
+            table.groupby(["litho_pair", "avo_class"]).size()
+            .rename("reflectors").reset_index()
+            .sort_values("reflectors", ascending=False)
+        )
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+        st.caption(
+            "Reservoir tops are the *over sand* pairs; their bases are the "
+            "*sand over* ones. Filtering to shale-over-sand is usually the "
+            "quickest way to a clean A-B cloud."
+        )
 
 # --------------------------------------------------------- A-B crossplot ---
 st.divider()
@@ -190,7 +232,10 @@ marker_twt = twt[np.clip(extrema["index"], 0, twt.size - 1)]
 def _label(row):
     where = f"{row['depth']:.1f} m" if "depth" in table.columns else f"sample {int(row['sample'])}"
     when = f" / {row['twt']:.3f} s" if "twt" in table.columns else ""
-    return f"{where}{when} — Class {row['avo_class']} (A {row['A_shuey']:+.3f}, B {row['B_shuey']:+.3f})"
+    pair = row.get("litho_pair", "")
+    lith = f" · {pair}" if pair and "undefined" not in str(pair) else ""
+    return (f"{where}{when} — Class {row['avo_class']} "
+            f"(A {row['A_shuey']:+.3f}, B {row['B_shuey']:+.3f}){lith}")
 
 
 labels = [_label(r) for _, r in table.iterrows()]
@@ -314,6 +359,9 @@ with detail_col:
     c5.metric("ΔB Shuey−AkiR", f"{row['dB']:+.1e}")
 
     if i + 1 < vp.size:
+        pair = row.get("litho_pair", "")
+        if pair and "undefined" not in str(pair):
+            st.caption(f"Lithology: **{pair}**.")
         st.caption(
             f"Upper layer Vp {vp[i]:.0f} m/s, Vs {vs[i]:.0f} m/s, ρ {rho[i]:.3f} g/cc "
             f"(Vp/Vs {vp[i] / vs[i]:.2f}) over lower layer Vp {vp[i + 1]:.0f} m/s, "

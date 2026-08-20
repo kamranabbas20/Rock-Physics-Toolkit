@@ -40,13 +40,28 @@ from avo_qi.core.rockphysics import (  # noqa: E402
     reuss,
     wyllie,
 )
-from avo_qi.ui import add_derived_curves, page_setup, require_well, sidebar  # noqa: E402
+from avo_qi.ui import (  # noqa: E402
+    add_derived_curves,
+    apply_lithology_filter,
+    lithology_colour,
+    lithology_labels,
+    page_setup,
+    require_well,
+    sidebar,
+)
 
 page_setup("Rock Physics", icon=":rock:")
 settings = sidebar(show_wavelet=False, show_angles=False, show_classifier=False)
 well = require_well()
 
 df = add_derived_curves(well.complete(settings.case).reset_index(drop=True))
+litho = lithology_labels(df, settings)
+keep = apply_lithology_filter(df, litho, settings)
+df = df[keep].reset_index(drop=True)
+litho = litho[keep]
+if df.empty:
+    st.warning("The lithology filter has excluded every sample. Widen it in the sidebar.")
+    st.stop()
 vp = df["VP"].to_numpy(float)
 vs = df["VS"].to_numpy(float)
 rho = df["RHOB"].to_numpy(float)
@@ -108,18 +123,32 @@ K_hm, G_hm = hertz_mindlin(K_min, G_min, phi_c, n_grains, pressure, shear_factor
 c4.metric("Hertz-Mindlin K (dry)", f"{K_hm:.2f} GPa")
 
 phi_grid = np.linspace(0.0, phi_c, 120)
-colour_options = [c for c in ("DEPTH", "GR", "VSH", "PHI", "SW", "VPVS") if c in df.columns]
-colour = st.selectbox("Colour the well data by", colour_options,
-                      index=colour_options.index("GR") if "GR" in colour_options else 0)
+colour_options = ["LITHOLOGY"] + [c for c in ("DEPTH", "GR", "VSH", "PHI", "SW", "VPVS")
+                                  if c in df.columns]
+colour = st.selectbox("Colour the well data by", colour_options, index=0)
 
 
 def data_trace(x, y, name="Well data"):
-    return go.Scatter(
-        x=x, y=y, mode="markers", name=name,
-        marker=dict(size=5, opacity=0.75, color=df[colour], colorscale="Viridis",
-                    showscale=True, colorbar=dict(title=colour, x=1.02)),
-        hovertemplate="%{x:.4g}, %{y:.4g}<extra></extra>",
-    )
+    """Well data as one trace, or one per lithology when coloured by it."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if colour != "LITHOLOGY":
+        return [go.Scatter(
+            x=x, y=y, mode="markers", name=name,
+            marker=dict(size=5, opacity=0.75, color=df[colour], colorscale="Viridis",
+                        showscale=True, colorbar=dict(title=colour, x=1.02)),
+            hovertemplate="%{x:.4g}, %{y:.4g}<extra></extra>",
+        )]
+    traces = []
+    for label in dict.fromkeys(litho):
+        mask = litho == label
+        traces.append(go.Scatter(
+            x=x[mask], y=y[mask], mode="markers", name=label,
+            marker=dict(size=5, opacity=0.85, color=lithology_colour(label),
+                        line=dict(width=0.3, color="#555")),
+            hovertemplate=f"%{{x:.4g}}, %{{y:.4g}}<extra>{label}</extra>",
+        ))
+    return traces
 
 
 def finish(fig, xtitle, ytitle, height=560):
@@ -138,7 +167,7 @@ tab_vpvs, tab_gardner, tab_vphi, tab_moduli = st.tabs(
 # ------------------------------------------------------------ Vp vs Vs ------
 with tab_vpvs:
     fig = go.Figure()
-    fig.add_trace(data_trace(vp, vs))
+    fig.add_traces(data_trace(vp, vs))
     grid = np.linspace(np.nanmin(vp) * 0.9, np.nanmax(vp) * 1.1, 100)
     fig.add_trace(go.Scatter(x=grid, y=castagna_mudrock(grid), mode="lines",
                              name="Castagna mudrock line",
@@ -154,7 +183,7 @@ with tab_vpvs:
     )
 
     fig2 = go.Figure()
-    fig2.add_trace(data_trace(vp, df["VPVS"]))
+    fig2.add_traces(data_trace(vp, df["VPVS"]))
     fig2.add_trace(go.Scatter(x=grid, y=grid / castagna_mudrock(grid), mode="lines",
                               name="Mudrock line", line=dict(color="#d62728", width=2.5)))
     st.plotly_chart(finish(fig2, "Vp (m/s)", "Vp/Vs", height=460), use_container_width=True)
@@ -163,7 +192,7 @@ with tab_vpvs:
 with tab_gardner:
     a_fit, b_fit = fit_gardner(vp, rho)
     fig = go.Figure()
-    fig.add_trace(data_trace(vp, rho))
+    fig.add_traces(data_trace(vp, rho))
     grid = np.linspace(np.nanmin(vp) * 0.9, np.nanmax(vp) * 1.1, 100)
     fig.add_trace(go.Scatter(x=grid, y=gardner_density(grid), mode="lines",
                              name="Gardner (0.31, 0.25)",
@@ -196,7 +225,7 @@ with tab_vphi:
 
     fig = go.Figure()
     if has_phi:
-        fig.add_trace(data_trace(df["PHI"], vp))
+        fig.add_traces(data_trace(df["PHI"], vp))
     phi_full = np.linspace(0.0, 0.45, 150)
     fig.add_trace(go.Scatter(x=phi_full, y=wyllie(phi_full, v_matrix, v_fluid),
                              mode="lines", name="Wyllie time-average",
@@ -255,7 +284,7 @@ with tab_moduli:
 
     fig = go.Figure()
     if has_phi:
-        fig.add_trace(data_trace(df["PHI"], log_values, name="Well (saturated)"))
+        fig.add_traces(data_trace(df["PHI"], log_values, name="Well (saturated)"))
     fig.add_trace(go.Scatter(x=phi_full, y=sat_up, mode="lines",
                              name="Hashin-Shtrikman upper (saturated)",
                              line=dict(color="#1f77b4", width=2)))
@@ -276,7 +305,7 @@ with tab_moduli:
     )
 
     fig2 = go.Figure()
-    fig2.add_trace(data_trace(K_log, G_log))
+    fig2.add_traces(data_trace(K_log, G_log))
     lim = float(np.nanmax(K_log)) * 1.1
     fig2.add_trace(go.Scatter(x=[0, lim], y=[0, lim], mode="lines", name="μ = K",
                               line=dict(color="#999", width=1, dash="dot")))
