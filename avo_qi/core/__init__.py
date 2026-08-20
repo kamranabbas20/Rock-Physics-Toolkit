@@ -1,6 +1,6 @@
 """Dependency-light rock-physics core: no Streamlit, no plotting imports."""
 
-from . import attributes, avo, reflectivity, rockphysics, synthetic, wavelet
+from . import attributes, avo, reflectivity, rockphysics, synthetic, tuning, wavelet
 
 __all__ = [
     "attributes",
@@ -8,5 +8,6 @@ __all__ = [
     "reflectivity",
     "rockphysics",
     "synthetic",
+    "tuning",
     "wavelet",
 ]
