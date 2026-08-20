@@ -19,6 +19,14 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(HERE)
 DEMO = os.path.join(HERE, "sample_data", "demo_well.las")
 
+#: Some checks are about the *repository* — its lockfile, scripts and ignore
+#: rules — rather than the installed package.  Deployed copies legitimately
+#: carry only `avo_qi/`, so those checks skip instead of failing there.
+IN_CHECKOUT = os.path.isdir(os.path.join(REPO, ".git"))
+needs_checkout = pytest.mark.skipif(
+    not IN_CHECKOUT, reason="not running from a git checkout of the repository"
+)
+
 
 @pytest.fixture(scope="module")
 def las_bytes():
@@ -119,6 +127,7 @@ def config():
         return fh.read()
 
 
+@needs_checkout
 class TestShippedConfiguration:
     """The Streamlit defaults this project ships, which are safer than
     Streamlit's own."""
@@ -130,6 +139,7 @@ class TestShippedConfiguration:
         assert 'address = "localhost"' in config
 
 
+@needs_checkout
 class TestGitignore:
     def _ignored(self, relative):
         return subprocess.run(
@@ -145,3 +155,115 @@ class TestGitignore:
 
     def test_the_demo_well_is_still_tracked(self):
         assert not self._ignored("avo_qi/sample_data/demo_well.las")
+
+
+class TestRuntimeMakesNoOutboundConnections:
+    """Proof rather than inspection: block every non-loopback socket, then
+    render a page for real and check nothing tried to dial out."""
+
+    @staticmethod
+    def _block_outbound(monkeypatch):
+        import socket
+
+        loopback = {"127.0.0.1", "::1", "localhost", "0.0.0.0", ""}
+        attempts = []
+        real_connect = socket.socket.connect
+        real_create = socket.create_connection
+
+        def host_of(address):
+            if isinstance(address, tuple):
+                return address[0]
+            return address
+
+        def guarded_connect(self, address, *args, **kwargs):
+            host = host_of(address)
+            if isinstance(host, str) and host not in loopback:
+                attempts.append(host)
+                raise OSError(f"outbound connection to {host} blocked by test")
+            return real_connect(self, address, *args, **kwargs)
+
+        def guarded_create(address, *args, **kwargs):
+            host = host_of(address)
+            if isinstance(host, str) and host not in loopback:
+                attempts.append(host)
+                raise OSError(f"outbound connection to {host} blocked by test")
+            return real_create(address, *args, **kwargs)
+
+        monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+        monkeypatch.setattr(socket, "create_connection", guarded_create)
+        return attempts
+
+    def test_the_core_analysis_dials_out_nowhere(self, monkeypatch, las_bytes):
+        """The whole physics path, from load to classification."""
+        import numpy as np
+
+        attempts = self._block_outbound(monkeypatch)
+
+        from avo_qi.core.avo import reflector_avo
+        from avo_qi.core.synthetic import build_gather
+        from avo_qi.core.wavelet import ricker
+
+        raw, units = read_well(io.BytesIO(las_bytes), suffix=".las")
+        well = standardise(raw, units=units, name="CONFIDENTIAL-1")
+        vp, vs, rho = well.logs()
+        angles = np.arange(0.0, 41.0, 5.0)
+        _, wavelet = ricker(30.0, 0.001)
+        build_gather(vp, vs, rho, angles, wavelet, dt=0.001)
+        table = reflector_avo(None, vp, vs, rho, angles, threshold=0.05)
+
+        assert len(table) > 0
+        assert attempts == [], f"tried to reach {attempts}"
+
+    def test_rendering_a_streamlit_page_dials_out_nowhere(self, monkeypatch, las_bytes):
+        pytest.importorskip("streamlit")
+        from streamlit.testing.v1 import AppTest
+
+        attempts = self._block_outbound(monkeypatch)
+
+        raw, units = read_well(io.BytesIO(las_bytes), suffix=".las")
+        well = standardise(raw, units=units, name="CONFIDENTIAL-1")
+
+        page = os.path.join(HERE, "pages", "4_AVO_Classification.py")
+        at = AppTest.from_file(page, default_timeout=120)
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = raw
+        at.session_state["raw_units"] = units
+        at.run()
+
+        assert not at.exception
+        assert attempts == [], f"tried to reach {attempts}"
+
+
+@needs_checkout
+class TestOfflineInstallSupport:
+    """A pinned lockfile and a wheelhouse script, so an air-gapped machine can
+    install without ever reaching an index."""
+
+    def test_a_lockfile_is_shipped_and_pins_versions(self):
+        path = os.path.join(REPO, "requirements-lock.txt")
+        assert os.path.exists(path)
+        with open(path, encoding="utf-8") as fh:
+            pins = [ln.strip() for ln in fh
+                    if ln.strip() and not ln.startswith("#")]
+        assert len(pins) > 20
+        assert all("==" in pin for pin in pins), "every dependency must be pinned"
+
+    def test_the_lockfile_covers_the_direct_requirements(self):
+        with open(os.path.join(REPO, "requirements-lock.txt"), encoding="utf-8") as fh:
+            locked = {ln.split("==")[0].lower().replace("-", "_")
+                      for ln in fh if "==" in ln}
+        with open(os.path.join(REPO, "requirements.txt"), encoding="utf-8") as fh:
+            direct = {ln.split("#")[0].strip().lower().replace("-", "_")
+                      for ln in fh if ln.split("#")[0].strip()}
+        assert direct <= locked, f"not locked: {direct - locked}"
+
+    def test_the_bundle_script_exists_and_is_executable(self):
+        path = os.path.join(REPO, "scripts", "make_offline_bundle.sh")
+        assert os.path.exists(path)
+        assert os.access(path, os.X_OK)
+
+    def test_the_wheelhouse_is_not_committed(self):
+        assert subprocess.run(
+            ["git", "check-ignore", "-q", "wheelhouse/"],
+            cwd=REPO, capture_output=True,
+        ).returncode == 0

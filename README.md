@@ -133,6 +133,35 @@ model predicts at their porosities, so several demo layers plot below the
 suspension bound. That is the diagnostic doing its job — switching the pore
 fluid to gas brings the gas sand back inside its bounds.
 
+## Running fully offline
+
+At runtime the toolkit needs no network at all. Every asset Streamlit serves
+is local — no CDN, no Google Fonts, and plotly.js ships inside the Python
+package. A test proves it rather than asserting it: it blocks every
+non-loopback socket, then renders a full AVO page and checks nothing tried to
+dial out.
+
+The only step that needs a network is `pip install`. To remove that too, build
+a wheelhouse once on a connected machine:
+
+```bash
+./scripts/make_offline_bundle.sh                  # for this machine
+./scripts/make_offline_bundle.sh win_amd64 3.11   # or cross-build for Windows
+```
+
+Carry the repository across — wheelhouse included — and on the air-gapped
+machine:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install --no-index --find-links wheelhouse -r requirements-lock.txt
+.venv/bin/streamlit run avo_qi/app.py
+```
+
+`requirements-lock.txt` pins the full transitive set, so the install is
+reproducible as well as offline. This path is tested end to end: install with
+`--no-index`, run the suite, start the app.
+
 ## Your data stays on your machine
 
 Well data is usually proprietary, so the handling is deliberate and tested

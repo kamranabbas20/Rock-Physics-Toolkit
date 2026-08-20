@@ -13,3 +13,6 @@ venv/
 _upload.*
 *.LAS
 !avo_qi/sample_data/demo_well.las
+
+# Offline install bundle — built locally, not committed (hundreds of MB).
+wheelhouse/
