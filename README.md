@@ -162,6 +162,25 @@ python3 -m venv .venv
 reproducible as well as offline. This path is tested end to end: install with
 `--no-index`, run the suite, start the app.
 
+## Verifying it yourself
+
+Two checks, both runnable on your machine with your own well:
+
+```bash
+# Python side: blocks every non-loopback socket, then runs the analysis and
+# renders a page. Fails if anything tries to dial out.
+pytest avo_qi/tests/test_data_handling.py
+
+# Browser side: drives a real browser through every page and records every
+# request it makes. Reports any that leaves localhost.
+pip install playwright && playwright install chromium
+python scripts/verify_no_network.py path/to/your.las
+```
+
+The browser check on this repository captures 213 requests across the full
+workflow — uploading a well and visiting every page — and none of them leave
+localhost.
+
 ## Your data stays on your machine
 
 Well data is usually proprietary, so the handling is deliberate and tested
