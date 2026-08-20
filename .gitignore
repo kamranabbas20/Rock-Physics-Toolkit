@@ -7,3 +7,9 @@ venv/
 .DS_Store
 *.egg-info/
 .streamlit/secrets.toml
+
+# Belt and braces: nothing that looks like a loaded well should ever be
+# committed. Uploads are parsed in memory, so these should never appear.
+_upload.*
+*.LAS
+!avo_qi/sample_data/demo_well.las

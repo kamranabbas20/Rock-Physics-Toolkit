@@ -129,18 +129,15 @@ def load_demo_well():
 
 
 def load_uploaded_well(uploaded, mapping=None, depth_unit="m"):
-    """Read a Streamlit UploadedFile into a standardised well."""
+    """Read a Streamlit UploadedFile into a standardised well.
+
+    The upload is parsed straight from memory.  Nothing is written to disk, so
+    a well never lands in the working directory where it could be picked up by
+    a later ``git add``.
+    """
     suffix = os.path.splitext(uploaded.name)[1].lower()
-    tmp = os.path.join(st.session_state.get("_tmpdir", "."), f"_upload{suffix}")
-    with open(tmp, "wb") as fh:
-        fh.write(uploaded.getbuffer())
-    try:
-        df, units = read_well(tmp)
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    buffer = _stdlib_io.BytesIO(uploaded.getvalue())
+    df, units = read_well(buffer, suffix=suffix)
     well = standardise(df, mapping=mapping, units=units, depth_unit=depth_unit,
                        name=os.path.splitext(uploaded.name)[0])
     set_well(well, raw=df, units=units)

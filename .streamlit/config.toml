@@ -1,0 +1,18 @@
+# Defaults chosen so a well never leaves the machine it is loaded on.
+# Streamlit's own defaults are the opposite of both of these.
+
+[browser]
+# Streamlit reports anonymous usage statistics to its makers unless told not
+# to. It does not send well data, but it is an outbound connection, and many
+# operators will not permit one. Off.
+gatherUsageStats = false
+
+[server]
+# Without this Streamlit listens on every network interface, so anyone who can
+# reach this machine can open the app and read the loaded well. Bind to the
+# loopback interface only; override deliberately if you mean to share it.
+address = "localhost"
+
+# Uploads are parsed in memory and never written to disk (see
+# avo_qi/ui.py::load_uploaded_well). Raise this if your LAS files are larger.
+maxUploadSize = 400

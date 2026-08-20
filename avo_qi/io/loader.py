@@ -8,6 +8,7 @@ angles in degrees.
 
 from __future__ import annotations
 
+import io
 import os
 from dataclasses import dataclass, field
 
@@ -186,32 +187,58 @@ def guess_mnemonics(columns):
     return mapping
 
 
-def read_las(path):
-    """Read a LAS file into a DataFrame with the depth index as a column."""
+def _is_path(source):
+    return isinstance(source, (str, bytes, os.PathLike))
+
+
+def _as_text(source):
+    """A LAS source as text, whether it arrived as a path, bytes or a buffer."""
+    if _is_path(source):
+        with open(source, "r", errors="replace") as fh:
+            return fh.read()
+    data = source.read() if hasattr(source, "read") else source
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data
+
+
+def read_las(source):
+    """Read a LAS into a DataFrame with the depth index as a column.
+
+    Accepts a path, raw bytes, or a file-like object — an upload can be read
+    straight from memory rather than being spilled to disk first.
+    """
     import lasio
 
-    las = lasio.read(path)
+    las = lasio.read(io.StringIO(_as_text(source)))
     df = las.df().reset_index()
     units = {c.mnemonic: (c.unit or "") for c in las.curves}
     return df, units
 
 
-def read_table(path):
-    """Read a CSV or Excel well table into a DataFrame."""
-    ext = os.path.splitext(str(path))[1].lower()
+def read_table(source, suffix=None):
+    """Read a CSV or Excel well table.  ``suffix`` names the format when
+    ``source`` is a buffer rather than a path."""
+    ext = (suffix or (os.path.splitext(str(source))[1] if _is_path(source) else "")).lower()
     if ext in (".xlsx", ".xlsm", ".xls"):
-        df = pd.read_excel(path)
+        df = pd.read_excel(source)
     else:
-        df = pd.read_csv(path, sep=None, engine="python")
+        if not _is_path(source) and hasattr(source, "seek"):
+            source.seek(0)
+        df = pd.read_csv(source, sep=None, engine="python")
     return df, {c: "" for c in df.columns}
 
 
-def read_well(path):
-    """Read a well from LAS, CSV or Excel.  Returns ``(DataFrame, units)``."""
-    ext = os.path.splitext(str(path))[1].lower()
+def read_well(source, suffix=None):
+    """Read a well from LAS, CSV or Excel.  Returns ``(DataFrame, units)``.
+
+    ``source`` may be a path or an in-memory buffer; pass ``suffix`` (such as
+    ``".las"``) for a buffer, since there is no filename to infer it from.
+    """
+    ext = (suffix or (os.path.splitext(str(source))[1] if _is_path(source) else "")).lower()
     if ext == ".las":
-        return read_las(path)
-    return read_table(path)
+        return read_las(source)
+    return read_table(source, suffix=ext)
 
 
 def sonic_to_velocity(dt, unit="us/ft"):

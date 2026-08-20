@@ -133,6 +133,28 @@ model predicts at their porosities, so several demo layers plot below the
 suspension bound. That is the diagnostic doing its job — switching the pore
 fluid to gas brings the gas sand back inside its bounds.
 
+## Your data stays on your machine
+
+Well data is usually proprietary, so the handling is deliberate and tested
+(`avo_qi/tests/test_data_handling.py`):
+
+- **Nothing is sent anywhere.** No module in `avo_qi/` imports a network
+  client, and a test asserts it stays that way.
+- **Uploads are parsed in memory.** A LAS you upload is never written to disk,
+  so it cannot be left in the working directory and swept up by a later
+  `git add`. `.gitignore` covers stray `.LAS` files and upload artefacts as a
+  second line of defence, while keeping the demo well tracked.
+- **Streamlit's telemetry is off.** Streamlit reports anonymous usage
+  statistics to its makers by default. It does not send well data, but it is
+  an outbound connection; the shipped `.streamlit/config.toml` disables it.
+- **The server binds to localhost only.** Streamlit otherwise listens on every
+  network interface, so anyone able to reach your machine could open the app
+  and read the loaded well. Override deliberately if you mean to share it.
+
+Loaded wells live in the Streamlit session in memory and disappear when the
+process stops. Everything you export — CSV, NPY, SEG-Y — is a browser
+download that you choose.
+
 ## Units
 
 All conversion happens in `io/loader.py` and the Streamlit widgets; `core/`
