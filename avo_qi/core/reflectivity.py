@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 __all__ = [
+    "critical_angle",
     "zoeppritz_rpp",
     "aki_richards_rpp",
     "reflectivity_series",
@@ -32,6 +33,20 @@ __all__ = [
 _VS_FLOOR = 1e-6
 
 
+def critical_angle(vp1, vp2):
+    """Incidence angle (degrees) at which the transmitted P wave grazes.
+
+    Returns NaN when ``vp2 <= vp1``, where no critical angle exists.  Beyond
+    this angle the Zoeppritz solution is complex and the two-term Shuey form
+    no longer describes the response, so intercept-gradient fits must stop
+    short of it.
+    """
+    vp1, vp2 = float(vp1), float(vp2)
+    if not (np.isfinite(vp1) and np.isfinite(vp2)) or vp2 <= vp1 or vp1 <= 0:
+        return float("nan")
+    return float(np.degrees(np.arcsin(vp1 / vp2)))
+
+
 def _snell_angle(p, v):
     """Transmission/conversion angle from the ray parameter, clipped to real.
 
@@ -42,7 +57,7 @@ def _snell_angle(p, v):
     return np.arcsin(np.clip(p * v, -1.0, 1.0))
 
 
-def zoeppritz_rpp(vp1, vs1, rho1, vp2, vs2, rho2, theta1):
+def zoeppritz_rpp(vp1, vs1, rho1, vp2, vs2, rho2, theta1, post_critical="clip"):
     """Exact Zoeppritz P-P reflection coefficient.
 
     Parameters
@@ -53,6 +68,12 @@ def zoeppritz_rpp(vp1, vs1, rho1, vp2, vs2, rho2, theta1):
         Lower (transmission) medium.
     theta1 : array_like
         Incidence angles in degrees.
+    post_critical : {'clip', 'nan'}
+        What to return beyond the critical angle, where the true solution is
+        complex.  ``'clip'`` keeps the real-valued continuation (the default,
+        so convolved gathers stay finite); ``'nan'`` blanks those angles,
+        which is what an intercept-gradient fit wants — the real continuation
+        spikes past critical and will drag a gradient the wrong way.
 
     Returns
     -------
@@ -96,7 +117,15 @@ def zoeppritz_rpp(vp1, vs1, rho1, vp2, vs2, rho2, theta1):
 
     with np.errstate(divide="ignore", invalid="ignore"):
         rpp = num / D
-    return np.nan_to_num(rpp, nan=0.0, posinf=0.0, neginf=0.0)
+    rpp = np.nan_to_num(rpp, nan=0.0, posinf=0.0, neginf=0.0)
+
+    if post_critical == "nan":
+        theta_c = critical_angle(vp1, vp2)
+        if np.isfinite(theta_c):
+            rpp = np.where(np.degrees(theta1) >= theta_c, np.nan, rpp)
+    elif post_critical != "clip":
+        raise ValueError("post_critical must be 'clip' or 'nan'")
+    return rpp
 
 
 def aki_richards_rpp(vp1, vs1, rho1, vp2, vs2, rho2, theta1):
@@ -157,11 +186,15 @@ def _resolve_method(method):
         ) from None
 
 
-def reflectivity_series(vp, vs, rho, angles, method="zoeppritz"):
+def reflectivity_series(vp, vs, rho, angles, method="zoeppritz", post_critical="clip"):
     """Walk a log and build the angle-dependent reflection-coefficient matrix.
 
     Interface ``i`` sits between sample ``i`` and sample ``i + 1``; the last
     row is zero so the matrix keeps the length of the input logs.
+
+    ``post_critical`` is passed through to the exact solution; leave it at
+    ``'clip'`` for anything that gets convolved, and use ``'nan'`` when the
+    result feeds an intercept-gradient fit.
 
     Returns
     -------
@@ -184,8 +217,13 @@ def reflectivity_series(vp, vs, rho, angles, method="zoeppritz"):
         return rc
 
     fn = _resolve_method(method)
+    exact = fn is zoeppritz_rpp
     for i in range(n - 1):
         if not np.all(np.isfinite([vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1]])):
             continue
-        rc[i, :] = fn(vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1], angles)
+        if exact:
+            rc[i, :] = fn(vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1],
+                          angles, post_critical=post_critical)
+        else:
+            rc[i, :] = fn(vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1], angles)
     return rc

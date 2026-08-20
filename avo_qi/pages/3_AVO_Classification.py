@@ -23,14 +23,22 @@ from avo_qi.core.reflectivity import (  # noqa: E402
     reflectivity_series,
     zoeppritz_rpp,
 )
-from avo_qi.core.synthetic import build_gather  # noqa: E402
+from avo_qi.core.wavelet import dominant_frequency  # noqa: E402
+from avo_qi.core.synthetic import (  # noqa: E402
+    angle_stack,
+    build_gather,
+    full_stack,
+    trace_extrema,
+)
 from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     ab_crossplot,
     build_wavelet,
     case_colour,
+    classified_trace_figure,
     fluid_vector_crossplot,
     gather_figure,
+    selected_reflector_index,
     page_setup,
     require_well,
     sidebar,
@@ -123,6 +131,8 @@ if "depth" in show.columns:
 for col in ("R0", "A_shuey", "B_shuey", "A_ar", "B_ar", "dA", "dB", "background_deviation"):
     if col in show.columns:
         show[col] = show[col].round(5)
+if "critical_angle" in show.columns:
+    show["critical_angle"] = show["critical_angle"].round(1)
 
 class_filter = st.multiselect("Filter by class", list(CLASS_COLOURS),
                               default=list(CLASS_COLOURS))
@@ -140,76 +150,182 @@ st.download_button("Download reflector table (CSV)", show.to_csv(index=False).en
 # ---------------------------------------------------- reflector detail -----
 st.divider()
 st.subheader("Reflector detail")
+st.caption(
+    "Click a marker on the trace to inspect that reflector. Each marker sits on "
+    "the amplitude extremum the reflector produces, coloured by its AVO class."
+)
+
+# The gather this page's trace is drawn from.
+_, detail_wavelet = build_wavelet(settings)
+detail_gather = build_gather(vp, vs, rho, angles, detail_wavelet,
+                             dt=settings.dt, method=settings.method)
+
+trace_options = ["Full stack", "Near", "Mid", "Far"] + [f"{a:.0f}°" for a in angles]
+trace_choice = st.selectbox("Trace", trace_options, index=0)
+bands = {"Near": settings.near, "Mid": settings.mid, "Far": settings.far}
+try:
+    if trace_choice == "Full stack":
+        detail_trace = full_stack(detail_gather)
+    elif trace_choice in bands:
+        detail_trace = angle_stack(detail_gather, bands[trace_choice], angles)
+    else:
+        detail_trace = detail_gather[:, trace_options.index(trace_choice) - 4]
+except ValueError:
+    st.warning(f"No angles fall in the {trace_choice.lower()} band; showing the full stack.")
+    detail_trace = full_stack(detail_gather)
+
+# Search radius: a quarter of the wavelet's dominant period, which is where a
+# zero-phase wavelet puts the extremum belonging to an interface.
+dominant = dominant_frequency(detail_wavelet, settings.dt) or 30.0
+half_window = max(int(round(0.25 / dominant / settings.dt)), 2)
+# Match each interface to a turning point of the same sign as its
+# normal-incidence coefficient, so a weak reflector cannot be handed its
+# loud neighbour's lobe.
+extrema = trace_extrema(detail_trace, table["sample"].to_numpy(),
+                        half_window=half_window,
+                        polarity=np.sign(table["R0"].to_numpy(float)))
+marker_twt = twt[np.clip(extrema["index"], 0, twt.size - 1)]
+
 
 def _label(row):
     where = f"{row['depth']:.1f} m" if "depth" in table.columns else f"sample {int(row['sample'])}"
     when = f" / {row['twt']:.3f} s" if "twt" in table.columns else ""
     return f"{where}{when} — Class {row['avo_class']} (A {row['A_shuey']:+.3f}, B {row['B_shuey']:+.3f})"
 
+
 labels = [_label(r) for _, r in table.iterrows()]
 # Open on the strongest reflector rather than the shallowest, which on a noisy
 # log is often a near-zero interface that happens to clear the threshold.
 strongest = int(np.argmax(np.abs(table["R0"].to_numpy(float))))
-pick = st.selectbox("Reflector", range(len(labels)), index=strongest,
-                    format_func=lambda i: labels[i])
-row = table.iloc[pick]
-i = int(row["sample"])
+if "reflector_pick" not in st.session_state:
+    st.session_state["reflector_pick"] = strongest
 
-fine = np.linspace(float(angles[0]), float(angles[-1]), 200)
-sin2_fine = np.sin(np.radians(fine)) ** 2
+# A click on the trace arrives in this run's session state, before the
+# selectbox below is drawn, so reading it here lets the click drive the
+# dropdown instead of fighting it.  Only act on a *new* selection, or manual
+# changes to the dropdown would be overridden on every rerun.
+clicked = selected_reflector_index(st.session_state.get("class_trace"), marker_twt)
+if clicked is not None and clicked != st.session_state.get("_last_trace_click"):
+    st.session_state["_last_trace_click"] = clicked
+    st.session_state["reflector_pick"] = clicked
+if st.session_state["reflector_pick"] >= len(labels):
+    st.session_state["reflector_pick"] = strongest
 
-fig = go.Figure()
-fig.add_trace(go.Scatter(
-    x=angles, y=rc[i, :], mode="markers", name=f"{settings.method.replace('_', '-')} (modelled)",
-    marker=dict(size=9, color="#333"),
-))
-fig.add_trace(go.Scatter(
-    x=fine, y=row["A_shuey"] + row["B_shuey"] * sin2_fine, mode="lines",
-    name=f"Shuey fit (A {row['A_shuey']:+.3f}, B {row['B_shuey']:+.3f})",
-    line=dict(width=2.5, color=CLASS_COLOURS.get(row["avo_class"], "#1f77b4")),
-))
-fig.add_trace(go.Scatter(
-    x=fine, y=row["A_ar"] + row["B_ar"] * sin2_fine, mode="lines",
-    name=f"Aki-Richards fit (A {row['A_ar']:+.3f}, B {row['B_ar']:+.3f})",
-    line=dict(width=2, dash="dash", color="#ff7f0e"),
-))
+trace_col, detail_col = st.columns([1, 2])
 
-# The two exact interface models, for reference.
-if i + 1 < vp.size:
-    layer = (vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1])
-    fig.add_trace(go.Scatter(x=fine, y=zoeppritz_rpp(*layer, fine), mode="lines",
-                             name="Zoeppritz", line=dict(width=1, color="#999")))
-    fig.add_trace(go.Scatter(x=fine, y=aki_richards_rpp(*layer, fine), mode="lines",
-                             name="Aki-Richards (3-term)",
-                             line=dict(width=1, dash="dot", color="#999")))
-
-fig.add_hline(y=0, line=dict(color="#bbb", width=1))
-fig.update_layout(xaxis_title="Incidence angle (deg)", yaxis_title="Rpp",
-                  height=460, margin=dict(l=60, r=20, t=30, b=45),
-                  legend=dict(orientation="h", yanchor="bottom", y=1.02))
-st.plotly_chart(fig, use_container_width=True)
-
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Class", row["avo_class"])
-c2.metric("Intercept A", f"{row['A_shuey']:+.4f}")
-c3.metric("Gradient B", f"{row['B_shuey']:+.4f}")
-c4.metric("ΔA Shuey−AkiR", f"{row['dA']:+.1e}")
-c5.metric("ΔB Shuey−AkiR", f"{row['dB']:+.1e}")
-
-if i + 1 < vp.size:
-    st.caption(
-        f"Upper layer Vp {vp[i]:.0f} m/s, Vs {vs[i]:.0f} m/s, ρ {rho[i]:.3f} g/cc "
-        f"(Vp/Vs {vp[i] / vs[i]:.2f}) over lower layer Vp {vp[i + 1]:.0f} m/s, "
-        f"Vs {vs[i + 1]:.0f} m/s, ρ {rho[i + 1]:.3f} g/cc "
-        f"(Vp/Vs {vp[i + 1] / vs[i + 1]:.2f})."
+with trace_col:
+    st.markdown(f"**{trace_choice}** — reflectors by class")
+    st.plotly_chart(
+        classified_trace_figure(
+            detail_trace, twt, table, extrema,
+            selected=st.session_state["reflector_pick"],
+        ),
+        use_container_width=True, key="class_trace",
+        on_select="rerun", selection_mode="points",
     )
+    off = extrema["offset"]
+    if np.any(np.abs(off) > 0):
+        st.caption(
+            f"Extrema searched ±{half_window} samples around each interface "
+            f"({dominant:.0f} Hz dominant); largest shift {int(np.abs(off).max())} samples."
+        )
+    interfering = int(np.sum(~extrema["is_extremum"]))
+    if interfering:
+        st.caption(
+            f"{interfering} reflector(s) have no turning point of their own "
+            "polarity within ±{} samples — they are buried in a neighbour's "
+            "lobe. Those markers sit at the interface time and are drawn "
+            "hollow; their amplitude is not an extremum.".format(half_window)
+        )
+
+pick = int(st.session_state["reflector_pick"])
+
+with detail_col:
+    st.selectbox(
+        "Reflector", range(len(labels)), key="reflector_pick",
+        format_func=lambda i: labels[i],
+        help="Kept in step with the trace — clicking a marker moves this too.",
+    )
+    pick = int(st.session_state["reflector_pick"])
+    row = table.iloc[pick]
+    i = int(row["sample"])
+
+    fine = np.linspace(float(angles[0]), float(angles[-1]), 200)
+    sin2_fine = np.sin(np.radians(fine)) ** 2
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=angles, y=rc[i, :], mode="markers", name=f"{settings.method.replace('_', '-')} (modelled)",
+        marker=dict(size=9, color="#333"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=fine, y=row["A_shuey"] + row["B_shuey"] * sin2_fine, mode="lines",
+        name=f"Shuey fit (A {row['A_shuey']:+.3f}, B {row['B_shuey']:+.3f})",
+        line=dict(width=2.5, color=CLASS_COLOURS.get(row["avo_class"], "#1f77b4")),
+    ))
+    fig.add_trace(go.Scatter(
+        x=fine, y=row["A_ar"] + row["B_ar"] * sin2_fine, mode="lines",
+        name=f"Aki-Richards fit (A {row['A_ar']:+.3f}, B {row['B_ar']:+.3f})",
+        line=dict(width=2, dash="dash", color="#ff7f0e"),
+    ))
+
+    # The two exact interface models, for reference.
+    if i + 1 < vp.size:
+        layer = (vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1])
+        fig.add_trace(go.Scatter(x=fine, y=zoeppritz_rpp(*layer, fine), mode="lines",
+                                 name="Zoeppritz", line=dict(width=1, color="#999")))
+        fig.add_trace(go.Scatter(x=fine, y=aki_richards_rpp(*layer, fine), mode="lines",
+                                 name="Aki-Richards (3-term)",
+                                 line=dict(width=1, dash="dot", color="#999")))
+
+    # Past the critical angle the exact solution is complex; its real
+    # continuation spikes and is excluded from the fit, so mark that region.
+    theta_c = float(row.get("critical_angle", np.nan))
+    if np.isfinite(theta_c) and theta_c < angles[-1]:
+        fig.add_vrect(x0=theta_c, x1=float(angles[-1]), fillcolor="#d62728",
+                      opacity=0.08, line_width=0, layer="below")
+        fig.add_vline(x=theta_c, line=dict(color="#d62728", width=1.5, dash="dot"),
+                      annotation_text=f"critical {theta_c:.0f}°",
+                      annotation_position="top left")
+
+    fig.add_hline(y=0, line=dict(color="#bbb", width=1))
+    fig.update_layout(xaxis_title="Incidence angle (deg)", yaxis_title="Rpp",
+                      height=460, margin=dict(l=60, r=20, t=30, b=45),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    st.plotly_chart(fig, use_container_width=True)
+
+    if np.isfinite(theta_c) and theta_c < angles[-1]:
+        st.warning(
+            f"Critical angle at **{theta_c:.1f}°** — angles beyond it are excluded "
+            f"from the fit ({int(row['n_angles'])} of {angles.size} angles used). "
+            "The shaded amplitudes are the real continuation of a solution that is "
+            "genuinely complex there; fitting them would drag the gradient positive "
+            "and misclassify the event.",
+            icon=":material/warning:",
+        )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    # "background/other" overflows a narrow metric column.
+    c1.metric("Class", "backgrnd" if row["avo_class"] == "background/other"
+              else row["avo_class"])
+    c2.metric("Intercept A", f"{row['A_shuey']:+.4f}")
+    c3.metric("Gradient B", f"{row['B_shuey']:+.4f}")
+    c4.metric("ΔA Shuey−AkiR", f"{row['dA']:+.1e}")
+    c5.metric("ΔB Shuey−AkiR", f"{row['dB']:+.1e}")
+
+    if i + 1 < vp.size:
+        st.caption(
+            f"Upper layer Vp {vp[i]:.0f} m/s, Vs {vs[i]:.0f} m/s, ρ {rho[i]:.3f} g/cc "
+            f"(Vp/Vs {vp[i] / vs[i]:.2f}) over lower layer Vp {vp[i + 1]:.0f} m/s, "
+            f"Vs {vs[i + 1]:.0f} m/s, ρ {rho[i + 1]:.3f} g/cc "
+            f"(Vp/Vs {vp[i + 1] / vs[i + 1]:.2f})."
+        )
 
 # ------------------------------------------------- gather, class-coloured --
 st.divider()
 st.subheader("Gather, reflectors coloured by class")
 
-_, wavelet = build_wavelet(settings)
-gather = build_gather(vp, vs, rho, angles, wavelet, dt=settings.dt, method=settings.method)
+gather = detail_gather
 mode = st.radio("Display", ["Variable density", "Wiggle"], horizontal=True,
                 key="class_gather_mode")
 markers = table[["twt", "avo_class"]] if "twt" in table.columns else None

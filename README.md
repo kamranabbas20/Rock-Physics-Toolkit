@@ -29,7 +29,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 |------|--------------|
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
-| **AVO Classification** | Per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, and per-reflector amplitude-vs-angle curves. |
+| **AVO Classification** | Per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. |
 | **Rock Physics** | Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus dry-frame Hertz-Mindlin soft-sand, stiff-sand and critical-porosity models. |
 
 ## Layout
@@ -86,6 +86,28 @@ reflectors silently misalign, and only the shallowest one, above the first
 reservoir, still lines up. `reflector_avo` takes an explicit `samples`
 argument for the same reason, so all cases are fitted at identical
 interfaces rather than at whatever each happens to detect.
+
+## Two things the classification gets right that are easy to get wrong
+
+**Post-critical angles are excluded from the fit.** Where the lower layer is
+fast enough, the critical angle falls inside the modelled angle range — a
+cemented sand under shale goes critical near 34°. Past that the exact
+Zoeppritz solution is complex, and the real continuation used to keep gathers
+finite spikes upward. Fitting those points drags the gradient positive: on the
+demo well's cemented streak it turns B = −0.55 into B = +0.31 and reports a
+textbook Class I as background. `reflector_avo` masks angles at or beyond each
+interface's critical angle before fitting (`mask_post_critical`, on by
+default), reports the angle and how many angles survived, and the page shades
+the excluded region.
+
+**Reflector markers are matched by polarity, not by amplitude.** On the
+clickable trace, each reflector's marker sits on the turning point *nearest*
+the interface *whose sign matches* its normal-incidence coefficient. Taking
+the largest amplitude in a window instead hands a weak reflector its loud
+neighbour's lobe — three of the demo well's nine reflectors ended up on an
+extremum of the opposite sign that way. A reflector with no turning point of
+its own polarity in range is drawn hollow at the interface time, because its
+amplitude is not an extremum and should not be read as one.
 
 ## No fluid substitution
 

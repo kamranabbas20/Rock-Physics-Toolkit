@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .reflectivity import reflectivity_series
+from .reflectivity import critical_angle, reflectivity_series
 
 __all__ = [
     "shuey_fit",
@@ -41,12 +41,26 @@ def _as_2d(r):
 
 
 def _lstsq(design, r2d):
-    """Least-squares solve for every reflector at once, NaN-safe."""
-    good = np.all(np.isfinite(r2d), axis=1)
+    """Least-squares solve for every reflector, NaN-safe per reflector.
+
+    Rows that are entirely finite are solved together.  A row with some
+    non-finite entries — a reflector whose far angles were blanked past the
+    critical angle — is solved on its remaining angles alone, so masking a few
+    angles costs those angles rather than the whole fit.
+    """
+    finite = np.isfinite(r2d)
     coef = np.full((r2d.shape[0], design.shape[1]), np.nan)
-    if good.any():
-        sol, *_ = np.linalg.lstsq(design, r2d[good].T, rcond=None)
-        coef[good] = sol.T
+
+    complete = np.all(finite, axis=1)
+    if complete.any():
+        sol, *_ = np.linalg.lstsq(design, r2d[complete].T, rcond=None)
+        coef[complete] = sol.T
+
+    for k in np.flatnonzero(~complete):
+        mask = finite[k]
+        if mask.sum() >= design.shape[1]:
+            sol, *_ = np.linalg.lstsq(design[mask], r2d[k][mask], rcond=None)
+            coef[k] = sol
     return coef
 
 
@@ -215,6 +229,7 @@ def reflector_avo(
     a_tol=0.02,
     third_term=False,
     samples=None,
+    mask_post_critical=True,
 ):
     """Fit and classify every reflector in a well.
 
@@ -244,6 +259,12 @@ def reflector_avo(
         Explicit interface indices to fit, bypassing detection.  Pass the same
         indices for every fluid case so the cases are compared at identical
         interfaces rather than at whatever each one happens to detect.
+    mask_post_critical : bool
+        Drop angles at or beyond each interface's critical angle before
+        fitting.  Past critical the exact solution is complex and its real
+        continuation spikes, which drags the gradient the wrong way and can
+        flip a Class I to background.  Needs ``vp`` to know where critical
+        is; without it the mask is skipped.
     a_tol : float
         Intercept tolerance band passed to :func:`classify`.
     third_term : bool
@@ -289,9 +310,23 @@ def reflector_avo(
         empty = ["A_shuey", "B_shuey", "A_ar", "B_ar", "dA", "dB", "avo_class"]
         return pd.DataFrame({**cols, **{c: [] for c in empty}})
 
-    sub = rc[idx, :]
-    A_s, B_s = shuey_fit(sub, angles)
+    sub = rc[idx, :].copy()
     cols["R0"] = sub[:, int(np.argmin(np.abs(angles)))]
+
+    theta_c = np.full(idx.size, np.nan)
+    if vp is not None:
+        vp_arr = np.asarray(vp, dtype=float)
+        for k, i in enumerate(idx):
+            if i + 1 < vp_arr.size:
+                theta_c[k] = critical_angle(vp_arr[i], vp_arr[i + 1])
+        if mask_post_critical:
+            for k in range(idx.size):
+                if np.isfinite(theta_c[k]):
+                    sub[k, angles >= theta_c[k]] = np.nan
+    cols["critical_angle"] = theta_c
+    cols["n_angles"] = np.sum(np.isfinite(sub), axis=1)
+
+    A_s, B_s = shuey_fit(sub, angles)
     cols["A_shuey"] = A_s
     cols["B_shuey"] = B_s
 

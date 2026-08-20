@@ -27,10 +27,17 @@ from avo_qi.core.avo import (
 )
 from avo_qi.core.reflectivity import (
     aki_richards_rpp,
+    critical_angle,
     reflectivity_series,
     zoeppritz_rpp,
 )
-from avo_qi.core.synthetic import angle_stack, build_gather, full_stack
+from avo_qi.core.synthetic import (
+    _local_extrema,
+    angle_stack,
+    build_gather,
+    full_stack,
+    trace_extrema,
+)
 from avo_qi.core.wavelet import (
     bandpass_ormsby,
     dominant_frequency,
@@ -440,3 +447,252 @@ class TestAttributes:
 
     def test_zero_shear_yields_nan_not_inf(self):
         assert np.isnan(vpvs(np.array([1500.0]), np.array([0.0]))[0])
+
+
+@pytest.fixture(scope="module")
+def stacked_trace():
+    """Full stack of the validated three-layer gather, plus its interfaces."""
+    vp, vs, rho, top, base = three_layer_model()
+    angles = np.arange(0.0, 41.0, 5.0)
+    _, w = ricker(30.0, 0.001)
+    return full_stack(build_gather(vp, vs, rho, angles, w, dt=0.001)), top, base
+
+
+class TestTraceExtrema:
+    """Reflectors must be locatable as extrema on a trace, for class marking."""
+
+    def test_finds_the_interface_extrema_with_correct_polarity(self, stacked_trace):
+        trace, top, base = stacked_trace
+        found = trace_extrema(trace, [top - 1, base - 1], half_window=8)
+        # A zero-phase wavelet puts the extremum on the interface itself.
+        assert list(found["offset"]) == [0, 0]
+        assert found["polarity"][0] == -1        # gas sand top is a trough
+        assert found["polarity"][1] == +1        # its base is a peak
+        assert np.all(found["is_extremum"])
+
+    def test_amplitudes_match_the_trace(self, stacked_trace):
+        trace, top, _ = stacked_trace
+        found = trace_extrema(trace, [top - 1], half_window=8)
+        assert found["amplitude"][0] == pytest.approx(trace[found["index"][0]])
+
+    def test_a_shifted_extremum_is_reported_with_its_offset(self):
+        trace = np.zeros(100)
+        trace[57] = -0.4                          # extremum three samples late
+        found = trace_extrema(trace, [54], half_window=6)
+        assert found["index"][0] == 57
+        assert found["offset"][0] == 3
+        assert found["polarity"][0] == -1
+
+    def test_window_bounds_the_search(self):
+        trace = np.zeros(100)
+        trace[70] = 0.9
+        found = trace_extrema(trace, [50], half_window=5)
+        assert found["index"][0] != 70            # too far away to be claimed
+        assert found["is_extremum"][0] == False   # noqa: E712 - flat window
+
+    def test_flags_a_point_that_is_not_a_local_extremum(self):
+        trace = np.linspace(0.0, 1.0, 50)         # monotonic: no interior peak
+        found = trace_extrema(trace, [25], half_window=4)
+        assert not found["is_extremum"][0]
+
+    def test_handles_edges_and_empty_input(self):
+        trace = np.array([0.0, -0.5, 0.0])
+        found = trace_extrema(trace, [0, 2], half_window=5)
+        assert found["index"].tolist() == [1, 1]
+        empty = trace_extrema(np.array([]), [0])
+        assert empty["index"].size == 0
+
+    def test_out_of_range_samples_are_clipped_not_crashed(self, stacked_trace):
+        trace, _, _ = stacked_trace
+        found = trace_extrema(trace, [-5, 10_000], half_window=4)
+        assert np.all(found["index"] >= 0)
+        assert np.all(found["index"] < trace.size)
+
+    def test_every_classified_reflector_gets_a_marker(self, stacked_trace):
+        trace, _, _ = stacked_trace
+        vp, vs, rho, _, _ = three_layer_model()
+        angles = np.arange(0.0, 41.0, 5.0)
+        table = reflector_avo(None, vp, vs, rho, angles, threshold=0.01)
+        found = trace_extrema(trace, table["sample"].to_numpy(), half_window=8)
+        assert found["index"].size == len(table)
+        assert np.all(np.isfinite(found["amplitude"]))
+
+
+class TestCriticalAngle:
+    """Past critical the exact solution is complex; fits must stop short of it."""
+
+    #: Shale over a cemented sand — fast enough to go critical inside 40 deg.
+    HARD = (2395.0, 1198.0, 2.351, 4272.0, 2701.0, 2.369)
+
+    def test_known_critical_angle(self):
+        assert critical_angle(2395.0, 4272.0) == pytest.approx(34.1, abs=0.1)
+
+    def test_no_critical_angle_for_a_soft_interface(self):
+        assert np.isnan(critical_angle(2400.0, 2100.0))
+        assert np.isnan(critical_angle(2400.0, 2400.0))
+
+    def test_nan_mode_blanks_only_the_post_critical_angles(self):
+        angles = np.arange(0.0, 41.0, 2.0)
+        clipped = zoeppritz_rpp(*self.HARD, angles)
+        blanked = zoeppritz_rpp(*self.HARD, angles, post_critical="nan")
+        theta_c = critical_angle(self.HARD[0], self.HARD[3])
+        pre, post = angles < theta_c, angles >= theta_c
+        assert np.allclose(blanked[pre], clipped[pre])
+        assert np.all(np.isnan(blanked[post]))
+        assert np.all(np.isfinite(clipped))       # clip mode stays convolvable
+
+    def test_clip_is_the_default_so_gathers_stay_finite(self):
+        angles = np.arange(0.0, 41.0, 2.0)
+        assert np.all(np.isfinite(zoeppritz_rpp(*self.HARD, angles)))
+        rc = reflectivity_series(
+            np.array([2395.0, 4272.0]), np.array([1198.0, 2701.0]),
+            np.array([2.351, 2.369]), angles,
+        )
+        assert np.all(np.isfinite(rc))
+
+    def test_invalid_mode_is_rejected(self):
+        with pytest.raises(ValueError):
+            zoeppritz_rpp(*self.HARD, 10.0, post_critical="wishful")
+
+    def test_post_critical_angles_flip_the_gradient_if_left_in(self):
+        """The bug this masking exists to prevent."""
+        angles = np.arange(0.0, 41.0, 2.0)
+        R = zoeppritz_rpp(*self.HARD, angles)
+        a_all, b_all = shuey_fit(R, angles)
+        theta_c = critical_angle(self.HARD[0], self.HARD[3])
+        pre = angles < theta_c
+        a_pre, b_pre = shuey_fit(R[pre], angles[pre])
+        assert b_all > 0 and classify(a_all, b_all) == "background/other"
+        assert b_pre < 0 and classify(a_pre, b_pre) == "I"
+
+    def test_reflector_avo_masks_by_default_and_reports_the_angle(self):
+        n = 200
+        vp = np.full(n, self.HARD[0]); vs = np.full(n, self.HARD[1])
+        rho = np.full(n, self.HARD[2])
+        vp[100:150], vs[100:150], rho[100:150] = self.HARD[3:]
+        angles = np.arange(0.0, 41.0, 2.0)
+
+        masked = reflector_avo(None, vp, vs, rho, angles, threshold=0.05)
+        loose = reflector_avo(None, vp, vs, rho, angles, threshold=0.05,
+                              mask_post_critical=False)
+
+        top = masked.iloc[0]
+        assert top["avo_class"] == "I"
+        assert top["B_shuey"] < 0
+        assert top["critical_angle"] == pytest.approx(34.1, abs=0.1)
+        assert top["n_angles"] < angles.size          # far angles dropped
+        assert loose.iloc[0]["avo_class"] == "background/other"
+        assert loose.iloc[0]["n_angles"] == angles.size
+
+    def test_soft_interfaces_keep_every_angle(self):
+        vp, vs, rho, _, _ = three_layer_model()
+        angles = np.arange(0.0, 41.0, 2.0)
+        table = reflector_avo(None, vp, vs, rho, angles, threshold=0.01)
+        top = table.iloc[0]
+        assert np.isnan(top["critical_angle"])        # no critical angle exists
+        assert top["n_angles"] == angles.size
+        assert top["avo_class"] == "III"
+
+    def test_a_masked_fit_still_recovers_known_coefficients(self):
+        angles = np.arange(0.0, 41.0, 2.0)
+        A, B = 0.25, -0.4
+        R = A + B * np.sin(np.radians(angles)) ** 2
+        R[angles >= 34.0] = np.nan
+        a_fit, b_fit = shuey_fit(R, angles)
+        assert a_fit == pytest.approx(A, abs=1e-9)
+        assert b_fit == pytest.approx(B, abs=1e-9)
+
+    def test_too_few_surviving_angles_gives_nan_not_a_wrong_answer(self):
+        angles = np.arange(0.0, 41.0, 2.0)
+        R = np.full(angles.size, np.nan)
+        R[0] = 0.2                                    # one angle cannot fit two terms
+        a_fit, b_fit = shuey_fit(R, angles)
+        assert np.isnan(a_fit) and np.isnan(b_fit)
+
+
+class TestExtremumMatching:
+    """Markers must land on a turning point of the reflector's own polarity.
+
+    Picking the largest amplitude in a window instead hands a weak reflector
+    its loud neighbour's lobe, putting the marker on the wrong sign.
+    """
+
+    @staticmethod
+    def _two_events():
+        """A weak peak at 40 beside a strong trough at 47."""
+        t = np.linspace(-1.0, 1.0, 21)
+        lobe = np.exp(-(t * 3) ** 2)
+        trace = np.zeros(120)
+        trace[30:51] += 0.05 * lobe          # weak peak centred on 40
+        trace[37:58] -= 0.60 * lobe          # strong trough centred on 47
+        return trace
+
+    def test_polarity_stops_a_neighbour_stealing_the_marker(self):
+        """A nearer turning point of the wrong sign must not win."""
+        trace = np.zeros(100)
+        trace[41] = -0.5                      # a neighbour's trough, very close
+        trace[46] = +0.2                      # this reflector's own peak
+        without = trace_extrema(trace, [40], half_window=10)
+        with_sign = trace_extrema(trace, [40], half_window=10, polarity=[+1])
+
+        # Nearest wins when nothing constrains the sign — here that is wrong.
+        assert without["index"][0] == 41
+        assert without["amplitude"][0] < 0
+        # Told the reflector is a peak, the search skips the trough.
+        assert with_sign["index"][0] == 46
+        assert with_sign["amplitude"][0] > 0
+        assert with_sign["is_extremum"][0]
+
+    def test_every_marker_sits_on_a_real_turning_point(self):
+        trace = self._two_events()
+        turns = set(_local_extrema(trace).tolist())
+        found = trace_extrema(trace, [40, 47], half_window=10, polarity=[+1, -1])
+        for k in range(2):
+            assert found["is_extremum"][k]
+            assert int(found["index"][k]) in turns
+            assert found["amplitude"][k] == pytest.approx(trace[found["index"][k]])
+
+    def test_nearest_turning_point_wins_over_the_loudest(self):
+        trace = np.zeros(100)
+        trace[45] = 0.2                       # near and quiet
+        trace[52] = 0.9                       # far and loud
+        found = trace_extrema(trace, [44], half_window=10, polarity=[+1])
+        assert found["index"][0] == 45
+
+    def test_unresolved_reflectors_fall_back_to_the_interface(self):
+        trace = np.zeros(100)
+        trace[70] = -0.5
+        found = trace_extrema(trace, [30], half_window=5, polarity=[-1])
+        assert not found["is_extremum"][0]
+        assert found["index"][0] == 30        # marker sits at the interface
+        assert found["offset"][0] == 0
+
+    def test_polarity_length_is_validated(self):
+        with pytest.raises(ValueError):
+            trace_extrema(np.zeros(50), [10, 20], polarity=[1])
+
+    def test_zero_polarity_entries_impose_no_constraint(self):
+        trace = self._two_events()
+        found = trace_extrema(trace, [40], half_window=10, polarity=[0])
+        assert found["is_extremum"][0]
+
+
+class TestLocalExtrema:
+    def test_finds_a_spike_not_its_shoulder(self):
+        trace = np.zeros(100)
+        trace[57] = -0.4
+        assert _local_extrema(trace).tolist() == [57]
+
+    def test_flat_and_monotonic_traces_have_no_turning_points(self):
+        assert _local_extrema(np.zeros(50)).size == 0
+        assert _local_extrema(np.linspace(0.0, 1.0, 50)).size == 0
+
+    def test_finds_alternating_peaks_and_troughs(self):
+        x = np.linspace(0, 4 * np.pi, 400)
+        turns = _local_extrema(np.sin(x))
+        assert turns.size == 4                       # two peaks, two troughs
+        assert np.all(np.diff(np.sign(np.sin(x)[turns])) != 0)
+
+    def test_short_traces_are_safe(self):
+        assert _local_extrema(np.array([1.0, 2.0])).size == 0
+        assert _local_extrema(np.array([])).size == 0

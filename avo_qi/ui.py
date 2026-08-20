@@ -539,3 +539,124 @@ def fluid_vector_crossplot(comparison, reference, targets, a_tol=0.02, height=64
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     return fig
+
+
+def classified_trace_figure(trace, twt, table, extrema, selected=None, height=720,
+                            gain=1.0):
+    """A single trace with each reflector's extremum marked and coloured by class.
+
+    The trace is drawn variable-area, and every classified reflector gets a
+    marker sitting on the amplitude extremum it produces, so the class reads
+    off the wiggle itself rather than off a legend at the edge.  Markers carry
+    their table row index as ``customdata`` so a click can be resolved back to
+    a reflector.
+    """
+    trace = np.asarray(trace, dtype=float)
+    twt = np.asarray(twt, dtype=float)
+    limit = float(np.nanmax(np.abs(trace))) or 1.0
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=np.zeros_like(twt), y=twt, mode="lines", line=dict(width=0),
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=np.maximum(trace, 0.0), y=twt, mode="lines", line=dict(width=0),
+        fill="tonextx", fillcolor="rgba(20,20,20,0.75)",
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=trace, y=twt, mode="lines", line=dict(color="#222", width=1.2),
+        name="trace", showlegend=False,
+        hovertemplate="TWT %{y:.3f} s<br>amp %{x:.4f}<extra></extra>",
+    ))
+    fig.add_vline(x=0, line=dict(color="#999", width=1))
+
+    index = np.asarray(extrema["index"], dtype=int)
+    amplitude = np.asarray(extrema["amplitude"], dtype=float)
+    marker_twt = twt[np.clip(index, 0, twt.size - 1)]
+    classes = table["avo_class"].to_numpy()
+    depth_col = "depth" if "depth" in table.columns else "sample"
+    depths = table[depth_col].to_numpy()
+
+    resolved = np.asarray(extrema.get("is_extremum", np.ones(index.size, bool)), dtype=bool)
+    for label in [c for c in CLASS_COLOURS if c in set(classes)]:
+        for on_extremum in (True, False):
+            mask = (classes == label) & (resolved == on_extremum)
+            if not mask.any():
+                continue
+            note = "" if on_extremum else " (no extremum)"
+            fig.add_trace(go.Scatter(
+                x=amplitude[mask], y=marker_twt[mask], mode="markers",
+                name=(f"Class {label}" if label != "background/other" else "Background")
+                     + note,
+                marker=dict(
+                    size=13,
+                    color=CLASS_COLOURS[label] if on_extremum else "rgba(0,0,0,0)",
+                    symbol="circle",
+                    line=dict(width=1.5 if on_extremum else 2.5,
+                              color="#fff" if on_extremum else CLASS_COLOURS[label]),
+                ),
+                customdata=np.flatnonzero(mask),
+                text=[f"{depth_col} {d:.4g} — class {label}{note}"
+                      for d in depths[mask]],
+                hovertemplate="%{text}<br>TWT %{y:.3f} s<br>amp %{x:.4f}"
+                              "<extra>click to inspect</extra>",
+            ))
+
+    if selected is not None and 0 <= int(selected) < amplitude.size:
+        i = int(selected)
+        fig.add_trace(go.Scatter(
+            x=[amplitude[i]], y=[marker_twt[i]], mode="markers",
+            marker=dict(size=24, color="rgba(0,0,0,0)", symbol="circle",
+                        line=dict(width=2.5, color="#111")),
+            name="selected", showlegend=False, hoverinfo="skip",
+        ))
+
+    fig.update_yaxes(autorange="reversed", title_text="TWT (s)")
+    fig.update_xaxes(title_text="Amplitude",
+                     range=[-limit * 1.35 / gain, limit * 1.35 / gain])
+    fig.update_layout(
+        height=height, margin=dict(l=60, r=20, t=30, b=45),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0,
+                    font=dict(size=11)),
+        clickmode="event+select", dragmode="select",
+    )
+    return fig
+
+
+def selected_reflector_index(selection, marker_twt):
+    """Resolve a Plotly selection payload back to a reflector row index.
+
+    Prefers the marker's ``customdata``; falls back to matching the point's
+    TWT against the marker positions, since selection payloads differ a
+    little between Streamlit versions.
+    """
+    if not selection:
+        return None
+    points = None
+    if isinstance(selection, dict):
+        points = (selection.get("selection") or {}).get("points") or selection.get("points")
+    else:                                    # attribute-style selection state
+        inner = getattr(selection, "selection", None)
+        points = getattr(inner, "points", None) if inner is not None else None
+    if not points:
+        return None
+
+    point = points[0]
+    custom = point.get("customdata") if isinstance(point, dict) else None
+    if isinstance(custom, (list, tuple)) and custom:
+        custom = custom[0]
+    if custom is not None:
+        try:
+            return int(custom)
+        except (TypeError, ValueError):
+            pass
+
+    y = point.get("y") if isinstance(point, dict) else None
+    if y is None:
+        return None
+    marker_twt = np.asarray(marker_twt, dtype=float)
+    if marker_twt.size == 0:
+        return None
+    return int(np.argmin(np.abs(marker_twt - float(y))))

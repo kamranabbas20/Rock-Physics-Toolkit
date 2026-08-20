@@ -207,3 +207,46 @@ class TestFluidCasesInTheApp:
 
     def test_rock_physics_page_follows_the_case(self, rock_physics_page):
         assert any("case" in i.value for i in rock_physics_page.info)
+
+
+class TestClassifiedTraceSelection:
+    """The trace panel marks reflectors by class and is clickable."""
+
+    def test_trace_panel_renders(self, avo_page):
+        labels = {sb.label for sb in avo_page.selectbox}
+        assert "Trace" in labels
+        assert "Reflector" in labels
+
+    def test_selection_resolver_reads_a_plotly_payload(self):
+        import numpy as np
+
+        from avo_qi.ui import selected_reflector_index
+
+        marker_twt = np.array([1.60, 1.65, 1.70])
+        assert selected_reflector_index(
+            {"selection": {"points": [{"customdata": [2], "y": 1.70}]}}, marker_twt
+        ) == 2
+        # No customdata: fall back to the nearest marker in time.
+        assert selected_reflector_index(
+            {"selection": {"points": [{"y": 1.648}]}}, marker_twt
+        ) == 1
+        assert selected_reflector_index({"selection": {"points": []}}, marker_twt) is None
+        assert selected_reflector_index(None, marker_twt) is None
+
+    def test_clicking_the_trace_drives_the_detail_panel(self):
+        """A click lands in session state and the next run follows it."""
+        at = AppTest.from_file(os.path.join(PAGES, "3_AVO_Classification.py"),
+                               default_timeout=120)
+        well, raw, units = demo_well()
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = raw
+        at.session_state["raw_units"] = units
+        at.run()
+        assert not at.exception
+
+        original = at.session_state["reflector_pick"]
+        target = 0 if original != 0 else 1
+        at.session_state["class_trace"] = {"selection": {"points": [{"customdata": [target]}]}}
+        at.run()
+        assert not at.exception
+        assert at.session_state["reflector_pick"] == target
