@@ -13,7 +13,6 @@ import numpy as np  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from avo_qi.core.attributes import eei  # noqa: E402
-from avo_qi.io.loader import CANONICAL, guess_mnemonics, standardise  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     add_derived_curves,
     apply_lithology_filter,
@@ -21,80 +20,21 @@ from avo_qi.ui import (  # noqa: E402
     crossplot,
     lithology_crossplot,
     lithology_labels,
-    get_well,
-    load_demo_well,
-    load_uploaded_well,
     log_track_figure,
     page_setup,
-    set_well,
+    require_well,
     sidebar,
 )
 
 page_setup("Data & Crossplots", icon=":bar_chart:")
 settings = sidebar(show_wavelet=False, show_angles=False, show_classifier=False)
+well = require_well()
 
-# ------------------------------------------------------------------ load ---
-st.subheader("Load a well")
-c1, c2 = st.columns([3, 1])
-uploaded = c1.file_uploader(
-    "LAS, CSV or Excel — the well must already contain Vp, Vs and RHOB "
-    "(or sonic equivalents)",
-    type=["las", "csv", "txt", "xlsx", "xls"],
-)
-depth_unit = c2.selectbox("Depth unit in file", ["m", "ft"])
-
-if uploaded is not None and st.session_state.get("_uploaded_name") != uploaded.name:
-    try:
-        load_uploaded_well(uploaded, depth_unit=depth_unit)
-        st.session_state["_uploaded_name"] = uploaded.name
-        st.success(f"Loaded {uploaded.name}")
-    except Exception as exc:  # a bad file should not take the page down
-        st.error(f"Could not read {uploaded.name}: {exc}")
-
-if get_well() is None:
-    st.info("No well loaded yet.")
-    if st.button("Load the bundled demo well", type="primary"):
-        load_demo_well()
-        st.rerun()
-    st.stop()
-
-well = get_well()
-
-# --------------------------------------------------------------- remap -----
-raw = st.session_state.get("raw_df")
-if raw is not None:
-    with st.expander("Mnemonic mapping", expanded=bool(
-        [c for c in ("VP", "VS", "RHOB") if c not in well.df.columns]
-    )):
-        st.caption(
-            "Sonic curves (DT / DTS, µs/ft) are converted to velocity on load; "
-            "ft/s and kg/m³ are converted too. Nothing downstream re-converts."
-        )
-        options = ["— none —"] + list(raw.columns)
-        current = well.mapping or guess_mnemonics(raw.columns)
-        cols = st.columns(3)
-        new_mapping = {}
-        for i, canonical in enumerate(CANONICAL):
-            source = current.get(canonical)
-            index = options.index(source) if source in options else 0
-            picked = cols[i % 3].selectbox(canonical, options, index=index,
-                                           key=f"map_{canonical}")
-            if picked != "— none —":
-                new_mapping[canonical] = picked
-        if st.button("Apply mapping"):
-            remapped = standardise(raw, mapping=new_mapping,
-                                   units=st.session_state.get("raw_units"),
-                                   depth_unit=depth_unit, name=well.name)
-            set_well(remapped, raw=raw, units=st.session_state.get("raw_units"))
-            st.rerun()
-
-    if well.notes:
-        st.caption(" · ".join(well.notes))
-
-missing = [c for c in ("VP", "VS", "RHOB") if c not in well.df.columns]
-if missing:
-    st.error(f"Missing required curve(s): {', '.join(missing)}. Remap above to continue.")
-    st.stop()
+if st.session_state.get("raw_df") is not None:
+    st.caption(
+        "Loading, curve assignment and QC live on the **Load & QC** page — "
+        "this page plots whatever that one hands over."
+    )
 
 # ----------------------------------------------------------- attributes ----
 chi = st.session_state.get("chi_deg", 0.0)

@@ -409,10 +409,14 @@ def standardise(df, mapping=None, units=None, depth_unit="m", name="well", case=
     # done upstream; all that happens here is recognising and standardising the
     # results so every page can switch between them.
     detected = detect_fluid_cases(df.columns)
-    for case_name, curves in detected.items():
-        for curve, source in curves.items():
-            col = case_column(curve, case_name)
-            out[col], out_units[col] = convert(curve, source, label=f"{curve} [{case_name}]")
+    # A single case is already in the plain VP/VS/RHOB columns; materialising
+    # a suffixed copy of it would only duplicate every curve in the QC tables.
+    if len(detected) > 1:
+        for case_name, curves in detected.items():
+            for curve, source in curves.items():
+                col = case_column(curve, case_name)
+                out[col], out_units[col] = convert(curve, source,
+                                                   label=f"{curve} [{case_name}]")
 
     if detected:
         if case is not None and case not in detected:
@@ -438,6 +442,10 @@ def standardise(df, mapping=None, units=None, depth_unit="m", name="well", case=
     if "DEPTH" not in out.columns:
         out.insert(0, "DEPTH", np.arange(len(out), dtype=float))
         notes.append("no depth curve found; using sample index")
+
+    # A single in-situ case re-converts the same source curves as the canonical
+    # mapping, so the notes would say everything twice.
+    notes = list(dict.fromkeys(notes))
 
     ordered = [c for c in CANONICAL if c in out.columns]
     out = out[ordered + [c for c in out.columns if c not in ordered]]

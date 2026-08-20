@@ -54,23 +54,28 @@ class TestLandingPage:
 
 
 @pytest.fixture(scope="module")
+def qc_page():
+    return run_page(os.path.join(PAGES, "1_Load_and_QC.py"))
+
+
+@pytest.fixture(scope="module")
 def crossplots_page():
-    return run_page(os.path.join(PAGES, "1_Data_and_Crossplots.py"))
+    return run_page(os.path.join(PAGES, "2_Data_and_Crossplots.py"))
 
 
 @pytest.fixture(scope="module")
 def gather_page():
-    return run_page(os.path.join(PAGES, "2_Synthetic_Gather.py"))
+    return run_page(os.path.join(PAGES, "3_Synthetic_Gather.py"))
 
 
 @pytest.fixture(scope="module")
 def avo_page():
-    return run_page(os.path.join(PAGES, "3_AVO_Classification.py"))
+    return run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
 
 
 @pytest.fixture(scope="module")
 def rock_physics_page():
-    return run_page(os.path.join(PAGES, "4_Rock_Physics.py"))
+    return run_page(os.path.join(PAGES, "5_Rock_Physics.py"))
 
 
 class TestDataAndCrossplotsPage:
@@ -86,7 +91,7 @@ class TestDataAndCrossplotsPage:
         assert any("CSV" in b.label for b in crossplots_page.download_button)
 
     def test_prompts_when_no_well_is_loaded(self):
-        at = run_page(os.path.join(PAGES, "1_Data_and_Crossplots.py"), with_well=False)
+        at = run_page(os.path.join(PAGES, "2_Data_and_Crossplots.py"), with_well=False)
         assert not at.exception
         assert at.info or at.warning
 
@@ -120,7 +125,7 @@ class TestSyntheticGatherPage:
         assert {"CSV", "NPY"}.issubset(labels)
 
     def test_stops_politely_without_a_well(self):
-        at = run_page(os.path.join(PAGES, "2_Synthetic_Gather.py"), with_well=False)
+        at = run_page(os.path.join(PAGES, "3_Synthetic_Gather.py"), with_well=False)
         assert not at.exception
         assert at.warning
 
@@ -159,7 +164,7 @@ class TestAvoClassificationPage:
         assert np.nanmax(np.abs(table["dB"].to_numpy(float))) < 1e-6
 
     def test_stops_politely_without_a_well(self):
-        at = run_page(os.path.join(PAGES, "3_AVO_Classification.py"), with_well=False)
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"), with_well=False)
         assert not at.exception
         assert at.warning
 
@@ -188,7 +193,7 @@ class TestRockPhysicsPage:
         assert any("dry-frame" in w.value for w in rock_physics_page.warning)
 
     def test_stops_politely_without_a_well(self):
-        at = run_page(os.path.join(PAGES, "4_Rock_Physics.py"), with_well=False)
+        at = run_page(os.path.join(PAGES, "5_Rock_Physics.py"), with_well=False)
         assert not at.exception
         assert at.warning
 
@@ -248,7 +253,7 @@ class TestClassifiedTraceSelection:
 
     def test_clicking_the_trace_drives_the_detail_panel(self):
         """A click lands in session state and the next run follows it."""
-        at = AppTest.from_file(os.path.join(PAGES, "3_AVO_Classification.py"),
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
                                default_timeout=120)
         well, raw, units = demo_well()
         at.session_state["well"] = well
@@ -294,7 +299,7 @@ class TestLithologyFilter:
         assert "LITHOLOGY" in colour.options
 
     def test_filtering_to_one_lithology_drops_reflectors(self):
-        at = AppTest.from_file(os.path.join(PAGES, "3_AVO_Classification.py"),
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
                                default_timeout=120)
         well, raw, units = demo_well()
         at.session_state["well"] = well
@@ -308,3 +313,38 @@ class TestLithologyFilter:
         at.run()
         assert not at.exception
         assert len(reflector_table(at)) < everything
+
+
+class TestLoadAndQcPage:
+    def test_runs_clean(self, qc_page):
+        assert not qc_page.exception
+
+    def test_prompts_when_nothing_is_loaded(self):
+        at = run_page(os.path.join(PAGES, "1_Load_and_QC.py"), with_well=False)
+        assert not at.exception
+        assert at.info                       # "no well loaded"
+
+    def test_offers_upload_and_the_demo_well(self, qc_page):
+        assert len(qc_page.get("file_uploader")) >= 1
+        assert any("demo well" in b.label for b in qc_page.button)
+
+    def test_shows_the_curve_assignment_controls(self, qc_page):
+        labels = {sb.label for sb in qc_page.selectbox}
+        assert {"VP", "VS", "RHOB", "DEPTH"}.issubset(labels)
+
+    def test_reports_the_depth_axis(self, qc_page):
+        labels = {m.label for m in qc_page.metric}
+        assert {"Interval", "Step", "Duplicates", "Gaps"}.issubset(labels)
+
+    def test_the_demo_well_passes_its_checks(self, qc_page):
+        """A clean well should reach the success message, not a flag table."""
+        assert any("check" in s.value.lower() for s in qc_page.success) or \
+            any("fail at least one check" in c.value for c in qc_page.caption)
+
+    def test_offers_despiking_and_the_analysis_window(self, qc_page):
+        toggles = {t.label for t in qc_page.toggle}
+        assert "Despike Vp, Vs and RHOB" in toggles
+        assert any("Depth range" in s.label for s in qc_page.slider)
+
+    def test_exports_the_qc_flags(self, qc_page):
+        assert any("QC flags" in b.label for b in qc_page.download_button)

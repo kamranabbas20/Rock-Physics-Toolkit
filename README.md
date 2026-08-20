@@ -27,6 +27,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 
 | Page | What it does |
 |------|--------------|
+| **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
 | **AVO Classification** | Per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. |
@@ -46,8 +47,12 @@ avo_qi/
 │   ├── synthetic.py            # RC series + gather assembly
 │   ├── avo.py                  # A/B fits + classifier + background trend
 │   ├── attributes.py           # AI, SI, Vp/Vs, Poisson, LMR, EEI
-│   └── rockphysics.py          # bounds, trends, dry-frame granular models
-├── pages/                      # the four Streamlit pages
+│   ├── rockphysics.py          # bounds, trends, dry-frame granular models
+│   ├── blocking.py             # half-cycle upscaling to seismic resolution
+│   ├── lithology.py            # VSH cutoffs, lithology pairs, GR transforms
+│   ├── qc.py                   # nulls, ranges, spikes, elastic consistency
+│   └── tuning.py               # tuned vs untuned AVO, wedge model
+├── pages/                      # the five Streamlit pages
 ├── sample_data/                # demo_well.las and its generator
 └── tests/                      # acceptance + smoke tests
 ```
@@ -151,6 +156,9 @@ pytest
 Zoeppritz vs Aki-Richards agreement, normal-incidence equivalence to the AI
 reflectivity, Shuey A/B recovery, the classifier truth table, the three-layer
 gather signature, wavelet zero-phase behaviour, and both-fit consistency.
+`test_qc.py` covers the QC checks, including a forged well carrying the
+defects a real LAS arrives with — sonic in µs/ft, density in kg/m³, null
+intervals, spikes and a bad shear section.
 `test_fluid_cases.py` covers suffix detection (including the `VSH` trap), the
 shared time axis, and the cross-case comparison.
 `test_rockphysics.py` covers the diagnostic models: bound ordering
