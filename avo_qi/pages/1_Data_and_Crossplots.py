@@ -165,8 +165,8 @@ def qi_plot(x, y, title, log_x=False):
             hovertemplate=f"{x}: %{{x:.4g}}<br>{y}: %{{y:.4g}}<extra>{case}</extra>",
         ))
     fig.update_layout(title=title, xaxis_title=x, yaxis_title=y, height=520,
-                      margin=dict(l=60, r=20, t=50, b=50),
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
+                      margin=dict(l=60, r=130, t=50, b=50),
+                      legend=dict(orientation="v", yanchor="top", y=1.0, x=1.02))
     if log_x:
         fig.update_xaxes(type="log")
     return fig

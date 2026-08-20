@@ -766,9 +766,11 @@ def lithology_crossplot(frame, labels, x, y, title=None, height=520, size=4):
                         line=dict(width=0.3, color="#555")),
             hovertemplate=f"{x}: %{{x:.4g}}<br>{y}: %{{y:.4g}}<extra>{label}</extra>",
         ))
+    # A horizontal legend above the plot would sit on the title, so this one
+    # goes down the right-hand side; there are only ever a few lithologies.
     fig.update_layout(
         title=title or f"{y} vs {x}", xaxis_title=x, yaxis_title=y, height=height,
-        margin=dict(l=60, r=20, t=50, b=50),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(l=60, r=130, t=50, b=50),
+        legend=dict(orientation="v", yanchor="top", y=1.0, x=1.02),
     )
     return fig
