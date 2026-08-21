@@ -35,6 +35,7 @@ from avo_qi.core.synthetic import (
     _local_extrema,
     angle_stack,
     build_gather,
+    convolve_series,
     full_stack,
     trace_extrema,
 )
@@ -190,7 +191,7 @@ class TestClassifier:
 
 
 # ---------------------------------------------------------------- test 5 ----
-def three_layer_model(n=300, top=100, base=180):
+def three_layer_model(n=300, top=100, base=180):  # noqa: D401
     """Shale / gas-sand / shale, sampled on a regular time grid."""
     vp = np.full(n, SHALE[0])
     vs = np.full(n, SHALE[1])
@@ -696,3 +697,41 @@ class TestLocalExtrema:
     def test_short_traces_are_safe(self):
         assert _local_extrema(np.array([1.0, 2.0])).size == 0
         assert _local_extrema(np.array([])).size == 0
+
+
+class TestShortTraceConvolution:
+    """A window shorter than the wavelet must still come back trace-length.
+
+    ``np.convolve(mode='same')`` returns ``max(len(trace), len(wavelet))``, so
+    a thin analysis window used to raise a broadcast error instead of a gather.
+    """
+
+    @pytest.mark.parametrize("n", [400, 130, 129, 125, 60, 5, 2])
+    def test_output_always_matches_the_trace_length(self, n):
+        _, w = ricker(30.0, 0.001)              # 129 samples
+        rc = np.zeros((n, 3))
+        rc[n // 2, :] = 1.0
+        assert convolve_series(rc, w).shape == (n, 3)
+
+    @pytest.mark.parametrize("n", [400, 125, 60])
+    def test_a_spike_stays_centred(self, n):
+        _, w = ricker(30.0, 0.001)
+        rc = np.zeros((n, 1))
+        rc[n // 2, 0] = 1.0
+        assert int(np.argmax(convolve_series(rc, w)[:, 0])) == n // 2
+
+    def test_normal_lengths_are_unchanged(self):
+        """The fix must not move any existing result."""
+        rng = np.random.default_rng(0)
+        _, w = ricker(30.0, 0.001)
+        rc = rng.normal(0, 1, (400, 2))
+        reference = np.column_stack([np.convolve(rc[:, j], w, mode="same")
+                                     for j in range(2)])
+        assert np.allclose(convolve_series(rc, w), reference)
+
+    def test_a_short_window_builds_a_gather(self):
+        vp, vs, rho, _, _ = three_layer_model(n=120, top=40, base=80)
+        _, w = ricker(30.0, 0.001)
+        gather = build_gather(vp, vs, rho, np.arange(0.0, 41.0, 5.0), w, dt=0.001)
+        assert gather.shape == (120, 9)
+        assert np.isfinite(gather).all()

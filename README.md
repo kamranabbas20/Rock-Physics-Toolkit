@@ -188,6 +188,38 @@ everything else. There is no way to draw an interactive chart without the
 numbers reaching the renderer; the honest mitigation is controlling what else
 is running in that renderer.
 
+## Avoiding the browser entirely
+
+If sending your logs to a browser is not acceptable, do not use the app. The
+same analysis runs from a terminal and writes results to disk — no web server,
+no WebSocket, no renderer holding your data:
+
+```bash
+python -m avo_qi.cli WELL.las --out results/
+```
+
+It writes the QC summary and per-sample flags, the standardised and
+time-converted well, the reflector table with classes and lithology pairs, the
+gather as CSV and NPY, the angle stacks, a text report, and a PDF of figures
+drawn with Matplotlib's Agg backend — a file writer, not a display.
+
+Useful options:
+
+```bash
+--case gas            # pick a fluid case
+--top 2030 --base 2100  # analyse one interval
+--despike             # repair spikes in Vp, Vs, RHOB
+--drop-flagged        # discard samples that failed a QC check
+--method aki_richards # or zoeppritz (default)
+--freq 35             # Ricker peak frequency
+--no-figures          # tables only, and no Matplotlib needed
+```
+
+`avo_qi/core/` imports neither Streamlit nor Plotly, which is what makes this
+possible. A test in `avo_qi/tests/test_cli.py` runs the whole workflow with
+every outbound connection blocked and asserts none is attempted, and a second
+asserts that importing the CLI does not load a web stack at all.
+
 ## Verifying it yourself
 
 Two checks, both runnable on your machine with your own well:

@@ -27,9 +27,16 @@ def convolve_series(rc, wavelet):
     wavelet = np.asarray(wavelet, dtype=float).ravel()
     if wavelet.size == 0:
         raise ValueError("wavelet is empty")
+    # np.convolve(mode="same") returns max(len(trace), len(wavelet)) samples,
+    # so a window shorter than the wavelet comes back too long. Take the centre
+    # of the full convolution instead: identical to "same" for a normal-length
+    # trace, and still the trace's length for a short one.
+    n = rc.shape[0]
+    start = (wavelet.size - 1) // 2
     out = np.empty_like(rc)
     for j in range(rc.shape[1]):
-        out[:, j] = np.convolve(rc[:, j], wavelet, mode="same")
+        full = np.convolve(rc[:, j], wavelet, mode="full")
+        out[:, j] = full[start:start + n]
     return out
 
 

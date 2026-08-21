@@ -6,4 +6,5 @@ lasio
 plotly
 openpyxl
 segyio        # optional gather export
+matplotlib    # CLI figures (optional)
 pytest        # dev
