@@ -26,6 +26,7 @@ __all__ = [
     "arithmetic_average",
     "half_cycle_samples",
     "block_properties",
+    "blocked_reflectivity",
 ]
 
 
@@ -143,4 +144,54 @@ def block_properties(vp, vs, rho, samples, window, method="backus", guard=0):
             out["vp_lower"][k], out["vs_lower"][k], out["rho_lower"][k] = low
             out["n_lower"][k] = hi_lower - lo_lower
 
+    return out
+
+
+def blocked_reflectivity(vp, vs, rho, samples, angles, window, method="backus",
+                         guard=0, reflectivity_method="zoeppritz",
+                         mask_post_critical=True):
+    """Reflectivity of each interface between its **blocked** layers.
+
+    Blocks a half cycle either side of every interface, then computes
+    ``R(theta)`` between those two averaged layers rather than between two
+    adjacent samples.  On a gradational boundary the adjacent-sample
+    coefficient carries only a fraction of the true contrast; this carries all
+    of it.
+
+    The critical angle is taken from the blocked velocities too — using the
+    adjacent-sample pair would mask the wrong angles.
+
+    Returns
+    -------
+    dict
+        ``rc`` of shape ``(n_reflectors, n_angles)``, ``critical_angle`` per
+        reflector, and the blocked properties from :func:`block_properties`.
+    """
+    from .reflectivity import METHODS, critical_angle, _resolve_method
+
+    angles = np.atleast_1d(np.asarray(angles, dtype=float))
+    samples = np.atleast_1d(np.asarray(samples, dtype=int))
+    blocked = block_properties(vp, vs, rho, samples, window=window, method=method,
+                               guard=guard)
+
+    fn = _resolve_method(reflectivity_method)
+    exact = fn is METHODS["zoeppritz"]
+
+    rc = np.full((samples.size, angles.size), np.nan)
+    theta_c = np.full(samples.size, np.nan)
+
+    for k in range(samples.size):
+        upper = (blocked["vp_upper"][k], blocked["vs_upper"][k], blocked["rho_upper"][k])
+        lower = (blocked["vp_lower"][k], blocked["vs_lower"][k], blocked["rho_lower"][k])
+        if not all(np.isfinite(v) for v in upper + lower):
+            continue
+        rc[k, :] = fn(*upper, *lower, angles)
+        theta_c[k] = critical_angle(upper[0], lower[0])
+        if mask_post_critical and exact and np.isfinite(theta_c[k]):
+            rc[k, angles >= theta_c[k]] = np.nan
+
+    out = dict(blocked)
+    out["rc"] = rc
+    out["critical_angle"] = theta_c
+    out["samples"] = samples
     return out

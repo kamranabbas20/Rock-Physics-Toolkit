@@ -10,14 +10,23 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from avo_qi.core.blocking import blocked_reflectivity, half_cycle_samples  # noqa: E402
 from avo_qi.core.lithology import interface_lithology  # noqa: E402
+from avo_qi.core.tuning import (  # noqa: E402
+    apparent_period,
+    tuned_amplitudes,
+    tuning_thickness_from_wavelet,
+)
 from avo_qi.core.avo import (  # noqa: E402
     background_trend,
+    classify_array,
     compare_cases,
     reflector_avo,
+    shuey_fit,
 )
 from avo_qi.core.reflectivity import (  # noqa: E402
     aki_richards_rpp,
@@ -69,10 +78,82 @@ if angles.size < 2:
     st.stop()
 
 rc = reflectivity_series(vp, vs, rho, angles, method=settings.method)
+
+# --- how the untuned response is measured ------------------------------------
+st.subheader("Untuned response")
+c1, c2, c3 = st.columns([2, 1, 1])
+blocking_mode = c1.radio(
+    "Layer properties from",
+    ["Half-cycle blocked layers", "Adjacent samples"],
+    horizontal=True,
+    help="Two adjacent samples carry the true layer contrast only when the "
+         "boundary is a step. On a gradational boundary the contrast splits "
+         "across several samples and no single interface carries it.",
+)
+use_blocking = blocking_mode.startswith("Half-cycle")
+block_method = c2.selectbox("Average", ["backus", "mean"], disabled=not use_blocking,
+                            help="Backus is the correct elastic upscaling; the "
+                                 "arithmetic mean is easier to read but is not "
+                                 "what a wave does.")
+guard = c3.number_input("Guard (samples)", 0, 20, 2, 1, disabled=not use_blocking,
+                        help="Skip this many samples either side of the boundary "
+                             "so a gradational ramp is excluded from both averages.")
+
+_, page_wavelet = build_wavelet(settings)
+window = half_cycle_samples(apparent_period(page_wavelet, settings.dt), settings.dt)
+tuning_twt = tuning_thickness_from_wavelet(page_wavelet, settings.dt)
+
 table = reflector_avo(
     rc, vp, vs, rho, angles, method=settings.method, both=True,
     depth=depth, twt=twt, threshold=settings.threshold, a_tol=settings.a_tol,
 )
+
+if use_blocking and not table.empty:
+    adjacent = table[["A_shuey", "B_shuey", "avo_class"]].rename(
+        columns={"A_shuey": "A_adjacent", "B_shuey": "B_adjacent",
+                 "avo_class": "class_adjacent"}).reset_index(drop=True)
+    blocked = blocked_reflectivity(
+        vp, vs, rho, table["sample"].to_numpy(), angles, window=window,
+        method=block_method, guard=int(guard), reflectivity_method=settings.method,
+    )
+    rc_blocked = np.zeros_like(rc)
+    rc_blocked[table["sample"].to_numpy(), :] = np.nan_to_num(blocked["rc"], nan=0.0)
+    blocked_mask = np.isnan(blocked["rc"])
+
+    rc_for_fit = rc_blocked.copy()
+    rc_for_fit[table["sample"].to_numpy(), :] = blocked["rc"]
+    table = reflector_avo(
+        rc_for_fit, vp, vs, rho, angles, method=settings.method, both=True,
+        depth=depth, twt=twt, samples=table["sample"].to_numpy(),
+        a_tol=settings.a_tol, mask_post_critical=False,
+    )
+    table["critical_angle"] = blocked["critical_angle"]
+    table["n_angles"] = (~blocked_mask).sum(axis=1)
+    table = pd.concat([table, adjacent], axis=1)
+    table["dA_blocking"] = table["A_shuey"] - table["A_adjacent"]
+
+    moved = int((table["avo_class"] != table["class_adjacent"]).sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Blocking window", f"±{window} samples",
+              f"{window * settings.dt * 1000:.0f} ms — a half cycle")
+    c2.metric("Largest change in A", f"{table['dA_blocking'].abs().max():+.4f}")
+    c3.metric("Reflectors that change class", moved,
+              delta=None if moved == 0 else "vs adjacent samples",
+              delta_color="off")
+    if moved:
+        st.info(
+            f"{moved} reflector(s) classify differently once each side is averaged "
+            "over a half cycle. On a gradational boundary the adjacent-sample "
+            "coefficient is the weaker, not the truer, of the two.",
+            icon=":material/info:",
+        )
+else:
+    st.caption(
+        "Using two adjacent log samples per interface. Exact for a blocky log; "
+        "on a gradational boundary the contrast splits across samples and this "
+        "under-reads it."
+    )
+st.divider()
 
 if table.empty:
     st.warning(
@@ -368,6 +449,84 @@ with detail_col:
             f"Vs {vs[i + 1]:.0f} m/s, ρ {rho[i + 1]:.3f} g/cc "
             f"(Vp/Vs {vp[i + 1] / vs[i + 1]:.2f})."
         )
+
+# ---------------------------------------------------------------- tuning ---
+st.divider()
+st.header("Tuned vs untuned")
+st.caption(
+    "**Untuned** is the interface response — the reflection coefficient at the "
+    "boundary, with no wavelet. **Tuned** is what a seismic pick returns: once "
+    "the wavelet is convolved, a bed thinner than a quarter wavelength has its "
+    "top and base overlapping, so the picked amplitude is an interference "
+    "composite. Because the top and base vary differently with angle, tuning "
+    "moves the gradient too — a bed can change AVO class on thickness alone."
+)
+
+tuned_gather = build_gather(vp, vs, rho, angles, page_wavelet, dt=settings.dt,
+                            method=settings.method)
+picks = tuned_amplitudes(
+    tuned_gather, table["sample"].to_numpy(),
+    half_window=max(window // 2, 2),
+    polarity=np.sign(table["R0"].to_numpy(float)),
+)
+measured = picks["amplitude"].copy()
+theta_c = table["critical_angle"].to_numpy(float)
+for k in range(measured.shape[0]):
+    if np.isfinite(theta_c[k]):
+        measured[k, angles >= theta_c[k]] = np.nan
+
+scale = float(page_wavelet[int(np.argmax(np.abs(page_wavelet)))])
+A_tuned, B_tuned = shuey_fit(measured, angles)
+A_thick = table["A_shuey"].to_numpy(float) * scale
+B_thick = table["B_shuey"].to_numpy(float) * scale
+class_tuned = classify_array(A_tuned, B_tuned, a_tol=settings.a_tol)
+changed = class_tuned != table["avo_class"].to_numpy()
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Tuning thickness", f"{tuning_twt * 1000:.1f} ms TWT",
+          "half a wavelet cycle")
+c2.metric("Largest gradient shift", f"{np.nanmax(np.abs(B_tuned - B_thick)):+.4f}")
+c3.metric("Reflectors that change class", int(changed.sum()),
+          delta=None if not changed.any() else "tuning alone", delta_color="off")
+
+tuning_table = pd.DataFrame({
+    "depth": table["depth"] if "depth" in table.columns else table["sample"],
+    "twt": table["twt"] if "twt" in table.columns else np.nan,
+    "A_untuned": A_thick, "B_untuned": B_thick,
+    "A_tuned": A_tuned, "B_tuned": B_tuned,
+    "class_untuned": table["avo_class"].to_numpy(),
+    "class_tuned": class_tuned,
+    "dB_tuning": B_tuned - B_thick,
+    "changes_class": changed,
+}).round(4)
+st.dataframe(tuning_table, use_container_width=True, hide_index=True)
+st.caption(
+    "`A_untuned` is the interface fit carried through the wavelet, so both "
+    "columns are in the same units and a thick bed reads identically in each. "
+    "Any difference is interference, not scaling."
+)
+
+fig = go.Figure()
+for label, A_, B_, dash in (("untuned (interface)", A_thick, B_thick, None),
+                            ("tuned (as picked)", A_tuned, B_tuned, "dot")):
+    fig.add_trace(go.Scatter(
+        x=A_, y=B_, mode="markers", name=label,
+        marker=dict(size=12, symbol="circle" if dash is None else "diamond",
+                    line=dict(width=1, color="#fff")),
+    ))
+for k in range(len(table)):
+    if np.all(np.isfinite([A_thick[k], B_thick[k], A_tuned[k], B_tuned[k]])):
+        fig.add_annotation(x=A_tuned[k], y=B_tuned[k], ax=A_thick[k], ay=B_thick[k],
+                           xref="x", yref="y", axref="x", ayref="y",
+                           showarrow=True, arrowhead=2, arrowwidth=1.3,
+                           arrowcolor="#888", opacity=0.8)
+fig.add_hline(y=0, line=dict(color="#666", width=1))
+fig.add_vline(x=0, line=dict(color="#666", width=1))
+fig.update_layout(xaxis_title="Intercept A", yaxis_title="Gradient B", height=560,
+                  margin=dict(l=60, r=20, t=40, b=50),
+                  legend=dict(orientation="h", yanchor="bottom", y=1.02))
+st.plotly_chart(fig, use_container_width=True)
+st.caption("Each arrow is what tuning does to that reflector on this well.")
 
 # ------------------------------------------------- gather, class-coloured --
 st.divider()

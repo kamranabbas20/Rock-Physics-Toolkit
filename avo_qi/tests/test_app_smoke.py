@@ -348,3 +348,51 @@ class TestLoadAndQcPage:
 
     def test_exports_the_qc_flags(self, qc_page):
         assert any("QC flags" in b.label for b in qc_page.download_button)
+
+
+class TestBlockingAndTuningInTheApp:
+    """Both were built in core/ before they reached a page; these pin that they
+    are now actually wired in."""
+
+    def test_the_untuned_source_is_selectable(self, avo_page):
+        labels = {r.label for r in avo_page.radio}
+        assert "Layer properties from" in labels
+
+    def test_blocking_defaults_to_half_cycle_layers(self, avo_page):
+        control = next(r for r in avo_page.radio if r.label == "Layer properties from")
+        assert control.value.startswith("Half-cycle")
+
+    def test_blocking_reports_its_window(self, avo_page):
+        labels = {m.label for m in avo_page.metric}
+        assert "Blocking window" in labels
+        assert "Largest change in A" in labels
+
+    def test_the_tuning_section_is_present(self, avo_page):
+        headers = {h.value for h in avo_page.header}
+        assert "Tuned vs untuned" in headers
+        labels = {m.label for m in avo_page.metric}
+        assert "Tuning thickness" in labels
+        assert "Largest gradient shift" in labels
+
+    def test_the_tuning_table_compares_both(self, avo_page):
+        frames = [d.value for d in avo_page.dataframe if hasattr(d.value, "columns")]
+        tuning = [f for f in frames if "class_tuned" in f.columns]
+        assert tuning, "no tuned-vs-untuned table on the page"
+        table = tuning[0]
+        for column in ("A_untuned", "A_tuned", "class_untuned", "changes_class"):
+            assert column in table.columns
+
+    def test_switching_to_adjacent_samples_still_runs(self):
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=180)
+        well, raw, units = demo_well()
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = raw
+        at.session_state["raw_units"] = units
+        at.run()
+        assert not at.exception
+        control = next(r for r in at.radio if r.label == "Layer properties from")
+        control.set_value("Adjacent samples").run()
+        assert not at.exception
+        # Without blocking there is nothing to compare against.
+        assert "Blocking window" not in {m.label for m in at.metric}
