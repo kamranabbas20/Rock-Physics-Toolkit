@@ -5,12 +5,14 @@ from . import (
     avo,
     blocking,
     lithology,
+    mixing,
     qc,
     reflectivity,
     rockphysics,
     synthetic,
     tuning,
     wavelet,
+    zones,
 )
 
 __all__ = [
@@ -18,10 +20,12 @@ __all__ = [
     "avo",
     "blocking",
     "lithology",
+    "mixing",
     "qc",
     "reflectivity",
     "rockphysics",
     "synthetic",
     "tuning",
     "wavelet",
+    "zones",
 ]

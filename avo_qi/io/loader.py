@@ -36,7 +36,7 @@ __all__ = [
 ]
 
 #: The curves ``core/`` needs, plus the optional ones the crossplots colour by.
-CANONICAL = ["DEPTH", "VP", "VS", "RHOB", "GR", "VSH", "PHI", "SW", "FACIES"]
+CANONICAL = ["DEPTH", "VP", "VS", "RHOB", "GR", "VSH", "PHI", "SW", "FACIES", "ZONE"]
 
 #: Candidate source mnemonics for each canonical curve, in priority order.
 #: Sonic mnemonics are listed too: they are converted to velocity on load.
@@ -49,7 +49,9 @@ MNEMONIC_MAP = {
     "VSH": ["VSH", "VSHALE", "VCL", "VCLAY"],
     "PHI": ["PHI", "PHIE", "PHIT", "POR", "NPHI", "PHID"],
     "SW": ["SW", "SWE", "SWT", "SUW"],
-    "FACIES": ["FACIES", "LITH", "LITHOLOGY", "FACIE", "ZONE"],
+    "FACIES": ["FACIES", "LITH", "LITHOLOGY", "FACIE"],
+    "ZONE": ["ZONE", "ZONES", "ZONELOG", "FORMATION", "FORM", "FM", "MARKER",
+             "MARKERS", "UNIT", "STRAT", "HORIZON"],
 }
 
 #: Mnemonics that carry slowness rather than velocity.

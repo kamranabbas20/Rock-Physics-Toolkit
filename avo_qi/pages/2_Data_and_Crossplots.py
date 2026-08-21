@@ -20,6 +20,8 @@ from avo_qi.ui import (  # noqa: E402
     crossplot,
     lithology_crossplot,
     lithology_labels,
+    apply_zone_filter,
+    zone_labels,
     log_track_figure,
     page_setup,
     require_well,
@@ -66,13 +68,15 @@ st.divider()
 st.subheader("QI crossplots")
 
 litho = lithology_labels(df, settings)
-keep = apply_lithology_filter(df, litho, settings)
+zones = zone_labels(df, well, settings)
+keep = apply_lithology_filter(df, litho, settings) & apply_zone_filter(zones, settings)
 if not keep.all():
     hidden = int((~keep).sum())
     st.caption(f"Lithology filter is hiding {hidden} of {len(df)} samples "
                f"({', '.join(settings.lithologies) or 'nothing selected'}).")
 df = df[keep].reset_index(drop=True)
 litho = litho[keep]
+zones = zones[keep]
 if df.empty:
     st.warning("The lithology filter has excluded every sample. Widen it in the sidebar.")
     st.stop()

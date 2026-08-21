@@ -25,6 +25,7 @@ from avo_qi.core.lithology import (
     vsh_from_gr,
 )
 from avo_qi.core.wavelet import bandpass_ormsby, load_wavelet, ricker
+from avo_qi.core.zones import UNZONED, assign_zones, zones_from_curve
 from avo_qi.io.loader import depth_to_twt, read_well, resample_to_time, standardise
 
 DEMO_WELL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data", "demo_well.las")
@@ -81,6 +82,8 @@ class Settings:
     wavelet_length: float = 0.128
     threshold: float = 0.01
     case: str = None
+    zones: list = field(default_factory=list)
+    zone_names: dict = field(default_factory=dict)
     vsh_cutoffs: dict = field(default_factory=lambda: dict(DEFAULT_VSH_CUTOFFS))
     lithologies: list = field(default_factory=lambda: list(LITHOLOGIES) + [UNDEFINED])
     gr_method: str = "linear"
@@ -125,6 +128,15 @@ def load_demo_well():
     df, units = read_well(DEMO_WELL)
     well = standardise(df, units=units, name="DEMO-1")
     set_well(well, raw=df, units=units)
+    # The demo well's zone codes come with a published mapping; a real well's
+    # usually does not, and the codes then stand in as their own names.
+    from avo_qi.sample_data.make_demo_well import ZONE_NAMES
+
+    settings = st.session_state.get("settings")
+    if settings is not None:
+        settings.zone_names = dict(ZONE_NAMES)
+        settings.zones = []
+        st.session_state.pop("zone_cache", None)
     return well
 
 
@@ -270,6 +282,19 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
                     st.caption("Upload a wavelet, or the Ricker default is used.")
             s.wavelet_length = st.number_input("Wavelet length (s)", 0.032, 0.512,
                                                float(s.wavelet_length), 0.016, format="%.3f")
+
+        if well is not None and "ZONE" in well.df.columns:
+            table = well_zones(well, s)
+            if table is not None and len(table):
+                st.header("Zonation")
+                available = list(dict.fromkeys(table["zone"]))
+                current = [z for z in (s.zones or available) if z in available]
+                s.zones = st.multiselect(
+                    "Zones to analyse", available, default=current or available,
+                    help="Restricts the crossplots, the reflectors and the rock "
+                         "physics to the selected zones.",
+                )
+                st.caption(f"{len(table)} interval(s) from the ZONE curve.")
 
         if well is not None:
             st.header("Lithology")
@@ -771,3 +796,41 @@ def lithology_crossplot(frame, labels, x, y, title=None, height=520, size=4):
         legend=dict(orientation="v", yanchor="top", y=1.0, x=1.02),
     )
     return fig
+
+
+def well_zones(well, settings):
+    """Zone intervals from the well's ZONE curve, cached on the settings.
+
+    Returns None when the well carries no zonation.
+    """
+    if "ZONE" not in well.df.columns:
+        return None
+    key = ("zones", id(well), tuple(sorted(settings.zone_names.items())))
+    cache = st.session_state.setdefault("zone_cache", {})
+    if key in cache:
+        return cache[key]
+    table = zones_from_curve(
+        well.df["DEPTH"].to_numpy(float), well.df["ZONE"].to_numpy(),
+        names=settings.zone_names or None,
+    )
+    if len(cache) > 8:
+        cache.clear()
+    cache[key] = table
+    return table
+
+
+def zone_labels(frame, well, settings):
+    """Zone name per sample of ``frame``, or all-unzoned where there is none."""
+    table = well_zones(well, settings) if well is not None else None
+    if table is None or not len(table) or "DEPTH" not in frame.columns:
+        return np.full(len(frame), UNZONED, dtype=object)
+    return assign_zones(frame["DEPTH"].to_numpy(float), table)
+
+
+def apply_zone_filter(labels, settings):
+    """Mask of samples in the selected zones; everything when none is chosen."""
+    labels = np.asarray(labels, dtype=object)
+    if not settings.zones:
+        return np.ones(labels.shape, dtype=bool)
+    selected = set(settings.zones)
+    return np.array([label in selected for label in labels], dtype=bool)

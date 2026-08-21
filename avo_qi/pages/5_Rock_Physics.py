@@ -36,12 +36,18 @@ from avo_qi.core.rockphysics import (  # noqa: E402
     soft_sand_dry,
     stiff_sand_dry,
     velocities_from_moduli,
-    voigt,
-    reuss,
     wyllie,
+)
+from avo_qi.core.mixing import (  # noqa: E402
+    MINERAL_MIXING_LAWS,
+    fluid_density,
+    fluid_mix,
+    mineral_mix,
 )
 from avo_qi.ui import (  # noqa: E402
     add_derived_curves,
+    apply_zone_filter,
+    zone_labels,
     apply_lithology_filter,
     lithology_colour,
     lithology_labels,
@@ -56,9 +62,11 @@ well = require_well()
 
 df = add_derived_curves(well.complete(settings.case).reset_index(drop=True))
 litho = lithology_labels(df, settings)
-keep = apply_lithology_filter(df, litho, settings)
+zones = zone_labels(df, well, settings)
+keep = apply_lithology_filter(df, litho, settings) & apply_zone_filter(zones, settings)
 df = df[keep].reset_index(drop=True)
 litho = litho[keep]
+zones = zones[keep]
 if df.empty:
     st.warning("The lithology filter has excluded every sample. Widen it in the sidebar.")
     st.stop()
@@ -83,36 +91,110 @@ st.caption(
 )
 
 # ------------------------------------------------------------ model setup ---
-with st.expander("Model parameters", expanded=True):
-    c1, c2, c3, c4 = st.columns(4)
-    mineral_names = list(MINERALS)
-    m1 = c1.selectbox("Mineral 1", mineral_names, index=mineral_names.index("quartz"))
-    m2 = c1.selectbox("Mineral 2", mineral_names, index=mineral_names.index("clay"))
-    frac1 = c2.slider(f"Fraction {m1}", 0.0, 1.0, 1.0, 0.05,
-                      help=f"The remainder is {m2}.")
-    # A substituted case names its own pore fluid, so follow it by default.
-    fluid_options = list(FLUIDS)
-    case_fluid = settings.case if settings.case in fluid_options else "brine"
-    fluid_name = c2.selectbox(
-        "Pore fluid", fluid_options, index=fluid_options.index(case_fluid),
-        help="Defaults to the fluid named by the selected case in the sidebar.",
+mineral_tab, fluid_tab, frame_tab = st.tabs(
+    ["Mineral matrix", "Pore fluid", "Frame model"]
+)
+
+with mineral_tab:
+    st.caption(
+        "Bounds are the honest answer for a mixture — the geometry that would "
+        "pin down a single value is not known. Pick which bound, or which "
+        "average of them, to carry into the models."
     )
-    phi_c = c3.slider("Critical porosity φc", 0.20, 0.50, 0.36, 0.01)
-    pressure_mpa = c3.slider("Effective pressure (MPa)", 1.0, 60.0, 10.0, 1.0)
+    mineral_names = list(MINERALS)
+    chosen = st.multiselect("Minerals", mineral_names, default=["quartz", "clay"])
+    if not chosen:
+        st.warning("Pick at least one mineral.")
+        st.stop()
+    cols = st.columns(max(len(chosen), 1))
+    raw_fractions = [
+        cols[i].number_input(f"{name} fraction", 0.0, 1.0,
+                             1.0 if i == 0 else 0.0, 0.05, key=f"minfrac_{name}")
+        for i, name in enumerate(chosen)
+    ]
+    if sum(raw_fractions) <= 0:
+        st.warning("Mineral fractions must sum to more than zero.")
+        st.stop()
+    mineral_law = st.selectbox(
+        "Mixing law", MINERAL_MIXING_LAWS, index=MINERAL_MIXING_LAWS.index("hill"),
+        format_func=lambda m: {
+            "voigt": "Voigt (upper bound)", "reuss": "Reuss (lower bound)",
+            "hill": "Voigt-Reuss-Hill average",
+            "hs_upper": "Hashin-Shtrikman upper", "hs_lower": "Hashin-Shtrikman lower",
+            "hs_average": "Hashin-Shtrikman average",
+        }[m],
+    )
+    K_min, G_min, rho_min = mineral_mix(
+        [MINERALS[n][0] for n in chosen], [MINERALS[n][1] for n in chosen],
+        [MINERALS[n][2] for n in chosen], raw_fractions, method=mineral_law,
+    )
+    total = sum(raw_fractions)
+    st.caption("Normalised: " + ", ".join(
+        f"{n} {f / total:.0%}" for n, f in zip(chosen, raw_fractions)))
+
+with fluid_tab:
+    st.caption(
+        "How the phases are arranged matters as much as how much of each there "
+        "is. Finely mixed, they share a pressure and average harmonically "
+        "(Wood) — a little gas dominates. Segregated into patches, they stiffen "
+        "independently and average arithmetically. Brie parks a saturation "
+        "between the two."
+    )
+    fluid_names = list(FLUIDS)
+    case_fluid = settings.case if settings.case in fluid_names else "brine"
+    fluid_law = st.selectbox(
+        "Fluid mixing law", ["single", "wood", "brie", "hill", "patchy"],
+        format_func=lambda m: {
+            "single": "Single phase", "wood": "Wood (uniform saturation)",
+            "brie": "Brie (empirical)", "hill": "Hill (midpoint)",
+            "patchy": "Patchy (segregated)",
+        }[m],
+    )
+    if fluid_law == "single":
+        fluid_name = st.selectbox("Pore fluid", fluid_names,
+                                  index=fluid_names.index(case_fluid),
+                                  help="Defaults to the case chosen in the sidebar.")
+        K_fl, rho_fl = FLUIDS[fluid_name]
+        mix_label = fluid_name
+    else:
+        c1, c2, c3 = st.columns(3)
+        sw = c1.slider("Sw (brine)", 0.0, 1.0, 0.7, 0.05)
+        so = c2.slider("So (oil)", 0.0, 1.0, 0.0, 0.05)
+        sg = c3.slider("Sg (gas)", 0.0, 1.0, 0.3, 0.05)
+        if sw + so + sg <= 0:
+            st.warning("Saturations must sum to more than zero.")
+            st.stop()
+        brie_exponent = st.slider("Brie exponent", 1.0, 8.0, 3.0, 0.5,
+                                  disabled=fluid_law != "brie",
+                                  help="1 reproduces the patchy limit; larger "
+                                       "values bend towards Wood.")
+        moduli = [FLUIDS["brine"][0], FLUIDS["oil"][0], FLUIDS["gas"][0]]
+        densities = [FLUIDS["brine"][1], FLUIDS["oil"][1], FLUIDS["gas"][1]]
+        saturations = [sw, so, sg]
+        K_fl = fluid_mix(moduli, saturations, fluid_law, brie_exponent=brie_exponent,
+                         gas_index=2)
+        rho_fl = fluid_density(densities, saturations)
+        total_s = sw + so + sg
+        mix_label = (f"{fluid_law} — Sw {sw / total_s:.0%} / So {so / total_s:.0%}"
+                     f" / Sg {sg / total_s:.0%}")
+
+        span = {name: fluid_mix(moduli, saturations, name, brie_exponent=brie_exponent,
+                                gas_index=2)
+                for name in ("wood", "brie", "hill", "patchy")}
+        st.caption("Same saturations under every law: " + " · ".join(
+            f"**{k}** {v:.3f}" for k, v in span.items()) + " GPa")
+
+with frame_tab:
+    c1, c2 = st.columns(2)
+    phi_c = c1.slider("Critical porosity φc", 0.20, 0.50, 0.36, 0.01)
+    pressure_mpa = c1.slider("Effective pressure (MPa)", 1.0, 60.0, 10.0, 1.0)
     n_default = float(coordination_number(phi_c))
-    n_grains = c4.slider("Coordination number n", 4.0, 16.0, round(n_default, 1), 0.1,
+    n_grains = c2.slider("Coordination number n", 4.0, 16.0, round(n_default, 1), 0.1,
                          help=f"Murphy's relation gives {n_default:.1f} at φc = {phi_c:.2f}.")
-    shear_factor = c4.slider("Shear factor f", 0.0, 1.0, 1.0, 0.05,
+    shear_factor = c2.slider("Shear factor f", 0.0, 1.0, 1.0, 0.05,
                              help="1 = perfect adhesion between grains, 0 = frictionless.")
 
-K1, G1, rho1 = MINERALS[m1]
-K2, G2, rho2 = MINERALS[m2]
-K_min = voigt([K1, K2], [frac1, 1 - frac1])
-G_min = voigt([G1, G2], [frac1, 1 - frac1])
-K_min = 0.5 * (K_min + reuss([K1, K2], [frac1, 1 - frac1]))     # Hill average
-G_min = 0.5 * (G_min + reuss([G1, G2], [frac1, 1 - frac1]))
-rho_min = frac1 * rho1 + (1 - frac1) * rho2
-K_fl, rho_fl = FLUIDS[fluid_name]
+fluid_name = mix_label
 pressure = pressure_mpa * 1e6
 
 c1, c2, c3, c4 = st.columns(4)

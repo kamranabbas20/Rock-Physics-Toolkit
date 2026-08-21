@@ -54,11 +54,19 @@ def density_porosity(rho, rho_matrix, rho_fluid):
     return (rho_matrix - rho) / (rho_matrix - rho_fluid)
 
 
+#: Zone codes written to the LAS, with the names an interpreter would map them
+#: to.  A real well carries the codes; the mapping usually lives outside the
+#: file, which is why the toolkit lets you supply it.
+ZONE_NAMES = {1: "Shale", 2: "Gas Sand", 3: "Brine Sand", 4: "Cemented Streak"}
+
+
 class Layer:
     """One layer: shared curves plus its (vp, vs, rho) triple per fluid case."""
 
-    def __init__(self, name, gr, vsh, sw, rho_matrix, rho_fluid, cases, insitu):
+    def __init__(self, name, gr, vsh, sw, rho_matrix, rho_fluid, cases, insitu,
+                 zone=1):
         self.name = name
+        self.zone = zone
         self.gr = gr
         self.vsh = vsh
         self.sw = sw
@@ -76,7 +84,7 @@ class Layer:
 
 #: A non-reservoir shale: fluid substitution does not move it.
 SHALE = Layer(
-    "shale", gr=95.0, vsh=0.85, sw=1.00,
+    "shale", gr=95.0, vsh=0.85, sw=1.00, zone=1,
     rho_matrix=RHO_CLAY, rho_fluid=RHO_BRINE, insitu="brine",
     cases={
         "brine": (2400.0, 1200.0, 2.3500),
@@ -87,7 +95,7 @@ SHALE = Layer(
 
 #: The Class III gas sand.  Its gas case is the spec-pinned one.
 GAS_SAND = Layer(
-    "gas sand", gr=25.0, vsh=0.10, sw=0.20,
+    "gas sand", gr=25.0, vsh=0.10, sw=0.20, zone=2,
     rho_matrix=RHO_QUARTZ, rho_fluid=RHO_GAS, insitu="gas",
     cases={
         "brine": (2717.9, 1244.2, 2.2925),
@@ -98,7 +106,7 @@ GAS_SAND = Layer(
 
 #: A brine sand: soft-sand dry frame at 26% porosity, then saturated.
 BRINE_SAND = Layer(
-    "brine sand", gr=30.0, vsh=0.12, sw=1.00,
+    "brine sand", gr=30.0, vsh=0.12, sw=1.00, zone=3,
     rho_matrix=RHO_QUARTZ, rho_fluid=RHO_BRINE, insitu="brine",
     cases={
         "brine": (2830.2, 1498.9, 2.2444),
@@ -110,7 +118,7 @@ BRINE_SAND = Layer(
 #: A cemented streak: stiff-sand dry frame at 18% porosity.  A stiff frame is
 #: barely fluid-sensitive, which is the point of including it.
 HARD_STREAK = Layer(
-    "cemented sand", gr=40.0, vsh=0.15, sw=1.00,
+    "cemented sand", gr=40.0, vsh=0.15, sw=1.00, zone=4,
     rho_matrix=RHO_QUARTZ, rho_fluid=RHO_BRINE, insitu="brine",
     cases={
         "brine": (4265.3, 2704.1, 2.3692),
@@ -140,7 +148,7 @@ def _curve_names():
     names = ["VP", "VS", "RHOB"]
     for case, suffix in CASE_SUFFIX.items():
         names += [f"VP_{suffix}", f"VS_{suffix}", f"RHOB_{suffix}"]
-    return names + ["GR", "VSH", "PHI", "SW"]
+    return names + ["GR", "VSH", "PHI", "SW", "ZONE"]
 
 
 def build_logs(step=STEP, layers=LAYERS, noise=True, seed=NOISE_SEED):
@@ -162,7 +170,7 @@ def build_logs(step=STEP, layers=LAYERS, noise=True, seed=NOISE_SEED):
             values[f"VS_{suffix}"] = c_vs
             values[f"RHOB_{suffix}"] = c_rho
         values.update({"GR": layer.gr, "VSH": layer.vsh,
-                       "PHI": layer.phi, "SW": layer.sw})
+                       "PHI": layer.phi, "SW": layer.sw, "ZONE": layer.zone})
         for key, value in values.items():
             curves[key][sel] = value
 
@@ -181,6 +189,8 @@ def build_logs(step=STEP, layers=LAYERS, noise=True, seed=NOISE_SEED):
         draws = {base: rng.normal(0.0, sigma, depth.size) for base, sigma in NOISE.items()}
         for key in names:
             base = key.split("_")[0]
+            if base == "ZONE":          # a zone code is a label, not a measurement
+                continue
             if base in draws:
                 curves[key] = curves[key] + draws[base]
 
@@ -206,7 +216,7 @@ def write_las(path, curves):
             return "M/S"
         if name.startswith("RHOB"):
             return "G/C3"
-        return {"GR": "GAPI"}.get(name, "V/V")
+        return {"GR": "GAPI", "ZONE": ""}.get(name, "V/V")
 
     case_of = {suffix: case for case, suffix in CASE_SUFFIX.items()}
 
@@ -216,6 +226,7 @@ def write_las(path, curves):
             "VP": "Compressional velocity", "VS": "Shear velocity",
             "RHOB": "Bulk density", "GR": "Gamma ray", "VSH": "Shale volume",
             "PHI": "Effective porosity", "SW": "Water saturation",
+            "ZONE": "Zone code: 1 shale, 2 gas sand, 3 brine sand, 4 cemented",
         }[parts[0]]
         if len(parts) > 1:
             return f"{base} - {case_of[parts[1]]} substituted"

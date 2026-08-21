@@ -50,6 +50,8 @@ avo_qi/
 │   ├── rockphysics.py          # bounds, trends, dry-frame granular models
 │   ├── blocking.py             # half-cycle upscaling to seismic resolution
 │   ├── lithology.py            # VSH cutoffs, lithology pairs, GR transforms
+│   ├── mixing.py               # fluid and mineral mixing laws
+│   ├── zones.py                # zonation from a LAS curve or a tops list
 │   ├── qc.py                   # nulls, ranges, spikes, elastic consistency
 │   └── tuning.py               # tuned vs untuned AVO, wedge model
 ├── pages/                      # the five Streamlit pages
@@ -60,6 +62,42 @@ avo_qi/
 `core/` is dependency-light — numpy and scipy only, with pandas used just to
 assemble the reflector table. It imports no Streamlit and no plotting library,
 so it stays unit-testable on its own.
+
+## Mixing laws
+
+**Fluid mixing** asks what a pore holding brine, oil and gas behaves like, and
+the answer depends on how the phases are arranged. Finely mixed they share a
+pressure and the moduli average harmonically (**Wood**) — a few percent gas
+drops a brine-filled modulus by an order of magnitude. Segregated into patches
+they stiffen independently and average arithmetically (**patchy**) — the same
+gas barely moves it. **Brie** parks a saturation between the two, and **Hill**
+takes the blunt midpoint. Density is always the volume-weighted average: mass
+adds however the phases are arranged, so only the moduli need a law.
+
+**Mineral mixing** takes any number of minerals with **Voigt**, **Reuss**,
+their **Hill** average, or the narrower **Hashin-Shtrikman-Walpole** bounds
+and their average. The n-phase Walpole form reduces exactly to the two-phase
+Hashin-Shtrikman bounds, which is asserted in the tests.
+
+Both are on the *Rock Physics* page under **Mineral matrix** and **Pore
+fluid**, with the same saturations shown under every law so the spread is
+visible rather than hidden behind one number.
+
+## Zonation
+
+A LAS carrying a discrete `ZONE`, `FORMATION`, `MARKER` or `UNIT` curve is
+recognised on load and turned into named intervals. Codes map to names through
+the sidebar; an unmapped code stands in as its own name, so a zonation with no
+legend is still usable. A tops list — names and depths, from a dict or a
+DataFrame — works too.
+
+Zone codes are labels, not measurements, so intervals are built from where the
+code changes rather than by interpolating, and a zone that reappears deeper
+stays a separate interval instead of merging with its earlier occurrence.
+
+The sidebar filters every page by zone, and each reflector carries the zone
+above it, the zone below, and whether it **is** a zone boundary — usually the
+reflector that matters most.
 
 ## Fluid cases
 

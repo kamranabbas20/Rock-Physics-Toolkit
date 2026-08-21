@@ -32,12 +32,32 @@ def demo_well():
 def run_page(path, with_well=True, timeout=90):
     at = AppTest.from_file(path, default_timeout=timeout)
     if with_well:
-        well, raw, units = demo_well()
-        at.session_state["well"] = well
-        at.session_state["raw_df"] = raw
-        at.session_state["raw_units"] = units
+        _inject_demo_well(at)
     at.run()
     return at
+
+
+def _inject_demo_well(at):
+    """Put the demo well into session state the way ``load_demo_well`` does.
+
+    That includes the zone code-to-name mapping, which the real loader applies
+    and without which the zones read back as bare codes.
+    """
+    from avo_qi.sample_data.make_demo_well import ZONE_NAMES
+    from avo_qi.ui import Settings
+
+    well, raw, units = demo_well()
+    at.session_state["well"] = well
+    at.session_state["raw_df"] = raw
+    at.session_state["raw_units"] = units
+    # AppTest's session state raises rather than returning None for a key that
+    # has never been set, so this cannot use .get().
+    try:
+        settings = at.session_state["settings"]
+    except (KeyError, AttributeError):
+        settings = Settings()
+    settings.zone_names = dict(ZONE_NAMES)
+    at.session_state["settings"] = settings
 
 
 class TestLandingPage:
@@ -255,10 +275,7 @@ class TestClassifiedTraceSelection:
         """A click lands in session state and the next run follows it."""
         at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
                                default_timeout=120)
-        well, raw, units = demo_well()
-        at.session_state["well"] = well
-        at.session_state["raw_df"] = raw
-        at.session_state["raw_units"] = units
+        _inject_demo_well(at)
         at.run()
         assert not at.exception
 
@@ -301,10 +318,7 @@ class TestLithologyFilter:
     def test_filtering_to_one_lithology_drops_reflectors(self):
         at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
                                default_timeout=120)
-        well, raw, units = demo_well()
-        at.session_state["well"] = well
-        at.session_state["raw_df"] = raw
-        at.session_state["raw_units"] = units
+        _inject_demo_well(at)
         at.run()
         assert not at.exception
         everything = len(reflector_table(at))
@@ -385,10 +399,7 @@ class TestBlockingAndTuningInTheApp:
     def test_switching_to_adjacent_samples_still_runs(self):
         at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
                                default_timeout=180)
-        well, raw, units = demo_well()
-        at.session_state["well"] = well
-        at.session_state["raw_df"] = raw
-        at.session_state["raw_units"] = units
+        _inject_demo_well(at)
         at.run()
         assert not at.exception
         control = next(r for r in at.radio if r.label == "Layer properties from")
@@ -396,3 +407,45 @@ class TestBlockingAndTuningInTheApp:
         assert not at.exception
         # Without blocking there is nothing to compare against.
         assert "Blocking window" not in {m.label for m in at.metric}
+
+
+class TestZonationAndMixingInTheApp:
+    def test_the_sidebar_offers_the_zone_filter(self, avo_page):
+        labels = {m.label for m in avo_page.multiselect}
+        assert "Zones to analyse" in labels
+
+    def test_reflectors_carry_their_zone(self, avo_page):
+        table = reflector_table(avo_page)
+        for column in ("zone", "zone_below", "is_zone_boundary"):
+            assert column in table.columns
+
+    def test_reservoir_tops_are_flagged_as_zone_boundaries(self, avo_page):
+        table = reflector_table(avo_page)
+        assert table["is_zone_boundary"].any()
+        boundary = table[table["is_zone_boundary"]]
+        assert "Gas Sand" in set(boundary["zone"]) | set(boundary["zone_below"])
+
+    def test_filtering_to_one_zone_drops_reflectors(self):
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=180)
+        _inject_demo_well(at)
+        at.run()
+        assert not at.exception
+        everything = len(reflector_table(at))
+
+        at.session_state["settings"].zones = ["Gas Sand"]
+        at.session_state["zone_cache"] = {}
+        at.run()
+        assert not at.exception
+        assert len(reflector_table(at)) < everything
+
+    def test_rock_physics_offers_the_mixing_laws(self, rock_physics_page):
+        labels = {sb.label for sb in rock_physics_page.selectbox}
+        assert "Mixing law" in labels
+        assert "Fluid mixing law" in labels
+
+    def test_rock_physics_takes_several_minerals(self, rock_physics_page):
+        minerals = next(m for m in rock_physics_page.multiselect
+                        if m.label == "Minerals")
+        assert set(minerals.value) == {"quartz", "clay"}
+        assert "calcite" in minerals.options

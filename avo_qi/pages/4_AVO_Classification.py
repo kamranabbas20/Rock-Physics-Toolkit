@@ -16,6 +16,7 @@ import streamlit as st  # noqa: E402
 
 from avo_qi.core.blocking import blocked_reflectivity, half_cycle_samples  # noqa: E402
 from avo_qi.core.lithology import interface_lithology  # noqa: E402
+from avo_qi.core.zones import zone_of_interface  # noqa: E402
 from avo_qi.core.tuning import (  # noqa: E402
     apparent_period,
     tuned_amplitudes,
@@ -44,6 +45,8 @@ from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     ab_crossplot,
     lithology_labels,
+    apply_zone_filter,
+    zone_labels,
     build_wavelet,
     case_colour,
     classified_trace_figure,
@@ -169,10 +172,39 @@ pairs = interface_lithology(litho, table["sample"].to_numpy())
 table = table.assign(litho_upper=pairs["upper"], litho_lower=pairs["lower"],
                      litho_pair=pairs["pair"])
 
+# Zone per reflector. An interface whose two sides are in different zones is
+# the zone boundary itself, which is usually the reflector of interest.
+zone_per_sample = zone_labels(tw, well, settings)
+zoning = zone_of_interface(zone_per_sample, table["sample"].to_numpy())
+table = table.assign(zone=zoning["zone"], zone_below=zoning["zone_below"],
+                     is_zone_boundary=zoning["is_zone_boundary"])
+if settings.zones:
+    in_zone = apply_zone_filter(table["zone"].to_numpy(), settings) | \
+        apply_zone_filter(table["zone_below"].to_numpy(), settings)
+    if not in_zone.all():
+        st.caption(
+            f"Zone filter is hiding {int((~in_zone).sum())} of {len(table)} "
+            "reflectors — a reflector is kept when either side of it is in a "
+            "selected zone."
+        )
+    table = table[in_zone].reset_index(drop=True)
+    if table.empty:
+        st.warning("No reflector lies in the selected zones. Widen the zone "
+                   "filter in the sidebar.")
+        st.stop()
+
+boundaries = int(table["is_zone_boundary"].sum())
+if boundaries:
+    st.caption(f"{boundaries} of {len(table)} reflectors sit on a zone boundary.")
+
 selected_litho = set(settings.lithologies or [])
 if selected_litho:
+    # Read from the table's own columns, not from `pairs`: an earlier filter
+    # may already have shortened the table, and a stale full-length mask would
+    # not line up with it.
     keep = np.array([(u in selected_litho) or (lo in selected_litho)
-                     for u, lo in zip(pairs["upper"], pairs["lower"])], dtype=bool)
+                     for u, lo in zip(table["litho_upper"], table["litho_lower"])],
+                    dtype=bool)
     if not keep.all():
         st.caption(
             f"Lithology filter is hiding {int((~keep).sum())} of {len(table)} "
