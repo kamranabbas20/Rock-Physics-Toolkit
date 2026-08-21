@@ -162,6 +162,32 @@ python3 -m venv .venv
 reproducible as well as offline. This path is tested end to end: install with
 `--no-index`, run the suite, start the app.
 
+## Yes, your logs go to the browser
+
+Streamlit is client–server even when both halves are on your desk. Python does
+the computing; the **browser does the drawing**, so the values behind every
+plot and table are sent to it over a WebSocket on localhost.
+
+Measured on a 3,938-sample well: **1.8 MB** travels to the browser, and 76% of
+sampled Vp values are present verbatim as raw IEEE-754 float64 bytes in that
+payload. This is not incidental — it is how the charts get drawn.
+
+What that does and does not mean:
+
+- It **never leaves the machine**. The socket is `ws://localhost`, and the
+  browser capture below finds zero requests to any other host.
+- The **browser process holds your logs in memory**. Browser devtools can read
+  them, and so can **any extension with permission to read page content or
+  network traffic**. That is the one real exposure in this design.
+- Nothing is written to browser disk cache — WebSocket frames are not cached —
+  but a browser crash dump could contain the values.
+
+If the data is sensitive, run it in a browser profile with no extensions, or a
+private window with extensions disabled, rather than the browser you use for
+everything else. There is no way to draw an interactive chart without the
+numbers reaching the renderer; the honest mitigation is controlling what else
+is running in that renderer.
+
 ## Verifying it yourself
 
 Two checks, both runnable on your machine with your own well:
