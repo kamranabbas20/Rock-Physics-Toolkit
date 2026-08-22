@@ -5,9 +5,11 @@ RHOB** and carries it through the standard quantitative-interpretation
 workflow: rock-physics crossplots, a synthetic angle gather, and an
 intercept–gradient AVO classification of every reflector.
 
-Fluid substitution is deliberately **out of scope** — no Gassmann, no
-Batzle-Wang. The input well is taken as-is; if substitution is needed it
-belongs in a separate upstream tool.
+A well that arrives with its fluid cases already substituted is the normal
+path and is read as-is. The Rock Physics page can also **model** them here: a
+forward model driven from `VSH`, `PHIT` and `SW`, and Gassmann fluid
+substitution at Batzle-Wang reservoir conditions. Anything computed is
+labelled *(computed)* wherever it appears.
 
 The full build brief is [`avo_qi/SPEC.md`](avo_qi/SPEC.md).
 
@@ -51,6 +53,10 @@ avo_qi/
 │   ├── blocking.py             # half-cycle upscaling to seismic resolution
 │   ├── lithology.py            # VSH cutoffs, lithology pairs, GR transforms
 │   ├── mixing.py               # fluid and mineral mixing laws
+│   ├── gassmann.py             # fluid substitution, with a per-sample validity mask
+│   ├── fluids.py               # Batzle-Wang K and rho at reservoir P and T
+│   ├── petro.py                # per-sample forward model from VSH/PHIT/SW
+│   ├── misfit.py               # bounds checks and predicted-vs-measured residuals
 │   ├── zones.py                # zonation from a LAS curve or a tops list
 │   ├── qc.py                   # nulls, ranges, spikes, elastic consistency
 │   └── tuning.py               # tuned vs untuned AVO, wedge model
@@ -103,7 +109,9 @@ reflector that matters most.
 
 A well that arrives with substitution already done — `VP_BR`, `VS_OIL`,
 `RHOB_GAS` and friends — is recognised automatically and every case becomes
-selectable in the sidebar. Recognised suffixes cover brine (`_BR`, `_BRINE`,
+selectable in the sidebar. Cases substituted *here* are written in the same
+scheme and join the same selector, marked **(computed)**. Recognised suffixes
+cover brine (`_BR`, `_BRINE`,
 `_WET`, ...), oil, gas and in situ, with or without the underscore; a case is
 only kept when all three of Vp, Vs and RHOB are present for it. Curves like
 `VSH` are never mistaken for a shear log, because a suffix has to be a known
@@ -152,17 +160,58 @@ extremum of the opposite sign that way. A reflector with no turning point of
 its own polarity in range is drawn hollow at the interface time, because its
 amplitude is not an extremum and should not be read as one.
 
-## No fluid substitution
+## The forward model, and where the numbers come from
 
-There is no Gassmann and no Batzle-Wang anywhere in this toolkit, by design —
-the input well is taken as-is, fluid cases included. The toolkit recognises
-substituted curves; it never produces them. The Rock Physics page stays inside that
-boundary: the Hashin-Shtrikman and Voigt-Reuss-Hill bounds are computed on a
-mineral-plus-fluid mixture, so they bracket the **saturated** rock directly
-without a substitution step, and the granular models (Hertz-Mindlin, soft
-sand, stiff sand, critical porosity) are **dry-frame** curves, labelled as
-such wherever they are drawn. Raising a dry frame to a saturated one needs
-Gassmann, so the page says so rather than doing it.
+The bounds and frame curves are set by hand and stay **independent of the
+elastic logs**. That is the point of them: a model whose inputs are derived
+from the measurements it is tested against cannot disagree with them, and a
+model that cannot disagree is not a diagnostic. Where the well misses an
+overlay, the page counts the miss rather than leaving it to the eye — *"93% of
+1,051 samples lie inside the bounds; the worst breach is 1.8 GPa below the
+lower bound at 2104 m."*
+
+The **Forward model** tab is the one place the well drives the model, and it
+is not circular. It runs
+
+```
+VSH  → mineral mix   → K_ma, G_ma, ρ_ma
+SW   → fluid mix     → K_fl, ρ_fl
+PHIT → dry frame → Gassmann → K_sat ;  mass balance → ρ  →  Vp, Vs
+```
+
+and compares the predicted logs against the measured ones. `VSH` comes from
+gamma ray and `SW` from resistivity — neither has seen a velocity — so a
+predicted Vp that misses the log is a real disagreement.
+
+`PHIT` is the exception, and the page checks for it. Density porosity is
+computed *from* RHOB, so predicting RHOB from it always succeeds and means
+nothing. `porosity_provenance` fits a matrix and a fluid density to the
+(PHIT, RHOB) pair and inspects the residual; fitting the constants rather than
+assuming them catches density porosity whatever values the petrophysicist
+used. When it fires, the density comparison is marked circular and set aside,
+and the Vp and Vs comparisons — which stay valid — carry the result.
+
+### Fluid substitution
+
+`core/gassmann.py` runs Gassmann in both directions, and
+`core/fluids.py` supplies Batzle-Wang properties at reservoir pressure and
+temperature — the fixed table is a room-condition approximation, and at 30 MPa
+and 90 °C a gas is roughly five times stiffer and six times denser than its
+entry in it.
+
+Substituting writes ordinary fluid cases (`VP_GAS` and friends), so every other
+page picks them up through machinery that already existed. What is *not* left
+implicit is where they came from: computed cases are recorded in
+`WellData.computed_cases`, shown as **(computed)** in every case selector, and
+the page warns before replacing a case that was loaded from the file.
+
+**Failure is reported, never hidden.** Running Gassmann backwards from a
+measured log routinely returns a negative dry frame, which does not mean "no
+answer" — it means the porosity, the mineral and the velocities disagree,
+because no real rock is softer than a vacuum. Every routine returns the values
+*and* a per-sample reason, and the demo well's original brine sand
+(2500 / 1450 / 2.30 at φ 0.26, needing K_dry = −1.6 GPa) is pinned as a
+regression test for exactly that.
 
 A consequence worth knowing when reading the demo well: its elastic logs are
 fixed by the validated AVO cross-check in SPEC.md §4.1 and describe a shallow,
@@ -345,3 +394,9 @@ and is skipped if Streamlit is not installed.
 - Castagna, Batzle & Eastwood (1985); Greenberg & Castagna (1992) — Vp–Vs
   trends. Nur et al. (1998) — critical porosity. Dvorkin & Nur (1996) — the
   soft- and stiff-sand models.
+- Gassmann (1951) — the fluid-substitution relation. Batzle & Wang (1992),
+  *Geophysics* 57, 1396–1408 — brine, oil and gas properties at reservoir
+  pressure and temperature.
+- Wood (1955) — the harmonic fluid average. Brie et al. (1995) — the empirical
+  curve between the uniform and patchy limits. Walpole (1966) — the n-phase
+  extension of the Hashin-Shtrikman bounds.

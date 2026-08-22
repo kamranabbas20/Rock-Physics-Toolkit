@@ -31,8 +31,12 @@ standard quantitative-interpretation workflow: rock-physics crossplots, a
 synthetic angle gather, and an intercept–gradient AVO classification of every
 reflector.
 
-Fluid substitution is assumed done upstream — there is no Gassmann or
-Batzle-Wang here. The input well is taken as-is.
+A well that arrives with its fluid cases already substituted is the normal
+path, and they are read as they are. The **Rock Physics** page can also model
+them here: a forward model driven from VSH, PHIT and SW, and Gassmann fluid
+substitution at Batzle-Wang reservoir conditions. Anything computed here is
+labelled *(computed)* wherever it appears, so a model of the well is never
+mistaken for a measurement of it.
 """
 )
 

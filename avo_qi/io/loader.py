@@ -33,6 +33,7 @@ __all__ = [
     "FLUID_CASE_ALIASES",
     "detect_fluid_cases",
     "case_column",
+    "add_substituted_case",
 ]
 
 #: The curves ``core/`` needs, plus the optional ones the crossplots colour by.
@@ -61,8 +62,9 @@ SONIC_MNEMONICS = {"DT", "DTC", "DTCO", "AC", "SONIC", "DTS", "DTSM", "DTSH", "A
 FLUID_CASES = ["in situ", "brine", "oil", "gas"]
 
 #: Suffixes seen on fluid-substituted curves, e.g. ``VP_BR``, ``VS_GAS``,
-#: ``RHOB_OIL``.  Substitution itself happens upstream — this toolkit only
-#: recognises the results, it never computes them.
+#: ``RHOB_OIL``.  A well usually arrives with these already computed upstream;
+#: :func:`add_substituted_case` can also produce them here, and marks anything
+#: it computes in :attr:`WellData.computed_cases` so the two never blur.
 FLUID_CASE_ALIASES = {
     "in situ": ["INSITU", "IN_SITU", "IS", "INSIT", "ORIG", "ORIGINAL", "INSITU1"],
     "brine": ["BR", "BRINE", "BRI", "WET", "W", "WATER", "SW100", "SW1", "B"],
@@ -324,6 +326,10 @@ class WellData:
     name: str = "well"
     cases: list = field(default_factory=list)
     active_case: str = "in situ"
+    #: Cases this session computed rather than read from the file.  Kept apart
+    #: so a reader is never left guessing which curves came out of the well and
+    #: which came out of a model.
+    computed_cases: list = field(default_factory=list)
 
     @property
     def depth(self):
@@ -363,6 +369,82 @@ class WellData:
     def complete(self, case=None):
         """Rows where Vp, Vs and RHOB are all present, for one case."""
         return self.frame(case).dropna(subset=["VP", "VS", "RHOB"])
+
+    def is_computed(self, case):
+        """True when a case was modelled here rather than read from the file."""
+        return case in self.computed_cases
+
+    def add_case(self, case, vp, vs, rho, note=None, computed=True):
+        """Attach a fluid case, stored the same way a loaded one would be.
+
+        Writing computed curves into the ordinary ``VP_GAS``-style columns
+        means every page picks them up through the machinery that already
+        exists — nothing downstream needs to know where they came from.  What
+        *is* recorded is that they were computed, in :attr:`computed_cases`,
+        so the UI can label them and nobody mistakes a model for a measurement.
+        """
+        if case not in FLUID_CASES:
+            raise ValueError(f"case {case!r} is not one of {FLUID_CASES}")
+        length = len(self.df)
+        for name, values in (("VP", vp), ("VS", vs), ("RHOB", rho)):
+            values = np.asarray(values, dtype=float).ravel()
+            if values.size != length:
+                raise ValueError(
+                    f"{name} has {values.size} samples but the well has {length}")
+            self.df[case_column(name, case)] = values
+
+        if case not in self.cases:
+            order = {name: i for i, name in enumerate(FLUID_CASES)}
+            self.cases = sorted(self.cases + [case], key=lambda c: order.get(c, 99))
+        if computed and case not in self.computed_cases:
+            self.computed_cases.append(case)
+        elif not computed and case in self.computed_cases:
+            self.computed_cases.remove(case)
+        if note:
+            self.notes.append(note)
+        return self
+
+
+def add_substituted_case(well, target, fluid_in, fluid_out, porosity, k_mineral,
+                         source_case=None):
+    """Gassmann-substitute one of a well's cases and attach the result.
+
+    Parameters
+    ----------
+    well : WellData
+        Modified in place, and returned for chaining.
+    target : str
+        Which of :data:`FLUID_CASES` the substituted curves become.
+    fluid_in, fluid_out : tuple
+        ``(K in GPa, rho in g/cc)`` of the fluid in the rock now and the one
+        replacing it.  Either element may be an array to follow a
+        depth-varying profile.
+    porosity : array_like
+        Pore volume fraction, one value per sample of the well.
+    k_mineral : array_like
+        Mineral bulk modulus in GPa, scalar or per sample.
+    source_case : str, optional
+        Which case to substitute *from*; the active case by default.
+
+    Returns
+    -------
+    dict
+        The result from :func:`avo_qi.core.gassmann.substitute`, including the
+        ``valid`` mask and per-sample ``reasons`` — a caller that ignores those
+        is presenting a partly empty case as a complete one.
+    """
+    from avo_qi.core.gassmann import substitute
+
+    source_case = well._resolve(source_case)
+    vp, vs, rho = well.logs(source_case)
+    result = substitute(vp, vs, rho, porosity, k_mineral, fluid_in, fluid_out)
+
+    n_bad = int((~result["valid"]).sum())
+    note = (f"{target}: Gassmann-substituted here from the {source_case} case"
+            + (f"; {n_bad} of {len(vp)} samples could not be substituted"
+               if n_bad else ""))
+    well.add_case(target, result["VP"], result["VS"], result["RHOB"], note=note)
+    return result
 
 
 def standardise(df, mapping=None, units=None, depth_unit="m", name="well", case=None):

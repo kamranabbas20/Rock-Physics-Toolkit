@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
 import pytest
 
 streamlit = pytest.importorskip("streamlit")
@@ -194,8 +195,9 @@ class TestRockPhysicsPage:
         assert not rock_physics_page.exception
 
     def test_renders_every_diagnostic_tab(self, rock_physics_page):
-        # Vp-Vs trends, Gardner, velocity-porosity, moduli & bounds.
-        assert len(rock_physics_page.tabs) >= 4
+        # Model setup (3), then Vp-Vs, Gardner, velocity-porosity,
+        # moduli & bounds, forward model, fluid substitution.
+        assert len(rock_physics_page.tabs) >= 9
 
     def test_exposes_the_frame_model_controls(self, rock_physics_page):
         labels = {s.label for s in rock_physics_page.slider}
@@ -209,8 +211,156 @@ class TestRockPhysicsPage:
         assert "Mineral K" in labels
         assert "Hertz-Mindlin K (dry)" in labels
 
-    def test_warns_that_the_frame_models_are_dry(self, rock_physics_page):
-        assert any("dry-frame" in w.value for w in rock_physics_page.warning)
+    def test_offers_to_saturate_the_dry_frame_curves(self, rock_physics_page):
+        """The dry-vs-saturated mismatch is now fixable rather than only warned about."""
+        labels = [c.label for c in rock_physics_page.checkbox]
+        assert any("Gassmann" in label for label in labels)
+
+    def test_explains_the_saturation_step_it_applied(self, rock_physics_page):
+        captions = " ".join(c.value for c in rock_physics_page.caption)
+        assert "dry to saturated through" in captions
+
+    def test_the_forward_model_tab_offers_its_controls(self, rock_physics_page):
+        labels = {s.label for s in rock_physics_page.selectbox}
+        assert "Frame model" in labels
+        assert "Shale mineral" in labels
+        assert "Hydrocarbon" in labels
+
+    def test_the_forward_model_reports_a_misfit_for_every_curve(self, rock_physics_page):
+        labels = {m.label for m in rock_physics_page.metric}
+        for curve in ("VP", "VS", "RHOB"):
+            assert any(label.startswith(f"{curve} bias") for label in labels), curve
+
+    def test_says_whether_the_porosity_makes_the_density_check_circular(
+            self, rock_physics_page):
+        text = " ".join(c.value for c in rock_physics_page.caption) + " ".join(
+            w.value for w in rock_physics_page.warning)
+        assert "density" in text.lower()
+        assert "meaningful" in text or "circular" in text
+
+    def test_shows_the_wells_own_vsh_as_reference_without_applying_it(
+            self, rock_physics_page):
+        captions = " ".join(c.value for c in rock_physics_page.caption)
+        assert "Shown, not applied" in captions
+
+    def test_the_substitution_tab_offers_a_button(self, rock_physics_page):
+        assert any("Substitute" in b.label for b in rock_physics_page.button)
+
+    def test_batzle_wang_is_offered_but_off_by_default(self, rock_physics_page):
+        boxes = [c for c in rock_physics_page.checkbox
+                 if "pressure and temperature" in c.label]
+        assert len(boxes) == 1
+        assert boxes[0].value is False
+
+
+class TestTheZoneFilterScopesTheModel:
+    """The misfit and the reference statistics must follow the sidebar.
+
+    Reported over the whole well they say very little; the point of the
+    numbers is to answer "how does the model do *in this zone*". A filter that
+    scoped the plots but not the statistics would be worse than none, because
+    the numbers would look scoped and not be.
+    """
+
+    @staticmethod
+    def _page(zones=None):
+        at = run_page(os.path.join(PAGES, "5_Rock_Physics.py"))
+        if zones is not None:
+            picker = next(m for m in at.sidebar.multiselect
+                          if m.label == "Zones to analyse")
+            picker.set_value(zones).run()
+        return at
+
+    @staticmethod
+    def _vsh_caption(at):
+        return next(c.value for c in at.caption
+                    if "this selection measures" in c.value)
+
+    def test_the_reference_vsh_is_the_whole_well_by_default(self):
+        # The demo well is mostly shale, so the unfiltered median is high.
+        assert "VSH 0.85" in self._vsh_caption(self._page())
+
+    def test_filtering_to_one_zone_rescopes_the_reference(self):
+        at = self._page(["Brine Sand"])
+        assert not at.exception
+        # The brine sand's own VSH is 0.12, not the well's 0.85.
+        assert "VSH 0.12" in self._vsh_caption(at)
+
+    def test_filtering_to_one_zone_rescopes_the_misfit(self):
+        whole = next(m for m in self._page().metric if m.label == "VP bias")
+        zoned = next(m for m in self._page(["Brine Sand"]).metric
+                     if m.label == "VP bias")
+        assert whole.value != zoned.value
+
+    def test_the_model_still_runs_on_a_single_zone(self):
+        at = self._page(["Gas Sand"])
+        assert not at.exception
+        assert any(m.label.startswith("VP bias") for m in at.metric)
+
+
+class TestSubstitutingFromThePage:
+    """Pressing the button must really produce a case the rest of the app sees."""
+
+    @staticmethod
+    def _substitute():
+        at = run_page(os.path.join(PAGES, "5_Rock_Physics.py"))
+        button = next(b for b in at.button if "Substitute" in b.label)
+        button.click().run()
+        return at
+
+    def test_the_button_creates_the_case_on_the_well(self):
+        at = self._substitute()
+        assert not at.exception
+        well = at.session_state["well"]
+        assert "gas" in well.cases
+        assert well.is_computed("gas")
+
+    def test_it_reports_how_many_samples_it_managed(self):
+        at = self._substitute()
+        assert any("Substituted" in s.value for s in at.success)
+
+    def test_the_substituted_curves_are_slower_than_the_brine_ones(self):
+        at = self._substitute()
+        well = at.session_state["well"]
+        source = well.frame("in situ")["VP"].to_numpy(float)
+        gassy = well.frame("gas")["VP"].to_numpy(float)
+        both = np.isfinite(source) & np.isfinite(gassy)
+        assert both.sum() > 100
+        assert np.nanmedian(gassy[both]) < np.nanmedian(source[both])
+
+    def test_the_computed_case_is_labelled_as_computed(self):
+        at = self._substitute()
+        assert any("Computed here" in i.value for i in at.info)
+
+    def test_another_page_picks_the_case_up(self):
+        """The whole reason for writing it as an ordinary fluid case."""
+        at = self._substitute()
+        well = at.session_state["well"]
+
+        gather = AppTest.from_file(os.path.join(PAGES, "3_Synthetic_Gather.py"),
+                                   default_timeout=90)
+        gather.session_state["well"] = well
+        gather.session_state["settings"] = at.session_state["settings"]
+        gather.run()
+        assert not gather.exception
+        case_box = next(s for s in gather.sidebar.selectbox
+                        if s.label == "Substituted case")
+        # AppTest reports the formatted labels, which is also how a reader sees
+        # them — the computed case must be flagged as such wherever it appears.
+        assert "gas (computed)" in case_box.options
+
+    def test_warns_before_overwriting_a_case_that_came_from_the_file(self):
+        """The demo well already carries a loaded gas case; replacing measured
+        curves with modelled ones is not something to do quietly."""
+        at = run_page(os.path.join(PAGES, "5_Rock_Physics.py"))
+        assert any("loaded from the file" in w.value for w in at.warning)
+
+    def test_the_sidebar_marks_it_so_nobody_mistakes_it_for_a_log(self):
+        at = self._substitute()
+        case_box = next(s for s in at.sidebar.selectbox
+                        if s.label == "Substituted case")
+        assert case_box.format_func("gas") == "gas (computed)"
+        assert case_box.format_func("in situ") == "in situ"
 
     def test_stops_politely_without_a_well(self):
         at = run_page(os.path.join(PAGES, "5_Rock_Physics.py"), with_well=False)

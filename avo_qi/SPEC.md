@@ -1,10 +1,16 @@
 # AVO & QI Well Analysis Toolkit — Build Specification
 
 A Streamlit application that takes a well **already containing Vp, Vs, and
-RHOB** (fluid substitution assumed done upstream — no Gassmann here),
-produces the standard rock physics crossplots, generates a synthetic
+RHOB**, produces the standard rock physics crossplots, generates a synthetic
 **angle gather** from a user wavelet, and **classifies every reflector into
 AVO classes** from an intercept–gradient analysis.
+
+> **Amendment — Gassmann and Batzle-Wang are now in scope.** The original
+> brief excluded them (see §1). That exclusion was lifted deliberately, so
+> that the rock physics model could be driven per-sample from `VSH`, `PHIT`
+> and `SW` — which needs a dry-frame-to-saturated step — and so that the well
+> itself can be substituted rather than only read. The sections below are the
+> original text; §1 carries the revised scope.
 
 This document is the build brief. It gives the architecture, the physics
 contracts (validated in prototype — reproduce them exactly), the UI
@@ -19,9 +25,30 @@ test the `core/` physics first, headless.
 (Zoeppritz + Aki-Richards) → wavelet convolution → synthetic angle gather;
 per-reflector intercept A and gradient B → AVO class I–IV.
 
-**Out (explicitly not in this tool):** fluid substitution, Batzle-Wang,
-Gassmann. The input well is taken as-is. If those are needed, they live in a
-separate upstream tool.
+**In (added after the original brief):** a per-sample forward model driven by
+`VSH`, `PHIT` and `SW`, with Gassmann as its saturation step
+(`core/petro.py`, `core/gassmann.py`); Batzle-Wang fluid properties at
+reservoir pressure and temperature (`core/fluids.py`); and Gassmann fluid
+substitution of the loaded well, written back as ordinary fluid cases.
+
+**Why the original exclusion was lifted.** The brief ruled out fluid
+substitution, Batzle-Wang and Gassmann, on the basis that a well arrives with
+substitution already done upstream. Reading a substituted well is still the
+normal path, but two things could not be built without them:
+
+* A model driven by the petrophysical logs has to get from a dry frame to a
+  saturated rock, and that step *is* Gassmann. Without it the page could only
+  compare a well against one hand-typed composition — which judges a shale
+  against a quartz bound and says nothing.
+* Substituting at the fixed room-condition constants in `FLUIDS` is wrong at
+  depth: at 30 MPa and 90 °C a gas is roughly five times stiffer and six times
+  denser than the table's entry. Batzle-Wang is what makes the substitution
+  worth trusting, and it stays opt-in with the table as the default.
+
+**Still out:** anything that hides where a number came from. Cases computed
+here are recorded in `WellData.computed_cases`, shown as *"(computed)"* in
+every case selector, and warn before replacing a case that was loaded from the
+file. A model of the well must never be mistakeable for a measurement of it.
 
 ---
 

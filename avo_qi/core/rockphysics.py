@@ -1,13 +1,18 @@
 """Diagnostic rock-physics models: bounds, trends and dry-frame templates.
 
 These are *model overlays* to diagnose log data against — mixture bounds,
-empirical velocity trends, and granular-medium frame models.  Nothing here
-substitutes fluids in the input well: there is no Gassmann and no
-Batzle-Wang, per SPEC.md section 1.  The Hashin-Shtrikman and Voigt-Reuss-Hill
-bounds are computed on a mineral-plus-fluid mixture, so they bracket the
-*saturated* rock directly without any substitution step; the granular models
-(Hertz-Mindlin, soft and stiff sand) describe the **dry frame** and are
-labelled as such wherever they are used.
+empirical velocity trends, and granular-medium frame models.  The
+Hashin-Shtrikman and Voigt-Reuss-Hill bounds are computed on a
+mineral-plus-fluid mixture, so they bracket the *saturated* rock directly with
+no substitution step at all; the granular models (Hertz-Mindlin, soft and
+stiff sand) describe the **dry frame**, and are labelled as such wherever they
+are used.
+
+Nothing in *this* module substitutes fluids — that lives in
+:mod:`avo_qi.core.gassmann`, with reservoir-condition fluid properties in
+:mod:`avo_qi.core.fluids` and the per-sample forward model that chains them
+together in :mod:`avo_qi.core.petro`.  The mineral moduli here accept arrays,
+so those callers can give every sample its own matrix.
 
 Unit conventions: velocities m/s, densities g/cc, elastic moduli GPa,
 porosity and mineral fractions as fractions (v/v), pressure Pa.
@@ -192,7 +197,7 @@ def critical_porosity_dry(K_mineral, G_mineral, phi, phi_c=0.40):
     """
     phi = _arr(phi)
     ratio = np.clip(phi / float(phi_c), 0.0, 1.0)
-    return float(K_mineral) * (1.0 - ratio), float(G_mineral) * (1.0 - ratio)
+    return _arr(K_mineral) * (1.0 - ratio), _arr(G_mineral) * (1.0 - ratio)
 
 
 def coordination_number(phi):
@@ -206,8 +211,11 @@ def hertz_mindlin(K_mineral, G_mineral, phi_c=0.36, n=None, pressure=10e6, f=1.0
 
     Parameters
     ----------
-    K_mineral, G_mineral : float
-        Mineral moduli in GPa.
+    K_mineral, G_mineral : float or array_like
+        Mineral moduli in GPa.  Arrays are allowed and broadcast against
+        ``phi``, so a matrix whose composition changes sample by sample — a
+        quartz-clay mix driven by VSH, say — gets its own frame at every depth
+        rather than one frame for the whole well.
     phi_c : float
         Critical porosity of the pack.
     n : float, optional
@@ -225,8 +233,8 @@ def hertz_mindlin(K_mineral, G_mineral, phi_c=0.36, n=None, pressure=10e6, f=1.0
     """
     if n is None:
         n = float(coordination_number(phi_c))
-    K_pa = float(K_mineral) * 1e9
-    G_pa = float(G_mineral) * 1e9
+    K_pa = _arr(K_mineral) * 1e9
+    G_pa = _arr(G_mineral) * 1e9
     nu = (3.0 * K_pa - 2.0 * G_pa) / (2.0 * (3.0 * K_pa + G_pa))
 
     K_hm = (
@@ -237,7 +245,10 @@ def hertz_mindlin(K_mineral, G_mineral, phi_c=0.36, n=None, pressure=10e6, f=1.0
         3.0 * n ** 2 * (1.0 - phi_c) ** 2 * G_pa ** 2 * float(pressure)
         / (2.0 * np.pi ** 2 * (1.0 - nu) ** 2)
     ) ** (1.0 / 3.0)
-    return K_hm / 1e9, G_hm / 1e9
+    K_hm, G_hm = K_hm / 1e9, G_hm / 1e9
+    if K_hm.ndim == 0:
+        return float(K_hm), float(G_hm)
+    return K_hm, G_hm
 
 
 def _modified_hs(K_end, G_end, K_mineral, G_mineral, phi, phi_c, z_from):
@@ -272,7 +283,7 @@ def stiff_sand_dry(K_mineral, G_mineral, phi, phi_c=0.36, n=None, pressure=10e6,
     """
     K_hm, G_hm = hertz_mindlin(K_mineral, G_mineral, phi_c, n, pressure, f)
     return _modified_hs(K_hm, G_hm, K_mineral, G_mineral, phi, phi_c,
-                        (float(K_mineral), float(G_mineral)))
+                        (_arr(K_mineral), _arr(G_mineral)))
 
 
 # --------------------------------------------- velocity-porosity trends -----

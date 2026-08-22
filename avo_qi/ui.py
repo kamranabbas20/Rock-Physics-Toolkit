@@ -228,9 +228,14 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
             current = s.case if s.case in options else well.active_case
             s.case = st.selectbox(
                 "Substituted case", options, index=options.index(current),
-                help="Logs substituted upstream. The two-way-time axis always "
-                     "comes from the well's in-situ case so the cases stay "
-                     "aligned sample for sample.",
+                # A case computed here is a model of the well, not a
+                # measurement of it, and must never look like one.
+                format_func=lambda c: (f"{c} (computed)"
+                                       if well.is_computed(c) else c),
+                help="Fluid cases loaded with the well, or computed on the "
+                     "Rock Physics page. The two-way-time axis always comes "
+                     "from the well's in-situ case so the cases stay aligned "
+                     "sample for sample.",
             )
         elif well is not None:
             s.case = well.active_case
