@@ -253,6 +253,98 @@ class TestRockPhysicsPage:
         assert boxes[0].value is False
 
 
+class TestUncertaintyInTheApp:
+    """The Monte Carlo panels, off by default and honest when switched on."""
+
+    def test_rock_physics_offers_it_but_does_not_run_it_unasked(self, rock_physics_page):
+        boxes = [c for c in rock_physics_page.checkbox
+                 if "Monte Carlo" in c.label]
+        assert len(boxes) == 1
+        assert boxes[0].value is False
+
+    def test_the_uncertainty_controls_are_there(self, rock_physics_page):
+        labels = {s.label for s in rock_physics_page.slider}
+        for wanted in ("Realisations", "VSH \u00b1 (v/v)", "SW \u00b1 (v/v)",
+                       "VSH\u2013PHIT correlation"):
+            assert wanted in labels, wanted
+
+    def test_running_it_reports_a_band_width_for_every_curve(self):
+        at = run_page(os.path.join(PAGES, "5_Rock_Physics.py"))
+        next(c for c in at.checkbox if "Monte Carlo" in c.label).set_value(True).run()
+        assert not at.exception
+        labels = {m.label for m in at.metric}
+        for curve in ("VP", "VS", "RHOB"):
+            assert f"{curve} P10\u2013P90 width" in labels
+
+    def test_a_band_has_width_only_because_the_inputs_do(self):
+        at = run_page(os.path.join(PAGES, "5_Rock_Physics.py"))
+        next(c for c in at.checkbox if "Monte Carlo" in c.label).set_value(True)
+        for label in ("VSH \u00b1 (v/v)", "PHIT \u00b1 (v/v)", "SW \u00b1 (v/v)",
+                      "\u03c6c \u00b1", "Effective pressure \u00b1 (MPa)",
+                      "Coordination number \u00b1"):
+            next(s for s in at.slider if s.label == label).set_value(0.0)
+        at.run()
+        assert not at.exception
+        width = next(m for m in at.metric if m.label.startswith("VP P10"))
+        assert float(width.value.split()[0]) == pytest.approx(0.0, abs=1e-6)
+
+    def test_avo_page_offers_class_probabilities_off_by_default(self, avo_page):
+        boxes = [c for c in avo_page.checkbox if "class probabilities" in c.label]
+        assert len(boxes) == 1
+        assert boxes[0].value is False
+
+    def test_running_it_reports_confidence_and_flags_ambiguity(self):
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
+        next(c for c in at.checkbox
+             if "class probabilities" in c.label).set_value(True).run()
+        assert not at.exception
+        labels = {m.label for m in at.metric}
+        assert "Median confidence" in labels
+        assert "Ambiguous reflectors" in labels
+
+    def test_a_perfect_tool_leaves_every_class_certain(self):
+        """With no measurement error there is nothing for the class to be
+        uncertain about, so the odds must collapse onto the label."""
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
+        next(c for c in at.checkbox
+             if "class probabilities" in c.label).set_value(True)
+        for label in ("Vp \u00b1 (%)", "Vs \u00b1 (%)", "RHOB \u00b1 (%)"):
+            next(s for s in at.slider if s.label == label).set_value(0.0)
+        at.run()
+        assert not at.exception
+        median = next(m for m in at.metric if m.label == "Median confidence")
+        assert median.value == "100%"
+        assert any("holds its class" in s.value for s in at.success)
+
+        # The regression that matters: with no noise the odds must land on the
+        # label itself. They will not if the Monte Carlo classifies a different
+        # interface from the one the label was fitted to — the page blocks its
+        # layers by default, so the realisations have to be blocked too.
+        differs = next(m for m in at.metric
+                       if m.label == "Modal class differs from the label")
+        assert differs.value == "0"
+
+    def test_the_odds_are_computed_on_the_layers_the_label_used(self):
+        """Adjacent samples and blocked layers are different interfaces.
+
+        Run both blocking modes with a perfect tool: each must agree with its
+        own label, which only holds if the Monte Carlo follows the page.
+        """
+        for mode in ("Half-cycle blocked layers", "Adjacent samples"):
+            at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
+            next(r for r in at.radio
+                 if "blocked layers" in " ".join(r.options)).set_value(mode)
+            next(c for c in at.checkbox
+                 if "class probabilities" in c.label).set_value(True)
+            for label in ("Vp \u00b1 (%)", "Vs \u00b1 (%)", "RHOB \u00b1 (%)"):
+                next(s for s in at.slider if s.label == label).set_value(0.0)
+            at.run()
+            assert not at.exception, mode
+            differs = next(m for m in at.metric
+                           if m.label == "Modal class differs from the label")
+            assert differs.value == "0", mode
+
+
 class TestTheZoneFilterScopesTheModel:
     """The misfit and the reference statistics must follow the sidebar.
 

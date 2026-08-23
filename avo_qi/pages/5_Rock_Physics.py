@@ -62,6 +62,12 @@ from avo_qi.core.petro import (  # noqa: E402
     forward_model,
     porosity_provenance,
 )
+from avo_qi.core.uncertainty import (  # noqa: E402
+    DEFAULT_LOG_NOISE,
+    LogNoise,
+    Prior,
+    monte_carlo_forward,
+)
 from avo_qi.io.loader import FLUID_CASES, add_substituted_case  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     add_derived_curves,
@@ -632,20 +638,121 @@ with tab_forward:
         phi_log = df["PHI"].to_numpy(float)
         depth_log = df["DEPTH"].to_numpy(float)
 
-        model = forward_model(
-            vsh_log, phi_log, sw_log,
+        model_kwargs = dict(
             matrix=matrix_blend, shale=shale_mineral, mineral_law=mineral_law,
             frame=frame_choice,
-            # "Single phase" is a choice about the bound curves, not about how
-            # the model should mix a partial saturation; Wood is the default there.
             fluid_law="wood" if fluid_law == "single" else fluid_law,
-            brie_exponent=brie_exponent,
-            hydrocarbon=hydrocarbon,
+            brie_exponent=brie_exponent, hydrocarbon=hydrocarbon,
             brine=fluid_constants("brine", per_sample=True),
             hydrocarbon_properties=fluid_constants(hydrocarbon, per_sample=True),
             phi_c=phi_c, n_grains=n_grains, pressure=pressure,
             shear_factor=shear_factor,
         )
+        model = forward_model(vsh_log, phi_log, sw_log, **model_kwargs)
+
+
+
+        # ------------------------------------------------ uncertainty ------
+        st.divider()
+        st.subheader("Uncertainty")
+        st.caption(
+            "The prediction above is a point answer standing on inputs that "
+            "are not points. Sampling them turns it into a distribution — and "
+            "turns the AVO class from a label into a probability, which is "
+            "where it matters most: \"Class III\" reads as a fact when it can "
+            "be a coin toss against Class IIn."
+        )
+        show_uncertainty = st.checkbox(
+            "Run a Monte Carlo over the inputs", value=False, key="mc_on")
+
+        u1, u2, u3 = st.columns(3)
+        n_realisations = u1.slider("Realisations", 50, 1000, 250, 50,
+                                   disabled=not show_uncertainty,
+                                   help="A few hundred is enough for P10–P90.")
+        mc_seed = u2.number_input("Seed", 0, 9999, 0, 1, disabled=not show_uncertainty,
+                                  help="Fixes the draw, so a reported P10 is "
+                                       "checkable rather than a new number "
+                                       "every rerun.")
+        vsh_phi_rho = u3.slider(
+            "VSH–PHIT correlation", -0.95, 0.95, 0.0, 0.05,
+            disabled=not show_uncertainty,
+            help="Shalier usually means tighter. Left at zero by default "
+                 "because a correlation is a claim about the rock, and "
+                 "assuming one narrows the answer on your behalf.")
+
+        st.caption("**Log uncertainty** — measurement error, drawn per sample.")
+        l1, l2, l3 = st.columns(3)
+        sigma_vsh = l1.slider("VSH ± (v/v)", 0.0, 0.25,
+                              DEFAULT_LOG_NOISE["VSH"].sigma, 0.01,
+                              disabled=not show_uncertainty)
+        sigma_phi = l2.slider("PHIT ± (v/v)", 0.0, 0.10,
+                              DEFAULT_LOG_NOISE["PHIT"].sigma, 0.005,
+                              disabled=not show_uncertainty)
+        sigma_sw = l3.slider("SW ± (v/v)", 0.0, 0.40,
+                             DEFAULT_LOG_NOISE["SW"].sigma, 0.01,
+                             disabled=not show_uncertainty,
+                             help="Usually the least certain number in the "
+                                  "chain, and often the one that dominates.")
+
+        st.caption(
+            "**Model parameters** — properties of the rock type, so each is "
+            "drawn once per realisation rather than afresh at every depth.")
+        p1, p2, p3 = st.columns(3)
+        sd_phi_c = p1.slider("φc ±", 0.0, 0.10, 0.03, 0.005,
+                             disabled=not show_uncertainty)
+        sd_pressure = p2.slider("Effective pressure ± (MPa)", 0.0, 20.0, 5.0, 0.5,
+                                disabled=not show_uncertainty)
+        sd_n = p3.slider("Coordination number ±", 0.0, 4.0, 1.5, 0.1,
+                         disabled=not show_uncertainty)
+
+        mc = None
+        if show_uncertainty:
+            noise = {}
+            for name, sigma in (("VSH", sigma_vsh), ("PHIT", sigma_phi),
+                                ("SW", sigma_sw)):
+                if sigma > 0:
+                    noise[name] = LogNoise(float(sigma))
+            priors = {}
+            if sd_phi_c > 0:
+                priors["phi_c"] = Prior.normal(phi_c, sd_phi_c, low=0.05, high=0.60)
+            if sd_pressure > 0:
+                priors["pressure"] = Prior.normal(pressure, sd_pressure * 1e6,
+                                                  low=1e5)
+            if sd_n > 0:
+                priors["n_grains"] = Prior.normal(n_grains, sd_n, low=3.0, high=20.0)
+
+            correlation = None
+            if vsh_phi_rho != 0.0 and {"VSH", "PHIT"} <= set(noise):
+                correlation = {("VSH", "PHIT"): float(vsh_phi_rho)}
+
+            with st.spinner(f"Running {n_realisations} realisations…"):
+                mc = monte_carlo_forward(
+                    vsh_log, phi_log, sw_log,
+                    n_realisations=int(n_realisations), seed=int(mc_seed),
+                    log_noise=noise, priors=priors, correlation=correlation,
+                    **model_kwargs)
+            st.session_state["mc_result"] = {
+                "VP": mc.VP, "VS": mc.VS, "RHOB": mc.RHOB,
+                "depth": depth_log, "samples_index": df.index.to_numpy(),
+                "n": int(n_realisations), "seed": int(mc_seed),
+            }
+
+            widths = {c: float(np.nanmedian(mc.spread(c))) for c in
+                      ("VP", "VS", "RHOB")}
+            w1, w2, w3 = st.columns(3)
+            for col, curve, unit in ((w1, "VP", "m/s"), (w2, "VS", "m/s"),
+                                     (w3, "RHOB", "g/cc")):
+                col.metric(f"{curve} P10–P90 width", f"{widths[curve]:.4g} {unit}",
+                           help="Median across the selection.")
+            if mc.n_failed:
+                st.info(
+                    f"{mc.n_failed:,} of {n_realisations:,} realisations had at "
+                    "least one sample the model could not compute — usually a "
+                    "porosity pushed outside (0, 1) by its noise. Those samples "
+                    "are left out of the percentiles rather than filled in.",
+                    icon=":material/info:")
+        else:
+            st.session_state.pop("mc_result", None)
 
         provenance = porosity_provenance(phi_log, rho,
                                          mnemonic=well.mapping.get("PHI"))
@@ -698,6 +805,19 @@ with tab_forward:
                                subplot_titles=("Vp (m/s)", "Vs (m/s)", "RHOB (g/cc)"),
                                horizontal_spacing=0.04)
         for i, curve in enumerate(("VP", "VS", "RHOB"), start=1):
+            if mc is not None:
+                bands = mc.bands(curve, (10, 50, 90))
+                # Drawn first so the logs stay legible on top of the band.
+                tracks.add_trace(go.Scatter(
+                    x=bands[10.0], y=depth_log, mode="lines",
+                    line=dict(width=0), showlegend=False,
+                    hoverinfo="skip"), row=1, col=i)
+                tracks.add_trace(go.Scatter(
+                    x=bands[90.0], y=depth_log, mode="lines", fill="tonextx",
+                    fillcolor="rgba(214,39,40,0.18)", line=dict(width=0),
+                    name="Model P10–P90", legendgroup="band",
+                    showlegend=(i == 1),
+                    hovertemplate="%{x:.4g}<extra>P10–P90</extra>"), row=1, col=i)
             tracks.add_trace(go.Scatter(
                 x=measured[curve], y=depth_log, mode="lines", name="Measured",
                 legendgroup="measured", showlegend=(i == 1),
@@ -712,6 +832,15 @@ with tab_forward:
         st.plotly_chart(tracks, use_container_width=True)
 
         cross = go.Figure()
+        if mc is not None:
+            # Thin the cloud: 40 realisations already show its shape, and
+            # 250 x every sample is a quarter of a million markers.
+            step = max(1, mc.n_realisations // 40)
+            cross.add_trace(go.Scatter(
+                x=mc.VP[::step].ravel(), y=mc.VS[::step].ravel(),
+                mode="markers", name="Realisations",
+                marker=dict(size=3, opacity=0.12, color="#d62728"),
+                hoverinfo="skip"))
         cross.add_traces(data_trace(vp, vs, name="Measured"))
         cross.add_trace(go.Scatter(
             x=model["VP"], y=model["VS"], mode="markers", name="Model",
@@ -724,6 +853,22 @@ with tab_forward:
             "effective pressure is wrong for this rock; scatter that grows with "
             "porosity usually means the matrix is."
         )
+        if mc is not None:
+            st.caption(
+                f"The band and the cloud are {mc.n_realisations:,} "
+                f"realisations at seed {int(mc_seed)}. Where the band covers the\n"
+                "measured log the model and the well agree within the "
+                "uncertainty you set; where the log sits outside it, the "
+                "disagreement survives that uncertainty and is a real "
+                "finding."
+            )
+            st.caption(
+                "A band that reaches further one way than the other is not a "
+                "drawing artefact. A log sitting against a physical limit — a "
+                "shale at SW 1.0, say — can only be perturbed away from it, so "
+                "its uncertainty is one-sided, and the band shows which "
+                "direction the answer is actually exposed to."
+            )
 
 
 # ---------------------------------------------------- fluid substitution ----

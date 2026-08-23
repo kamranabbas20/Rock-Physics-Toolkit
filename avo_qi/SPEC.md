@@ -45,6 +45,12 @@ normal path, but two things could not be built without them:
   denser than the table's entry. Batzle-Wang is what makes the substitution
   worth trusting, and it stays opt-in with the table as the default.
 
+**Also added:** Monte Carlo uncertainty (`core/uncertainty.py`) over both the petrophysical logs and the frame
+parameters, giving P10–P90 bands on the predicted logs and a *probability*
+per AVO class rather than a single label. Off by default on every page: a
+distribution is only as good as the spreads it was given, so it is never
+produced without someone stating them.
+
 **Still out:** anything that hides where a number came from. Cases computed
 here are recorded in `WellData.computed_cases`, shown as *"(computed)"* in
 every case selector, and warn before replacing a case that was loaded from the

@@ -14,7 +14,11 @@ import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from avo_qi.core.blocking import blocked_reflectivity, half_cycle_samples  # noqa: E402
+from avo_qi.core.blocking import (  # noqa: E402
+    block_properties,
+    blocked_reflectivity,
+    half_cycle_samples,
+)
 from avo_qi.core.lithology import interface_lithology  # noqa: E402
 from avo_qi.core.zones import zone_of_interface  # noqa: E402
 from avo_qi.core.tuning import (  # noqa: E402
@@ -23,6 +27,7 @@ from avo_qi.core.tuning import (  # noqa: E402
     tuning_thickness_from_wavelet,
 )
 from avo_qi.core.avo import (  # noqa: E402
+    CLASSES,
     background_trend,
     classify_array,
     compare_cases,
@@ -40,6 +45,11 @@ from avo_qi.core.synthetic import (  # noqa: E402
     build_gather,
     full_stack,
     trace_extrema,
+)
+from avo_qi.core.uncertainty import (  # noqa: E402
+    class_probabilities,
+    class_probabilities_from_layers,
+    perturb_logs,
 )
 from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
@@ -274,11 +284,156 @@ with right:
     else:
         st.info("Not enough reflectors to fit a background trend.")
 
+# ---------------------------------------------------- class confidence -----
+st.divider()
+st.subheader("How sure is each class?")
+st.caption(
+    "A class label reads as a fact. It is really the answer to *where do the "
+    "intercept and gradient land*, and both are computed from logs with a "
+    "measurement error. Perturbing the logs within that error and reclassifying "
+    "each time turns the label into odds — and a reflector sitting near a class "
+    "boundary shows up as one, instead of hiding behind a confident name."
+)
+
+confidence_on = st.checkbox("Estimate class probabilities", value=False,
+                            key="avo_confidence_on")
+st.caption(
+    f"Reclassified on the same **{blocking_mode.lower()}** the labels above "
+    "use, so the odds and the label describe the same interface."
+)
+q1, q2, q3, q4 = st.columns(4)
+n_draws = q1.slider("Realisations", 50, 1000, 300, 50, disabled=not confidence_on)
+pct_vp = q2.slider("Vp ± (%)", 0.0, 10.0, 1.0, 0.25, disabled=not confidence_on)
+pct_vs = q3.slider("Vs ± (%)", 0.0, 15.0, 2.0, 0.25, disabled=not confidence_on,
+                   help="A shear sonic is the noisier measurement, and Vs is "
+                        "what carries the gradient.")
+pct_rho = q4.slider("RHOB ± (%)", 0.0, 10.0, 1.0, 0.25, disabled=not confidence_on)
+
+probabilities = None
+if confidence_on and len(table):
+    reflector_samples = table["sample"].to_numpy()
+    with st.spinner(f"Reclassifying {n_draws} realisations…"):
+        realisations = perturb_logs(vp, vs, rho, n_realisations=int(n_draws),
+                                    seed=0, vp_pct=pct_vp, vs_pct=pct_vs,
+                                    rho_pct=pct_rho)
+        if use_blocking:
+            # The label above is fitted to *blocked* layers, so the odds must
+            # be too. Classifying adjacent samples here would describe a
+            # different interface, and every disagreement with the label would
+            # be that mismatch rather than a finding. Re-blocking each
+            # realisation also carries the noise through the averaging, which
+            # is where most of it cancels.
+            keys = ("vp_upper", "vs_upper", "rho_upper",
+                    "vp_lower", "vs_lower", "rho_lower")
+            stacked = {k: np.empty((int(n_draws), reflector_samples.size))
+                       for k in keys}
+            for r in range(int(n_draws)):
+                one = block_properties(
+                    realisations["VP"][r], realisations["VS"][r],
+                    realisations["RHOB"][r], reflector_samples,
+                    window=window, method=block_method, guard=int(guard))
+                for k in keys:
+                    stacked[k][r] = one[k]
+            probabilities = class_probabilities_from_layers(
+                (stacked["vp_upper"], stacked["vs_upper"], stacked["rho_upper"]),
+                (stacked["vp_lower"], stacked["vs_lower"], stacked["rho_lower"]),
+                angles, samples=reflector_samples, a_tol=settings.a_tol)
+        else:
+            probabilities = class_probabilities(
+                realisations["VP"], realisations["VS"], realisations["RHOB"],
+                samples=reflector_samples, angles=angles, a_tol=settings.a_tol)
+
+    merged = table[["sample"]].merge(probabilities, on="sample", how="left")
+    agree = (merged["modal_class"].to_numpy() == table["avo_class"].to_numpy())
+    ambiguous = merged["confidence"] < 0.5
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Median confidence", f"{merged['confidence'].median():.0%}",
+              help="Usually high, and on its own it hides the reflectors that "
+                   "matter — a median says nothing about the weakest one.")
+    c2.metric("Least confident", f"{merged['confidence'].min():.0%}",
+              help="The reflector whose class is least secure. This is the "
+                   "number the median is hiding.")
+    c3.metric("Ambiguous reflectors", f"{int(ambiguous.sum())} of {len(merged)}",
+              help="Where the most likely class holds less than half the "
+                   "realisations, no class is really being asserted.")
+    c4.metric("Modal class differs from the label", f"{int((~agree).sum())}",
+              help="The deterministic label is the single best estimate; the "
+                   "modal class is the commonest outcome under noise. They "
+                   "part company where the answer sits on a boundary.",
+              delta_color="off")
+
+    # An interpreter thinks in depth, not in sample index.
+    if "depth" in table.columns and np.isfinite(table["depth"]).any():
+        bar_labels = [f"{d:,.0f} m" for d in table["depth"].to_numpy(float)]
+        bar_axis = "Reflector depth"
+    else:
+        bar_labels = merged["sample"].astype(str).tolist()
+        bar_axis = "Reflector (sample index)"
+
+    bars = go.Figure()
+    for name in CLASSES:
+        if name not in merged.columns:
+            continue
+        bars.add_trace(go.Bar(
+            x=bar_labels, y=merged[name], name=name,
+            marker_color=CLASS_COLOURS.get(name, "#999"),
+            hovertemplate=("%{x}<br>" + name + " %{y:.0%}<extra></extra>")))
+    bars.update_layout(
+        barmode="stack", height=420, xaxis_title=bar_axis, xaxis_type="category",
+        yaxis_title="Probability", yaxis_tickformat=".0%",
+        margin=dict(l=60, r=20, t=40, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    st.plotly_chart(bars, use_container_width=True)
+
+    if ambiguous.any():
+        worst = merged.loc[ambiguous].sort_values("confidence")
+        lines = []
+        for _, row in worst.head(5).iterrows():
+            odds = sorted(((row[c], c) for c in CLASSES if c in row),
+                          reverse=True)[:2]
+            lines.append(
+                f"sample {int(row['sample'])}: "
+                + " vs ".join(f"{name} {p:.0%}" for p, name in odds))
+        st.warning(
+            "No class is really being asserted at "
+            + "; ".join(lines)
+            + ". At this log accuracy those reflectors could go either way.",
+            icon=":material/warning:")
+    else:
+        st.success(
+            "Every reflector holds its class in at least half the realisations "
+            "at this log accuracy.", icon=":material/check_circle:")
+
+    if (~agree).any():
+        disagreeing = [
+            f"sample {int(merged['sample'].iloc[i])} labelled "
+            f"{table['avo_class'].iloc[i]} but most often "
+            f"{merged['modal_class'].iloc[i]}"
+            for i in np.flatnonzero(~agree)[:5]
+        ]
+        st.info(
+            "The single best estimate is not the commonest outcome at "
+            + "; ".join(disagreeing)
+            + ". Both readings are defensible — the reflector is near a class "
+              "boundary, which is the thing worth knowing.",
+            icon=":material/info:")
+elif confidence_on:
+    st.info("No reflectors to classify.", icon=":material/info:")
+
 # --------------------------------------------------------------- table -----
 st.divider()
 st.subheader("Reflector table")
 
 show = table.copy()
+if probabilities is not None:
+    # Carried into the table and the CSV, so the odds travel with the
+    # label rather than living only on screen.
+    keep = ["sample", "modal_class", "confidence"] + [
+        c for c in CLASSES if c in probabilities.columns]
+    show = show.merge(probabilities[keep], on="sample", how="left")
+    for col in ["confidence"] + [c for c in CLASSES if c in show.columns]:
+        show[col] = show[col].astype(float).round(3)
 if "twt" in show.columns:
     show["twt"] = show["twt"].round(4)
 if "depth" in show.columns:

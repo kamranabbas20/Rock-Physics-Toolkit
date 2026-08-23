@@ -32,8 +32,8 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 | **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
-| **AVO Classification** | Per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. Layer properties come from half-cycle blocked layers by default rather than two adjacent samples, and a tuned-versus-untuned section shows what bed thickness does to each reflector's class. |
-| **Rock Physics** | Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus dry-frame Hertz-Mindlin soft-sand, stiff-sand and critical-porosity models. |
+| **AVO Classification** | Per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. Layer properties come from half-cycle blocked layers by default rather than two adjacent samples, and a tuned-versus-untuned section shows what bed thickness does to each reflector's class. |
+| **Rock Physics** | Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus Hertz-Mindlin soft-sand, stiff-sand and critical-porosity frames — raised dry-to-saturated through Gassmann on request. Then a **forward model** driven per-sample from VSH, PHIT and SW with a misfit readout, an optional **Monte Carlo** P10–P90 band, and **fluid substitution** at Batzle-Wang reservoir conditions. |
 
 ## Layout
 
@@ -57,6 +57,7 @@ avo_qi/
 │   ├── fluids.py               # Batzle-Wang K and rho at reservoir P and T
 │   ├── petro.py                # per-sample forward model from VSH/PHIT/SW
 │   ├── misfit.py               # bounds checks and predicted-vs-measured residuals
+│   ├── uncertainty.py          # Monte Carlo priors, bands and AVO class odds
 │   ├── zones.py                # zonation from a LAS curve or a tops list
 │   ├── qc.py                   # nulls, ranges, spikes, elastic consistency
 │   └── tuning.py               # tuned vs untuned AVO, wedge model
@@ -190,6 +191,50 @@ nothing. `porosity_provenance` fits a matrix and a fluid density to the
 assuming them catches density porosity whatever values the petrophysicist
 used. When it fires, the density comparison is marked circular and set aside,
 and the Vp and Vs comparisons — which stay valid — carry the result.
+
+### Uncertainty
+
+Every number above is a point answer standing on inputs that are not points.
+`core/uncertainty.py` samples them and runs the model many times, so the
+answers come back as distributions instead.
+
+Two kinds of uncertainty are kept apart, because conflating them is wrong.
+**Log noise** is per sample — each depth's VSH carries its own measurement
+error. **Model parameters** are per realisation: a critical porosity is a
+property of the rock type, and drawing a fresh one at every depth would model
+a well whose grain packing changes every 15 cm, which is not the uncertainty
+anyone means.
+
+Correlations between logs default to **zero**. VSH and porosity really are
+anti-correlated in most clastics, and saying so narrows the cloud
+considerably — but that is a claim about the rock, so it is a control rather
+than a default.
+
+On **Rock Physics → Forward model** this draws a P10–P90 band around the
+predicted logs. A band that reaches further one way than the other is not a
+drawing artefact: a log sitting against a physical limit — a shale at SW 1.0 —
+can only be perturbed away from it, so its uncertainty is genuinely one-sided.
+
+The payoff is on **AVO Classification**. A class label reads as a fact when it
+is really the answer to *where do the intercept and gradient land*, and both
+come from logs with a measurement error. Perturbing the logs within that error
+and reclassifying each time turns the label into odds:
+
+> Median confidence 100% · Least confident 34% · Ambiguous 2 of 9
+
+The median is deliberately shown next to the minimum, because on its own it
+hides the reflectors that matter. Where the most likely class holds less than
+half the realisations, no class is really being asserted — and where the modal
+class differs from the deterministic label, the reflector is sitting on a
+boundary, which is the thing worth knowing. The probabilities travel into the
+reflector table and its CSV, so the odds stay attached to the label.
+
+Two implementation notes. The two-term Shuey fit has a closed form, so
+`batched_shuey_fit` solves tens of thousands of reflectors with array
+reductions rather than a per-row `lstsq` — the same least-squares answer, not
+an approximation, and the tests pin it against `shuey_fit` to keep it that
+way. It is the difference between 8 seconds and 0.05. `batched_aki_richards`
+is pinned against the scalar `aki_richards_rpp` the same way.
 
 ### Fluid substitution
 
