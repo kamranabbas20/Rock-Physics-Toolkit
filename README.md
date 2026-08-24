@@ -118,6 +118,27 @@ layers and the same A and B, because interfaces inside one lobe are not
 separable at that bandwidth; reporting different answers for them would be
 inventing resolution the data does not have.
 
+## Classified but not observable
+
+An AVO class comes from the **logs** — the Zoeppritz response between the two
+blocked layers — so every interface above the threshold gets one. Whether the
+seismic can *see* that reflector separately is a different question, answered
+by `own_extremum` in the reflector table: does it produce a turning point of
+its own polarity on the full stack?
+
+Where it does not, the reflector is buried in a neighbour's lobe. Its class is
+still real interface physics, but it is a modelled answer rather than a
+pickable one — you could not measure that amplitude, because the amplitude at
+that time belongs to the neighbour. Such reflectors are drawn as hollow markers
+on the trace, blocked on the fixed half cycle rather than on a lobe of their
+own, and can be hidden with **Only reflectors the seismic can separate**.
+
+This is not a rare corner. On a real North Sea well (15/9-19-A, 269 reflectors
+at the default threshold) **114 of them — 42% — have no extremum of their
+own**, and dropping them moves the background trend from `B = -0.841 A - 0.0080`
+to `B = -0.792 A - 0.0129`. Worth looking at the crossplot both ways before
+trusting a trend.
+
 The window is also drawn. In **Reflector detail** the selected reflector's two
 half-lobes are shaded across every panel — blue above the extremum, orange
 below — so the samples behind its intercept and gradient can be read against

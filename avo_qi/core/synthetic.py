@@ -113,7 +113,11 @@ def _local_extrema(trace):
     if trace.size < 3:
         return np.array([], dtype=int)
     slope = np.sign(np.diff(trace))
-    moving = np.flatnonzero(slope != 0)
+    # A NaN slope is not a direction, and it must not be read as one: NaN != 0
+    # and NaN != NaN are both True, so an unedited gap in the trace turns every
+    # sample across it into a "slope reversal" — a dead or partially blank
+    # trace would report an extremum at every single sample.
+    moving = np.flatnonzero(np.isfinite(slope) & (slope != 0))
     if moving.size < 2:
         return np.array([], dtype=int)
     signs = slope[moving]
@@ -169,7 +173,14 @@ def trace_extrema(trace, samples, half_window=5, polarity=None):
 
     wanted = None
     if polarity is not None:
-        wanted = np.sign(np.asarray(polarity, dtype=float)).astype(int)
+        sign = np.sign(np.asarray(polarity, dtype=float))
+        # A reflector whose R0 could not be computed has an unknown expected
+        # sign, not a negative-huge one.  Casting NaN to int is undefined and
+        # lands on INT_MIN, which matches no turning point at all — so the
+        # reflector was silently reported as having no extremum, on the
+        # strength of an integer overflow.  Unknown is the documented
+        # no-constraint case, which zero already means.
+        wanted = np.where(np.isfinite(sign), sign, 0.0).astype(int)
         if wanted.size != samples.size:
             raise ValueError("polarity must have one entry per sample")
 
@@ -195,7 +206,9 @@ def trace_extrema(trace, samples, half_window=5, polarity=None):
         j = int(near[order[0]])
         index[k], amplitude[k], is_extremum[k] = j, trace[j], True
 
-    polarity_out = np.sign(amplitude).astype(int)
+    # Same guard: a NaN sample on the trace has no polarity to report.
+    out_sign = np.sign(amplitude)
+    polarity_out = np.where(np.isfinite(out_sign), out_sign, 0.0).astype(int)
     return {
         "sample": samples,
         "index": index,

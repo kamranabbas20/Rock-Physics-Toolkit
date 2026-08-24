@@ -491,6 +491,44 @@ class TestTraceExtrema:
         assert found["index"][0] != 70            # too far away to be claimed
         assert found["is_extremum"][0] == False   # noqa: E712 - flat window
 
+    def test_a_nan_polarity_means_unknown_sign_not_undefined_behaviour(self):
+        """A reflector whose R0 could not be computed has no expected sign.
+
+        ``np.sign(nan).astype(int)`` is undefined and lands on INT_MIN, which
+        matches no turning point at all — so the reflector was quietly reported
+        as having no extremum on the strength of an integer overflow, with a
+        RuntimeWarning as the only clue. Unknown must mean no constraint, which
+        is what zero already means here.
+        """
+        import warnings
+
+        trace = np.zeros(60)
+        trace[10:31] = -np.sin(np.linspace(0, np.pi, 21))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            found = trace_extrema(trace, [20, 20], half_window=3,
+                                  polarity=[-1.0, np.nan])
+        # Both find the trough: the second simply applies no sign filter.
+        assert found["is_extremum"].tolist() == [True, True]
+        assert found["index"].tolist() == [20, 20]
+
+    def test_a_dead_trace_has_no_extrema_anywhere(self):
+        """NaN != 0 and NaN != NaN are both True, so an unguarded slope test
+        reads a gap in the trace as a direction reversal — and a blank trace
+        came back with an extremum at every sample, each with NaN amplitude."""
+        trace = np.full(20, np.nan)
+        found = trace_extrema(trace, [10], half_window=3)
+        assert not found["is_extremum"][0]
+        assert found["polarity"][0] == 0
+
+    def test_a_gap_in_the_trace_does_not_invent_extrema(self):
+        trace = np.zeros(40)
+        trace[10:21] = -np.sin(np.linspace(0, np.pi, 11))   # one real trough
+        trace[28:33] = np.nan                                # a blank patch
+        found = trace_extrema(trace, [15, 30], half_window=3)
+        assert found["is_extremum"][0] and found["index"][0] == 15
+        assert not found["is_extremum"][1]
+
     def test_flags_a_point_that_is_not_a_local_extremum(self):
         trace = np.linspace(0.0, 1.0, 50)         # monotonic: no interior peak
         found = trace_extrema(trace, [25], half_window=4)

@@ -81,7 +81,8 @@ def arithmetic_average(vp, vs, rho):
 _AVERAGES = {"backus": backus_average, "mean": arithmetic_average}
 
 
-def lobe_windows(trace, extrema_index, polarity=None, max_half_width=None):
+def lobe_windows(trace, extrema_index, polarity=None, max_half_width=None,
+                 is_extremum=None):
     """Half-lobe bounds either side of each reflector's amplitude extremum.
 
     A reflector shows up on the trace as a lobe — a trough or a peak — running
@@ -112,6 +113,18 @@ def lobe_windows(trace, extrema_index, polarity=None, max_half_width=None):
         Give up after this many samples in either direction.  Without a cap a
         reflector sitting on a long one-sided ramp would swallow most of the
         trace.
+    is_extremum : array_like of bool, optional
+        ``trace_extrema``'s flag saying whether each index is a genuine turning
+        point of the reflector's own polarity.  Where it is False the reflector
+        is buried in a neighbour's lobe and ``extrema_index`` has fallen back to
+        the interface sample, which sits somewhere on that neighbour's flank.
+        Splitting there produces two windows that are halves of nothing: they
+        are cut at wherever the interface happens to lie, so they come out
+        lopsided — on a clean trough with an interface a quarter of the way
+        down the upper flank, 4 samples above against 17 below — and the two
+        "layers" then average quite different thicknesses of rock for reasons
+        that have nothing to do with the seismic.  Such reflectors are reported
+        unresolved so the caller falls back to the fixed window.
 
     Returns
     -------
@@ -134,6 +147,13 @@ def lobe_windows(trace, extrema_index, polarity=None, max_half_width=None):
         sign = np.sign(np.asarray(polarity, dtype=float))
     sign = np.where(sign == 0, 1.0, sign)
 
+    if is_extremum is None:
+        genuine = np.ones(index.size, dtype=bool)
+    else:
+        genuine = np.atleast_1d(np.asarray(is_extremum, dtype=bool))
+        if genuine.size != index.size:
+            raise ValueError("is_extremum must have one entry per reflector")
+
     out = {k: np.zeros(index.size, dtype=int)
            for k in ("upper_start", "upper_stop", "lower_start", "lower_stop")}
     resolved = np.zeros(index.size, dtype=bool)
@@ -143,6 +163,10 @@ def lobe_windows(trace, extrema_index, polarity=None, max_half_width=None):
         out["upper_start"][k] = out["upper_stop"][k] = centre
         out["lower_start"][k] = out["lower_stop"][k] = centre
         if n < 3:
+            continue
+        # No turning point of this reflector's own polarity means no lobe of
+        # its own to halve; what is there belongs to a neighbour.
+        if not genuine[k]:
             continue
         want = sign[k]
         # There has to be a lobe to halve.  A flat or zero trace would let both

@@ -163,7 +163,8 @@ if not table.empty:
                                  polarity=np.sign(table["R0"].to_numpy(float)))
     lobe_bounds = lobe_windows(page_full_stack, lobe_extrema["index"],
                                polarity=np.sign(table["R0"].to_numpy(float)),
-                               max_half_width=2 * window)
+                               max_half_width=2 * window,
+                               is_extremum=lobe_extrema["is_extremum"])
 
     blocked = blocked_reflectivity(
         vp, vs, rho, samples, angles, window=window, method=block_method,
@@ -184,6 +185,11 @@ if not table.empty:
     table["critical_angle"] = blocked["critical_angle"]
     table["n_angles"] = (~blocked_mask).sum(axis=1)
     table["blocking"] = np.where(blocked["from_lobe"], "lobe", "fixed window")
+    # Why a reflector fell back: no turning point of its own polarity on the
+    # full stack means it is buried in a neighbour's lobe and has none of its
+    # own to halve. Carried into the table and the CSV so `fixed window` is
+    # explicable rather than mysterious.
+    table["own_extremum"] = lobe_extrema["is_extremum"]
     table["lobe_samples"] = (
         np.asarray(blocked["n_upper"]) + np.asarray(blocked["n_lower"]))
     table["A_fixed"] = fixed_table["A_shuey"].to_numpy()
@@ -216,12 +222,18 @@ if not table.empty:
     )
 
     if from_lobe < len(table):
+        buried = int(np.count_nonzero(~lobe_extrema["is_extremum"]))
+        why = (
+            f"{buried} of them have no turning point of their own polarity on "
+            "the full stack at all — they are buried in a neighbour's lobe, so "
+            "there is nothing of theirs to halve. "
+        ) if buried else ""
         st.warning(
             f"{len(table) - from_lobe} of {len(table)} reflector(s) have no "
-            "resolvable lobe on the full stack — buried in a neighbour's, or "
-            f"with no zero crossing within {2 * window} samples. Those fall "
-            f"back to the fixed ±{window}-sample half cycle and are marked "
-            "`fixed window` in the reflector table.",
+            f"resolvable lobe on the full stack. {why}The rest have no zero "
+            f"crossing within {2 * window} samples, or a lobe too narrow to "
+            f"halve. All of them fall back to the fixed ±{window}-sample half "
+            "cycle and are marked `fixed window` in the reflector table.",
             icon=":material/warning:")
     if moved:
         st.info(
@@ -329,6 +341,42 @@ if len(pair_options) > 1:
             st.warning("No reflector has a selected interface pair. Widen the "
                        "selection above.")
             st.stop()
+
+# Separability. A class is computed from the *logs* — the Zoeppritz response
+# between the two blocked layers — so every interface gets one whether or not
+# the seismic can see it. `own_extremum` is the other question: does this
+# reflector produce a turning point of its own polarity on the full stack? Where
+# it does not, the class is a statement about the interface, not about anything
+# you could pick: the amplitude at that time belongs to a neighbour. Both are
+# worth having, so they are separated rather than merged.
+if "own_extremum" in table.columns:
+    buried_here = int((~table["own_extremum"]).sum())
+    if buried_here:
+        separable_only = st.checkbox(
+            f"Only reflectors the seismic can separate "
+            f"({len(table) - buried_here} of {len(table)})",
+            value=False,
+            help="Hides reflectors with no turning point of their own polarity "
+                 "on the full stack. Their class is still real interface "
+                 "physics, but it is modelled rather than observable — you "
+                 "could not pick that event, because the amplitude there "
+                 "belongs to a neighbouring reflector.",
+        )
+        st.caption(
+            f"{buried_here} of {len(table)} reflectors "
+            f"({buried_here / len(table):.0%}) are buried in a neighbour's lobe. "
+            "They keep a class — the interface is real — but it is a modelled "
+            "answer, not a measurable one, and they are blocked on the fixed "
+            "half cycle rather than on a lobe of their own. They also pull the "
+            "background trend and the class counts, so it is worth seeing the "
+            "crossplot both ways."
+        )
+        if separable_only:
+            table = table[table["own_extremum"].to_numpy(bool)].reset_index(drop=True)
+            if table.empty:
+                st.warning("No reflector has an extremum of its own on the full "
+                           "stack. Untick the box above.")
+                st.stop()
 
 trend = background_trend(table["A_shuey"], table["B_shuey"])
 

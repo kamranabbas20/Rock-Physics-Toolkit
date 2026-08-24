@@ -339,6 +339,68 @@ class TestLobeWindows:
         assert abs(upper - analytic) <= 1.0
         assert abs(lower - analytic) <= 1.0
 
+    def test_a_reflector_with_no_extremum_of_its_own_gets_no_lobe(self):
+        """A reflector buried in a neighbour's lobe has nothing of its own to
+        halve.  ``trace_extrema`` falls its index back to the interface sample,
+        which sits on the neighbour's flank; splitting there cuts that lobe at
+        an arbitrary point and hands back two windows of wildly different
+        length — halves of nothing.  Those must be reported unresolved so the
+        caller falls back to the fixed window.
+        """
+        from avo_qi.core.synthetic import trace_extrema
+
+        # One clean trough, 10 to 30, with its minimum at 20.
+        trace = np.zeros(60)
+        trace[10:31] = -np.sin(np.linspace(0, np.pi, 21))
+
+        # Reflector A *is* that trough; reflector B sits on its upper flank at
+        # 14 with no turning point of its own anywhere near.
+        samples = np.array([20, 14])
+        polarity = np.array([-1.0, -1.0])
+        found = trace_extrema(trace, samples, half_window=3, polarity=polarity)
+        assert found["is_extremum"].tolist() == [True, False]
+
+        blind = lobe_windows(trace, found["index"], polarity=polarity)
+        assert blind["resolved"].tolist() == [True, True]
+        # What the flank split actually produces: nothing like two halves.
+        assert blind["upper_stop"][1] - blind["upper_start"][1] == 4
+        assert blind["lower_stop"][1] - blind["lower_start"][1] == 17
+
+        told = lobe_windows(trace, found["index"], polarity=polarity,
+                            is_extremum=found["is_extremum"])
+        assert told["resolved"].tolist() == [True, False]
+        # The genuine one is untouched by the extra argument.
+        for key in ("upper_start", "upper_stop", "lower_start", "lower_stop"):
+            assert told[key][0] == blind[key][0]
+
+    def test_an_unresolved_reflector_falls_back_to_the_fixed_window(self):
+        """The fallback is what makes rejecting it safe: the reflector keeps an
+        answer, it just stops claiming a measured window."""
+        from avo_qi.core.synthetic import trace_extrema
+
+        trace = np.zeros(60)
+        trace[10:31] = -np.sin(np.linspace(0, np.pi, 21))
+        samples = np.array([20, 14])
+        polarity = np.array([-1.0, -1.0])
+        found = trace_extrema(trace, samples, half_window=3, polarity=polarity)
+        bounds = lobe_windows(trace, found["index"], polarity=polarity,
+                              is_extremum=found["is_extremum"])
+
+        vp = np.linspace(2000.0, 3000.0, 60)
+        vs = vp / 2.0
+        rho = np.full(60, 2.3)
+        blocked = block_properties(vp, vs, rho, samples, window=5,
+                                   method="mean", bounds=bounds)
+        assert blocked["from_lobe"].tolist() == [True, False]
+        # The fallback window is the fixed one, so it is symmetric and finite.
+        assert blocked["n_upper"][1] == 5 and blocked["n_lower"][1] == 5
+        assert np.isfinite(blocked["vp_upper"][1])
+        assert np.isfinite(blocked["vp_lower"][1])
+
+    def test_the_flag_has_to_match_the_reflector_count(self):
+        with pytest.raises(ValueError, match="one entry per reflector"):
+            lobe_windows(np.zeros(20), [5, 10], is_extremum=[True])
+
     def test_a_higher_frequency_gives_a_narrower_window(self):
         widths = []
         for freq in (20.0, 30.0, 50.0):

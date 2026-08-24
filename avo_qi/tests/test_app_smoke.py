@@ -1204,6 +1204,65 @@ class TestBlockingAndTuningInTheApp:
         for column in ("A_untuned", "A_tuned", "class_untuned", "changes_class"):
             assert column in table.columns
 
+    def test_a_reflector_with_no_extremum_never_claims_a_lobe(self):
+        """A reflector buried in a neighbour's lobe has no lobe of its own, so
+        it must fall back to the fixed window rather than split the neighbour's
+        at wherever its interface happens to land.
+
+        The demo well's nine default reflectors all have their own extremum, so
+        this drops the |R| threshold until the weak, buried ones qualify — two
+        of which were previously blocked on a window that was not theirs.
+        """
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=180)
+        _inject_demo_well(at)
+        at.run()
+        at.session_state["settings"].threshold = 0.005
+        at.run()
+        assert not at.exception
+
+        table = reflector_table(at)
+        assert "own_extremum" in table.columns
+        buried = ~table["own_extremum"].to_numpy(bool)
+        assert buried.sum() >= 2, "this well/threshold must exercise the case"
+        assert (table.loc[buried, "blocking"] == "fixed window").all()
+        # ...and the ones that do have an extremum are still mostly on a lobe,
+        # so the guard has not simply switched blocking off.
+        assert (table.loc[~buried, "blocking"] == "lobe").any()
+
+    def test_the_buried_reflectors_can_be_filtered_out(self):
+        """A class is computed from the logs, so a reflector the seismic cannot
+        separate still gets one. That is right — the interface is real — but it
+        is a modelled answer rather than a pickable one, so it must be possible
+        to see the crossplot without them."""
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=180)
+        _inject_demo_well(at)
+        at.run()
+        at.session_state["settings"].threshold = 0.005
+        at.run()
+        everything = reflector_table(at)
+        buried = int((~everything["own_extremum"]).sum())
+        assert buried > 0
+
+        box = next(c for c in at.checkbox
+                   if c.label.startswith("Only reflectors the seismic can"))
+        box.set_value(True).run()
+        assert not at.exception
+        kept = reflector_table(at)
+        assert len(kept) == len(everything) - buried
+        assert kept["own_extremum"].all()
+
+    def test_the_page_says_how_many_were_buried(self, avo_page):
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=180)
+        _inject_demo_well(at)
+        at.run()
+        at.session_state["settings"].threshold = 0.005
+        at.run()
+        warnings = " ".join(w.value for w in at.warning)
+        assert "no turning point of their own polarity" in warnings
+
     def test_the_spec_pinned_gas_sand_survives_the_narrower_window(self):
         """SPEC.md 4.1 fixes the gas sand as Class III. Narrowing the window
         sharpens contrasts, and that must not quietly move the one answer the
