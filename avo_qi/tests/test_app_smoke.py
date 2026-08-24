@@ -758,6 +758,233 @@ class TestClassifiedTraceSelection:
         assert at.session_state["reflector_pick"] == target
 
 
+class TestTheTracePanelBesideTheDetail:
+    """The trace panel carries the log tracks, the gather and the lobe shading.
+
+    Exercised on the figure itself rather than through the page, so a broken
+    panel is reported as a broken panel and not as a page that failed to run.
+    """
+
+    @staticmethod
+    def _inputs():
+        import pandas as pd
+
+        from avo_qi.core.blocking import lobe_windows
+
+        twt = np.arange(40) * 0.002
+        # One clean trough, so there is a real lobe to halve.
+        trace = np.zeros(40)
+        trace[12:21] = -np.sin(np.linspace(0, np.pi, 9))
+        table = pd.DataFrame({"sample": [16], "avo_class": ["III"],
+                              "depth": [1600.0]})
+        extrema = {"index": np.array([16]), "amplitude": np.array([trace[16]]),
+                   "is_extremum": np.array([True]), "offset": np.array([0])}
+        lobe = lobe_windows(trace, np.array([16]), polarity=np.array([-1.0]))
+        assert lobe["resolved"][0], "the fixture must have a lobe to shade"
+        return trace, twt, table, extrema, lobe
+
+    def test_the_gather_is_drawn_to_the_right_of_the_trace(self):
+        from avo_qi.ui import classified_trace_figure
+
+        trace, twt, table, extrema, _ = self._inputs()
+        angles = np.arange(0, 41, 5, dtype=float)
+        gather = np.outer(trace, np.linspace(1.0, 0.4, angles.size))
+
+        fig = classified_trace_figure(trace, twt, table, extrema,
+                                      logs={"Vp (m/s)": np.full(40, 2500.0)},
+                                      gather=gather, gather_angles=angles)
+        heatmaps = [t for t in fig.data if t.type == "heatmap"]
+        assert len(heatmaps) == 1
+        titles = [a.text for a in fig.layout.annotations]
+        assert titles[-1] == "Gather", "the gather must be the right-hand panel"
+        # ...and on the trace's own two-way-time axis, which is the point of
+        # putting it there rather than in a figure of its own.
+        assert heatmaps[0].y[0] == twt[0] and heatmaps[0].y[-1] == twt[-1]
+        assert fig.layout.yaxis.autorange == "reversed"
+
+    def test_no_gather_is_drawn_when_none_is_given(self):
+        from avo_qi.ui import classified_trace_figure
+
+        trace, twt, table, extrema, _ = self._inputs()
+        fig = classified_trace_figure(trace, twt, table, extrema)
+        assert not [t for t in fig.data if t.type == "heatmap"]
+        assert "Gather" not in [a.text for a in fig.layout.annotations]
+
+    def test_the_two_lobe_halves_are_shaded_over_every_panel(self):
+        """Blue above the extremum, orange below, meeting at it — and drawn
+        across the logs too, since the shading is there to say which log
+        samples were averaged."""
+        from avo_qi.ui import LOBE_COLOURS, classified_trace_figure
+
+        trace, twt, table, extrema, lobe = self._inputs()
+        logs = {"Vp (m/s)": np.full(40, 2500.0), "Vs (m/s)": np.full(40, 1200.0)}
+        fig = classified_trace_figure(trace, twt, table, extrema, selected=0,
+                                      logs=logs, lobe=lobe)
+
+        rects = [s for s in fig.layout.shapes if s.type == "rect"]
+        upper = [s for s in rects if s.fillcolor == LOBE_COLOURS["upper"]]
+        lower = [s for s in rects if s.fillcolor == LOBE_COLOURS["lower"]]
+        # Three panels: two logs and the trace.
+        assert len(upper) == 3 and len(lower) == 3
+
+        step = float(np.median(np.diff(twt)))
+        assert upper[0].y0 == pytest.approx(twt[lobe["upper_start"][0]] - step / 2)
+        assert upper[0].y1 == pytest.approx(twt[16] + step / 2)
+        assert lower[0].y0 == pytest.approx(twt[16] - step / 2)
+        assert lower[0].y1 == pytest.approx(
+            twt[lobe["lower_stop"][0] - 1] + step / 2)
+
+    def test_the_gather_gets_the_window_as_an_outline_not_a_fill(self):
+        """A fill would sit under the heatmap and vanish; drawn over it, it
+        would tint amplitudes on a scale whose colour *is* the polarity."""
+        from avo_qi.ui import LOBE_COLOURS, LOBE_EDGES, classified_trace_figure
+
+        trace, twt, table, extrema, lobe = self._inputs()
+        angles = np.arange(0, 41, 10, dtype=float)
+        fig = classified_trace_figure(
+            trace, twt, table, extrema, selected=0, lobe=lobe,
+            gather=np.outer(trace, np.ones(angles.size)), gather_angles=angles)
+
+        rects = [s for s in fig.layout.shapes if s.type == "rect"]
+        filled = [s for s in rects if s.fillcolor in LOBE_COLOURS.values()]
+        outlined = [s for s in rects if s.line.color in LOBE_EDGES.values()]
+        assert len(filled) == 2, "one fill per half on the trace panel"
+        assert len(outlined) == 2, "one outline per half on the gather"
+        for shape in outlined:
+            assert shape.fillcolor == "rgba(0,0,0,0)"
+            assert shape.layer == "above"
+
+    def test_a_reflector_with_no_lobe_is_left_unshaded(self):
+        """The fallback fixed window is not the reflector's lobe, so shading it
+        would claim a measurement that was never made."""
+        from avo_qi.ui import LOBE_COLOURS, classified_trace_figure
+
+        trace, twt, table, extrema, lobe = self._inputs()
+        lobe = dict(lobe)
+        lobe["resolved"] = np.array([False])
+        fig = classified_trace_figure(trace, twt, table, extrema, selected=0,
+                                      lobe=lobe)
+        assert not [s for s in fig.layout.shapes
+                    if s.fillcolor in LOBE_COLOURS.values()]
+
+    def test_nothing_is_shaded_without_a_lobe_argument(self):
+        from avo_qi.ui import LOBE_COLOURS, classified_trace_figure
+
+        trace, twt, table, extrema, _ = self._inputs()
+        fig = classified_trace_figure(trace, twt, table, extrema, selected=0)
+        assert not [s for s in fig.layout.shapes
+                    if s.fillcolor in LOBE_COLOURS.values()]
+
+    def test_the_page_offers_all_three_as_toggles(self, avo_page):
+        labels = {c.label for c in avo_page.checkbox}
+        assert {"Vp, Vs and RHOB tracks", "Gather", "Lobe halves"} <= labels
+
+
+class TestInterfacePairFilter:
+    """Filtering on the *pair* — a shale-over-sand top is a different event
+    from the shale-over-shale contrast a few samples above it."""
+
+    @staticmethod
+    def _page(pairs=None):
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=180)
+        _inject_demo_well(at)
+        at.run()
+        if pairs is not None:
+            picker = next(m for m in at.multiselect
+                          if m.label == "Interface pairs to keep")
+            picker.set_value(pairs).run()
+        return at
+
+    def test_the_filter_offers_the_pairs_that_are_actually_present(self):
+        at = self._page()
+        picker = next(m for m in at.multiselect
+                      if m.label == "Interface pairs to keep")
+        assert "shale over sand" in picker.options
+        assert "shale over shale" in picker.options
+        # Defaults to everything known, so the page opens unfiltered.
+        assert set(picker.value) == {p for p in picker.options
+                                     if "undefined" not in p}
+
+    def test_keeping_only_the_tops_drops_every_other_pair(self):
+        at = self._page(["shale over sand"])
+        assert not at.exception
+        table = reflector_table(at)
+        assert len(table) > 0
+        assert set(table["litho_pair"]) == {"shale over sand"}
+
+    def test_it_says_how_many_it_hid(self):
+        at = self._page(["shale over sand"])
+        captions = " ".join(c.value for c in at.caption)
+        assert "Interface-pair filter is hiding" in captions
+
+    def test_clearing_the_selection_keeps_everything(self):
+        """An empty multiselect reads as 'no filter', matching the sidebar's
+        lithology filter — otherwise clearing it would blank the page."""
+        everything = len(reflector_table(self._page()))
+        at = self._page([])
+        assert not at.exception
+        assert len(reflector_table(at)) == everything
+
+    def test_the_pair_filter_and_the_lithology_filter_are_different_questions(self):
+        """The sidebar keeps a reflector when *either* side is a selected
+        lithology; this one asks for the ordered pair. Sand-over-shale survives
+        the first and not the second."""
+        at = self._page()
+        at.session_state["settings"].lithologies = ["sand"]
+        at.run()
+        by_sample = set(reflector_table(at)["litho_pair"])
+        assert "sand over shale" in by_sample
+
+        at = self._page(["shale over sand"])
+        assert "sand over shale" not in set(reflector_table(at)["litho_pair"])
+
+
+class TestTheDetailPanelFollowsTheFilters:
+    """The blocked layers are computed before any filter and are held in arrays
+    parallel to the *unfiltered* table.  Indexing them with a filtered row
+    position quotes a different reflector's layers — silently, and with a
+    perfectly plausible-looking number."""
+
+    @staticmethod
+    def _panel(at):
+        for caption in at.caption:
+            if "Upper layer Vp" in caption.value:
+                return caption.value
+        raise AssertionError("the detail panel quoted no layer properties")
+
+    def test_the_same_reflector_reads_the_same_filtered_or_not(self):
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=300)
+        _inject_demo_well(at)
+        at.run()
+        full = reflector_table(at)
+
+        # A reflector far enough down the table that the rows above it are not
+        # all kept — that gap is what the bug turned into a wrong answer.
+        target = int(full["sample"].iloc[6])
+        at.session_state["reflector_pick"] = 6
+        at.run()
+        unfiltered = self._panel(at)
+
+        at.session_state["settings"].lithologies = ["sand"]
+        at.run()
+        table = reflector_table(at)
+        assert len(table) < len(full), "the filter must actually drop rows"
+        position = int(np.flatnonzero(table["sample"].to_numpy() == target)[0])
+        assert position != 6, "otherwise this proves nothing"
+        at.session_state["reflector_pick"] = position
+        at.run()
+        assert self._panel(at) == unfiltered
+
+    def test_the_reflector_table_does_not_leak_the_bookkeeping_column(self):
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=180)
+        _inject_demo_well(at)
+        at.run()
+        assert "props_row" not in reflector_table(at).columns
+
+
 class TestLithologyFilter:
     """Lithology is cut from VSH and filters the crossplots and reflectors."""
 

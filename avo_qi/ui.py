@@ -644,8 +644,19 @@ def fluid_vector_crossplot(comparison, reference, targets, a_tol=0.02, height=64
     return fig
 
 
+#: Fills for the two halves of a reflector's lobe.  Deliberately not the class
+#: palette: these say *which samples were averaged*, not what the answer was.
+LOBE_COLOURS = {"upper": "rgba(31,119,180,0.16)", "lower": "rgba(214,124,26,0.16)"}
+#: The same two windows as an outline, for the gather.  A fill there would sit
+#: under the heatmap and vanish, and drawn over it would tint the amplitudes —
+#: on a red-blue scale that is the polarity, so tinting would say something
+#: about the data that is not true.
+LOBE_EDGES = {"upper": "rgba(31,119,180,0.85)", "lower": "rgba(214,124,26,0.85)"}
+
+
 def classified_trace_figure(trace, twt, table, extrema, selected=None, height=900,
-                            gain=1.0, logs=None, trace_title="Trace"):
+                            gain=1.0, logs=None, trace_title="Trace", lobe=None,
+                            gather=None, gather_angles=None):
     """Log tracks beside a trace, with each reflector marked and coloured by class.
 
     The trace is drawn variable-area, and every classified reflector gets a
@@ -660,6 +671,18 @@ def classified_trace_figure(trace, twt, table, extrema, selected=None, height=90
     point of putting them side by side, and a shared axis is what makes the
     comparison trustworthy: the tracks cannot drift out of register.
 
+    ``gather`` adds an angle gather to the *right* of the trace on that same
+    axis, so the reflector picked out on the stack can be read against how it
+    behaves with angle — which is the quantity being classified.
+
+    ``lobe`` is a :func:`avo_qi.core.blocking.lobe_windows` result aligned with
+    ``table``.  The selected reflector's two half-lobes are shaded across every
+    panel: the upper half, whose log samples were averaged into the layer
+    above, and the lower half, which gave the layer below.  Shading it over the
+    logs as well as the trace is the point — it shows exactly which samples the
+    intercept and gradient were computed from, instead of leaving the window an
+    invisible assumption.
+
     Note the layout deliberately does **not** set ``dragmode``.  With
     ``dragmode="select"`` Plotly treats a click as the start of a box-selection
     drag, and a zero-area box selects nothing — which silently breaks
@@ -672,11 +695,18 @@ def classified_trace_figure(trace, twt, table, extrema, selected=None, height=90
     limit = float(np.nanmax(np.abs(trace))) or 1.0
 
     logs = dict(logs or {})
+    show_gather = gather is not None and gather_angles is not None
     titles = list(logs) + [trace_title]
+    if show_gather:
+        titles.append("Gather")
     n_cols = len(titles)
-    trace_col = n_cols
-    # The trace needs the room; the logs only have to be readable.
+    trace_col = len(logs) + 1
+    gather_col = trace_col + 1 if show_gather else None
+    # The trace needs the room; the logs only have to be readable, and the
+    # gather is read for its trend with angle rather than for detail.
     widths = [1.0] * len(logs) + [1.9 if logs else 1.0]
+    if show_gather:
+        widths.append(1.5)
     total = sum(widths)
 
     fig = make_subplots(
@@ -691,6 +721,17 @@ def classified_trace_figure(trace, twt, table, extrema, selected=None, height=90
             line=dict(color="#444", width=1.1),
             hovertemplate=f"{title} %{{x:.4g}}<br>TWT %{{y:.3f}} s<extra></extra>",
         ), row=1, col=col)
+
+    if show_gather:
+        panel = np.asarray(gather, dtype=float)
+        gather_angles = np.asarray(gather_angles, dtype=float)
+        span = float(np.nanmax(np.abs(panel))) or 1.0
+        fig.add_trace(go.Heatmap(
+            z=panel, x=gather_angles, y=twt, colorscale="RdBu", zmid=0.0,
+            zmin=-span / gain, zmax=span / gain, showscale=False,
+            hovertemplate="angle %{x:.0f} deg<br>TWT %{y:.3f} s"
+                          "<br>amp %{z:.4f}<extra></extra>",
+        ), row=1, col=gather_col)
 
     fig.add_trace(go.Scatter(
         x=np.zeros_like(twt), y=twt, mode="lines", line=dict(width=0),
@@ -757,6 +798,35 @@ def classified_trace_figure(trace, twt, table, extrema, selected=None, height=90
             hoverinfo="skip",
         ), row=1, col=trace_col)
 
+    if selected is not None and lobe is not None and 0 <= int(selected) < amplitude.size:
+        i = int(selected)
+        resolved_lobe = np.asarray(lobe.get(
+            "resolved", np.ones(amplitude.size, bool)), dtype=bool)
+        if i < resolved_lobe.size and resolved_lobe[i]:
+            # Half a sample either end, so the band covers the samples that were
+            # averaged rather than the interval between their centres — a
+            # two-sample half would otherwise show as a hairline.
+            step = float(np.median(np.diff(twt))) if twt.size > 1 else 0.0
+            for half, colour in LOBE_COLOURS.items():
+                start = int(np.clip(lobe[f"{half}_start"][i], 0, twt.size - 1))
+                stop = int(np.clip(lobe[f"{half}_stop"][i] - 1, 0, twt.size - 1))
+                if stop < start:
+                    continue
+                y0 = float(twt[start]) - step / 2.0
+                y1 = float(twt[stop]) + step / 2.0
+                for col in range(1, n_cols + 1):
+                    # Spans the panel's full width whatever its x range, so the
+                    # same window reads across logs, trace and gather alike.
+                    if show_gather and col == gather_col:
+                        fig.add_hrect(y0=y0, y1=y1, fillcolor="rgba(0,0,0,0)",
+                                      line=dict(color=LOBE_EDGES[half], width=1.4,
+                                                dash="dot"),
+                                      layer="above", row=1, col=col)
+                    else:
+                        fig.add_hrect(y0=y0, y1=y1, fillcolor=colour,
+                                      line_width=0, layer="below",
+                                      row=1, col=col)
+
     if selected is not None and 0 <= int(selected) < amplitude.size:
         i = int(selected)
         # Drawn as *shapes*, never as an extra trace.  Plotly keys a selection
@@ -783,6 +853,8 @@ def classified_trace_figure(trace, twt, table, extrema, selected=None, height=90
                      range=[-limit * 1.35 / gain, limit * 1.35 / gain])
     for col in range(1, trace_col):
         fig.update_xaxes(nticks=4, row=1, col=col)
+    if show_gather:
+        fig.update_xaxes(title_text="Angle (deg)", nticks=5, row=1, col=gather_col)
     fig.update_layout(
         height=height, margin=dict(l=60, r=20, t=60, b=45),
         legend=dict(orientation="h", yanchor="bottom", y=1.03, x=0,

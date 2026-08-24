@@ -188,6 +188,13 @@ if not table.empty:
     table["A_fixed"] = fixed_table["A_shuey"].to_numpy()
     table["class_fixed"] = fixed_table["avo_class"].to_numpy()
     table["dA_blocking"] = table["A_shuey"] - table["A_fixed"]
+    # `blocked_props` and `lobe_bounds` are arrays parallel to the table *as
+    # blocked*, but the zone, lithology and interface-pair filters below shorten
+    # it and reset the index. Without a row of its own to point back with, the
+    # detail panel would quote — and the class probabilities would be computed
+    # on — whichever reflector happened to land at that position after
+    # filtering, which is a different interface.
+    table["props_row"] = np.arange(len(table))
 
     from_lobe = int(np.count_nonzero(blocked["from_lobe"]))
     moved = int((table["avo_class"] != table["class_fixed"]).sum())
@@ -294,6 +301,34 @@ if selected_litho:
         )
         st.stop()
 
+# Interface pairs. The sidebar filter above asks "is either side a sand?"; this
+# one asks for the *pair*, which is the question AVO is actually about — a
+# shale-over-sand top and a shale-over-shale contrast can sit side by side in
+# the same interval, and mixing them is what smears an A-B cloud. Keeping only
+# the tops is usually the difference between a readable crossplot and a blob.
+pair_options = sorted(set(table["litho_pair"].astype(str)))
+if len(pair_options) > 1:
+    default_pairs = [p for p in pair_options if "undefined" not in p] or pair_options
+    chosen_pairs = st.multiselect(
+        "Interface pairs to keep", pair_options, default=default_pairs,
+        help="Upper lithology over lower. Leave only 'shale over sand' to see "
+             "reservoir tops alone; clear the box to keep every pair.",
+    )
+    if chosen_pairs:
+        keep_pair = table["litho_pair"].astype(str).isin(chosen_pairs).to_numpy()
+        if not keep_pair.all():
+            st.caption(
+                f"Interface-pair filter is hiding {int((~keep_pair).sum())} of "
+                f"{len(table)} reflectors — this filter is on the pair, so "
+                "'shale over sand' keeps reservoir tops while dropping their "
+                "bases and any shale-over-shale contrast."
+            )
+        table = table[keep_pair].reset_index(drop=True)
+        if table.empty:
+            st.warning("No reflector has a selected interface pair. Widen the "
+                       "selection above.")
+            st.stop()
+
 trend = background_trend(table["A_shuey"], table["B_shuey"])
 
 # ------------------------------------------------------------- summary -----
@@ -321,8 +356,9 @@ if known_pairs:
         st.dataframe(summary, use_container_width=True, hide_index=True)
         st.caption(
             "Reservoir tops are the *over sand* pairs; their bases are the "
-            "*sand over* ones. Filtering to shale-over-sand is usually the "
-            "quickest way to a clean A-B cloud."
+            "*sand over* ones. Use **Interface pairs to keep** above to leave "
+            "only shale over sand — mixing tops, bases and shale-on-shale is "
+            "what smears an A-B cloud."
         )
 
 # --------------------------------------------------------- A-B crossplot ---
@@ -377,6 +413,11 @@ pct_rho = q4.slider("RHOB ± (%)", 0.0, 10.0, 1.0, 0.25, disabled=not confidence
 probabilities = None
 if confidence_on and len(table):
     reflector_samples = table["sample"].to_numpy()
+    # Bounds are per-reflector and were built before any filter, so they have to
+    # be cut down to the rows still on screen or `block_properties` would pair
+    # each surviving sample with a stranger's window.
+    rows = table["props_row"].to_numpy(int)
+    lobe_here = {k: np.asarray(v)[rows] for k, v in lobe_bounds.items()}
     with st.spinner(f"Reclassifying {n_draws} realisations…"):
         realisations = perturb_logs(vp, vs, rho, n_realisations=int(n_draws),
                                     seed=0, vp_pct=pct_vp, vs_pct=pct_vs,
@@ -397,7 +438,7 @@ if confidence_on and len(table):
                 realisations["VP"][r], realisations["VS"][r],
                 realisations["RHOB"][r], reflector_samples,
                 window=window, method=block_method, guard=int(guard),
-                bounds=lobe_bounds)
+                bounds=lobe_here)
             for k in keys:
                 stacked[k][r] = one[k]
         probabilities = class_probabilities_from_layers(
@@ -487,7 +528,7 @@ elif confidence_on:
 st.divider()
 st.subheader("Reflector table")
 
-show = table.copy()
+show = table.drop(columns=["props_row"], errors="ignore").copy()
 if probabilities is not None:
     # Carried into the table and the CSV, so the odds travel with the
     # label rather than living only on screen.
@@ -547,9 +588,10 @@ st.caption(
     "Pick a reflector with the dropdown, by clicking a row in the table above, "
     "or by clicking a marker on the trace — the dropdown and "
     "the panel below follow it. Each marker sits on the amplitude extremum the "
-    "reflector produces, coloured by its AVO class, and the Vp, Vs and RHOB "
-    "tracks share the trace's two-way-time axis so a reflector lines up with "
-    "the contrast that made it."
+    "reflector produces, coloured by its AVO class. The Vp, Vs and RHOB tracks "
+    "and the angle gather share the trace's two-way-time axis, so a reflector "
+    "lines up with the contrast that made it on one side and with its own "
+    "behaviour against angle on the other."
 )
 
 # The gather this page's trace is drawn from.
@@ -611,31 +653,56 @@ if clicked is not None and clicked != st.session_state.get("_last_trace_click"):
 if st.session_state["reflector_pick"] >= len(labels):
     st.session_state["reflector_pick"] = strongest
 
-d1, d2 = st.columns([2, 1])
+d1, d2, d3, d4 = st.columns([2, 1, 1, 1])
 detail_height = d1.slider(
     "Panel height (px)", 500, 2200, 1100, 50,
     help="The trace spans the whole analysis window; raise this to read a "
          "long well without squinting.")
-show_logs = d2.checkbox("Show Vp, Vs and RHOB tracks", value=True,
+show_logs = d2.checkbox("Vp, Vs and RHOB tracks", value=True,
                         help="Drawn to the left of the trace on the same "
                              "two-way-time axis, so a reflector lines up with "
                              "the contrast that produced it.")
+show_gather = d3.checkbox("Gather", value=True,
+                          help="The angle gather beside the stack, on the same "
+                               "two-way-time axis: the stack says where the "
+                               "reflector is, the gather says how it behaves "
+                               "with angle, which is what the class is about.")
+show_lobe = d4.checkbox("Lobe halves", value=True,
+                        help="Shade the two half-lobes the selected "
+                             "reflector's layers were averaged over.")
 
 trace_col, detail_col = st.columns([3, 2])
 
 with trace_col:
     st.markdown(f"**{trace_choice}** — reflectors by class")
     detail_logs = {"Vp (m/s)": vp, "Vs (m/s)": vs, "RHOB (g/cc)": rho} if show_logs else None
+    # Cut to the rows still on screen, so the shading follows the same
+    # reflector the dropdown and the curve below are describing.
+    detail_lobe = None
+    if show_lobe and lobe_bounds is not None:
+        _lobe_rows = table["props_row"].to_numpy(int)
+        detail_lobe = {k: np.asarray(v)[_lobe_rows] for k, v in lobe_bounds.items()}
     st.plotly_chart(
         classified_trace_figure(
             detail_trace, twt, table, extrema,
             selected=st.session_state["reflector_pick"],
             height=int(detail_height), logs=detail_logs,
-            trace_title=trace_choice,
+            trace_title=trace_choice, lobe=detail_lobe,
+            gather=detail_gather if show_gather else None,
+            gather_angles=angles if show_gather else None,
         ),
         use_container_width=True, key="class_trace",
         on_select="rerun", selection_mode="points",
     )
+    if show_lobe:
+        st.caption(
+            "The blue band is the **upper** half-lobe and the orange band the "
+            "**lower** one, for the selected reflector. Those are the samples "
+            "averaged into the two layers behind its A and B — shaded across "
+            "the logs as well as the trace, so the window can be read against "
+            "the contrast it is meant to capture. A reflector that fell back "
+            "to the fixed half cycle has no lobe to shade."
+        )
     off = extrema["offset"]
     if np.any(np.abs(off) > 0):
         st.caption(
@@ -674,14 +741,17 @@ with detail_col:
     # differ by more than 0.25 in Rpp and the fit looks badly wrong when it is
     # not.
     if blocked_props is not None:
-        layer = (blocked_props["vp_upper"][pick], blocked_props["vs_upper"][pick],
-                 blocked_props["rho_upper"][pick], blocked_props["vp_lower"][pick],
-                 blocked_props["vs_lower"][pick], blocked_props["rho_lower"][pick])
-        modelled = np.asarray(blocked_props["rc"])[pick, :]
-        rows = int(blocked_props["n_upper"][pick] + blocked_props["n_lower"][pick])
+        # Through `props_row`, never through `pick`: the filters above have
+        # renumbered the table, and `pick` is a position in the filtered one.
+        p = int(row["props_row"])
+        layer = (blocked_props["vp_upper"][p], blocked_props["vs_upper"][p],
+                 blocked_props["rho_upper"][p], blocked_props["vp_lower"][p],
+                 blocked_props["vs_lower"][p], blocked_props["rho_lower"][p])
+        modelled = np.asarray(blocked_props["rc"])[p, :]
+        n_lobe = int(blocked_props["n_upper"][p] + blocked_props["n_lower"][p])
         layer_source = (
-            f"the reflector's own lobe ({rows} samples across both halves)"
-            if blocked_props["from_lobe"][pick]
+            f"the reflector's own lobe ({n_lobe} samples across both halves)"
+            if blocked_props["from_lobe"][p]
             else f"the fallback fixed half cycle (±{window} samples)")
     else:
         layer = (vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1]) \
