@@ -80,7 +80,7 @@ class Settings:
     ricker_freq: float = 30.0
     ormsby: tuple = (5.0, 10.0, 60.0, 80.0)
     wavelet_length: float = 0.128
-    threshold: float = 0.01
+    threshold: float = 0.05
     case: str = None
     zones: list = field(default_factory=list)
     zone_names: dict = field(default_factory=dict)
@@ -366,9 +366,12 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
                      "Class II from Classes I and III.",
             )
             s.threshold = st.slider(
-                "Reflector |R| threshold", 0.0, 0.20, float(s.threshold), 0.005,
-                help="Minimum peak |R| across angles for an interface to count "
-                     "as a reflector.",
+                "Event amplitude threshold", 0.0, 0.50, float(s.threshold), 0.01,
+                help="Minimum turning-point amplitude on the full stack for an "
+                     "event to count as a reflector, as a fraction of the "
+                     "strongest event on the trace. A fraction rather than an "
+                     "absolute level, because trace amplitude scales with the "
+                     "wavelet and has no fixed units.",
             )
 
     st.session_state["settings"] = s

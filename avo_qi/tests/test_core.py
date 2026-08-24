@@ -459,6 +459,85 @@ def stacked_trace():
     return full_stack(build_gather(vp, vs, rho, angles, w, dt=0.001)), top, base
 
 
+class TestTraceEvents:
+    """Picking reflectors off the trace instead of off the logs.
+
+    The logs know about every interface; the seismic shows only what its
+    bandwidth resolves. Letting the trace pick means a reflector is always
+    something that could actually be picked on a section.
+    """
+
+    @staticmethod
+    def _trace():
+        from avo_qi.core.wavelet import ricker
+
+        _, wavelet = ricker(30.0, 0.001)
+        rc = np.zeros(400)
+        rc[100] = -0.20          # loud trough
+        rc[200] = +0.10          # half as loud, a peak
+        rc[300] = -0.01          # near-noise
+        return np.convolve(rc, wavelet, mode="same")
+
+    def test_each_event_is_a_turning_point_with_the_traces_own_polarity(self):
+        from avo_qi.core.synthetic import _local_extrema, trace_events
+
+        trace = self._trace()
+        events = trace_events(trace, relative=0.0)
+        turning = set(_local_extrema(trace).tolist())
+        assert set(events["index"].tolist()) <= turning
+        for i, pol in zip(events["index"], events["polarity"]):
+            assert pol == (1 if trace[i] > 0 else -1)
+        assert list(events["index"]) == sorted(events["index"])
+
+    def test_the_cut_is_a_fraction_of_the_strongest_event(self):
+        from avo_qi.core.synthetic import trace_events
+
+        trace = self._trace()
+        strongest = np.abs(trace_events(trace, relative=0.0)["amplitude"]).max()
+        for relative in (0.0, 0.05, 0.25, 0.6):
+            events = trace_events(trace, relative=relative)
+            assert (np.abs(events["amplitude"]) >= relative * strongest - 1e-12).all()
+
+    def test_raising_the_cut_only_ever_removes_events(self):
+        from avo_qi.core.synthetic import trace_events
+
+        trace = self._trace()
+        previous = set(trace_events(trace, relative=0.0)["index"].tolist())
+        for relative in (0.05, 0.2, 0.5, 0.9):
+            kept = set(trace_events(trace, relative=relative)["index"].tolist())
+            assert kept <= previous
+            previous = kept
+
+    def test_a_thin_bed_gives_one_event_not_two(self):
+        """A top and a base closer than the wavelet can separate interfere into
+        a single lobe. That lobe is the event; calling it two would be claiming
+        resolution the trace does not have."""
+        from avo_qi.core.wavelet import ricker
+        from avo_qi.core.synthetic import trace_events
+
+        _, wavelet = ricker(30.0, 0.001)
+        rc = np.zeros(400)
+        rc[200] = -0.2
+        rc[204] = -0.2                       # 4 ms apart, far inside tuning
+        trace = np.convolve(rc, wavelet, mode="same")
+        events = trace_events(trace, relative=0.5)
+        assert events["index"].size == 1
+        assert events["polarity"][0] == -1
+
+    def test_an_absolute_cut_overrides_the_fraction(self):
+        from avo_qi.core.synthetic import trace_events
+
+        trace = self._trace()
+        events = trace_events(trace, relative=0.9, min_amplitude=0.0)
+        assert events["index"].size > 1
+
+    def test_a_flat_or_empty_trace_yields_nothing(self):
+        from avo_qi.core.synthetic import trace_events
+
+        for trace in (np.zeros(50), np.array([]), np.full(50, np.nan)):
+            assert trace_events(trace)["index"].size == 0
+
+
 class TestTraceExtrema:
     """Reflectors must be locatable as extrema on a trace, for class marking."""
 

@@ -32,7 +32,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 | **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
-| **AVO Classification** | Per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts the Vp, Vs and RHOB tracks and the angle gather on the trace's own two-way-time axis and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — and a tuned-versus-untuned section shows what bed thickness does to each reflector's class. |
+| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts the Vp, Vs and RHOB tracks and the angle gather on the trace's own two-way-time axis and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — and a tuned-versus-untuned section shows what bed thickness does to each reflector's class. |
 | **Rock Physics** | Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus Hertz-Mindlin soft-sand, stiff-sand and critical-porosity frames — raised dry-to-saturated through Gassmann on request. Then a **forward model** driven per-sample from VSH, PHIT and SW with a misfit readout, an optional **Monte Carlo** P10–P90 band, and **fluid substitution** at Batzle-Wang reservoir conditions. |
 
 ## Layout
@@ -110,55 +110,45 @@ narrows where interference squeezes the lobe and opens where the reflector
 stands alone. On the demo well the median lobe spans 17 samples against the 26
 of the fixed half cycle it replaces, which is why contrasts come out sharper.
 
-Two consequences are surfaced rather than hidden. A reflector with no
-resolvable lobe — buried in a neighbour's, or with no crossing in range — falls
-back to the fixed half-cycle window and is marked `fixed window` in the
-reflector table. And reflectors that **share** a lobe get the same blocked
-layers and the same A and B, because interfaces inside one lobe are not
-separable at that bandwidth; reporting different answers for them would be
-inventing resolution the data does not have.
+Two consequences are surfaced rather than hidden. A lobe only one sample wide
+cannot be halved, and one with no zero crossing in range cannot be bounded;
+either falls back to the fixed half-cycle window and is marked `fixed window`
+in the reflector table. And two turning points sharing one lobe — a shoulder
+rather than a lobe of its own — get the same blocked layers and the same A and
+B, because they are not separable at that bandwidth; reporting different
+answers for them would be inventing resolution the data does not have.
 
-## Classified but not observable
+## The trace picks the reflectors
 
-An AVO class comes from the **logs** — the Zoeppritz response between the two
-blocked layers — so every interface above the threshold gets one. Whether the
-seismic can *see* that reflector separately is a different question, answered
-by `own_extremum` in the reflector table: does it produce a turning point of
-its own polarity on the full stack?
+A well log knows about every interface; a seismic trace shows only what its
+bandwidth resolves. Picking reflectors off the logs and then hunting for the
+amplitude each one produced gets that backwards, and it shows: on a real North
+Sea well (15/9-19-A) a |R| threshold found **269 interfaces**, of which **114 —
+42% — produced no turning point of their own on the full stack**. Their AVO
+class was real interface physics but not a pickable answer: the amplitude at
+that time belonged to a neighbour.
 
-Where it does not, the reflector is buried in a neighbour's lobe. Its class is
-still real interface physics, but it is a modelled answer rather than a
-pickable one — you could not measure that amplitude, because the amplitude at
-that time belongs to the neighbour. Such reflectors are drawn as hollow markers
-on the trace, blocked on the fixed half cycle rather than on a lobe of their
-own, and can be hidden with **Only reflectors the seismic can separate**.
+So the **trace decides where the reflectors are**. Every turning point on the
+full stack above the amplitude cut is an event, and the logs are asked only
+what the rock is doing there. The same well now gives **25 events, every one of
+them on a lobe of its own**. Two consequences follow, and both are the point:
 
-This is not a rare corner. On a real North Sea well (15/9-19-A, 269 reflectors
-at the default threshold) **114 of them — 42% — have no extremum of their
-own**, and dropping them moves the background trend from `B = -0.841 A - 0.0080`
-to `B = -0.792 A - 0.0129`. Worth looking at the crossplot both ways before
-trusting a trend.
+* **A reflector buried in a neighbour's lobe is impossible** — the neighbour
+  *is* the event.
+* **A thin bed gives one event, not two.** Where a top and a base interfere
+  into a single trough, that trough is what the seismic shows and what you
+  could pick; splitting it into two answers would be inventing resolution.
 
-The window is also drawn. In **Reflector detail** the selected reflector's two
-half-lobes are shaded across every panel — blue above the extremum, orange
-below — so the samples behind its intercept and gradient can be read against
-the Vp, Vs and RHOB tracks they were averaged from, instead of the window being
-an invisible assumption. A reflector that fell back to the fixed half cycle has
-no lobe, and is left unshaded rather than shaded with a window it did not
-measure.
+The cut is a fraction of the strongest event on the trace rather than an
+absolute level, because trace amplitude scales with the wavelet and carries no
+fixed units — the same absolute number would mean quite different things at two
+peak frequencies.
 
-## Filtering to the interfaces you mean
-
-Two filters sit either side of the same question and are deliberately not the
-same control. The sidebar's **Show lithologies** keeps a reflector when *either*
-side of it is a selected lithology, which is the right question for a
-crossplot. The AVO Classification page's **Interface pairs to keep** asks for
-the ordered pair instead — `shale over sand` keeps reservoir tops while
-dropping their bases and every shale-over-shale contrast between them. Mixing
-tops, bases and background reflections is what smears an A–B cloud, and on the
-demo well the pair filter cuts nine reflectors to the three that are actually
-reservoir tops. Clearing the box reads as *no filter*, so it can never blank
-the page.
+The lithology pair is read the same way. `lobe_lithology` takes the commonest
+label over each half-lobe rather than the two samples nearest the extremum, so
+"shale over sand" names the rock the intercept and gradient actually came from;
+a single sample of silt at the boundary no longer renames a layer the wave saw
+as shale.
 
 ## Zonation
 

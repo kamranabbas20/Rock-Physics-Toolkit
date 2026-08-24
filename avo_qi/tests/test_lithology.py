@@ -12,6 +12,7 @@ from avo_qi.core.lithology import (
     UNDEFINED,
     classify_lithology,
     interface_lithology,
+    lobe_lithology,
     lithology_fractions,
     vsh_from_gr,
 )
@@ -177,3 +178,56 @@ class TestAgainstTheDemoWell:
         labels = np.array(["shale"] * 40 + ["sand"] * 30, dtype=object)
         found = interface_lithology(labels, [39])
         assert found["pair"][0] == "shale over sand"
+
+
+class TestLobeLithology:
+    """Name the rock the AVO was actually fitted to.
+
+    Once the elastic properties come from averaging a half-lobe apiece, the two
+    samples nearest the extremum are no longer the layers being described.
+    """
+
+    @staticmethod
+    def _bounds(upper, lower, resolved=True):
+        return {"upper_start": np.array([upper[0]]),
+                "upper_stop": np.array([upper[1]]),
+                "lower_start": np.array([lower[0]]),
+                "lower_stop": np.array([lower[1]]),
+                "resolved": np.array([resolved])}
+
+    def test_it_reads_the_commonest_label_over_each_half(self):
+        labels = np.array(["shale"] * 20 + ["sand"] * 20, dtype=object)
+        found = lobe_lithology(labels, self._bounds((12, 20), (19, 28)))
+        assert found["pair"][0] == "shale over sand"
+
+    def test_a_stray_sample_does_not_rename_the_layer(self):
+        """The failure this pins: one sample of silt inside eight of shale
+        named the pair from the silt, because the boundary reading looks at
+        exactly the two samples the wave averaged away."""
+        labels = np.array(["shale"] * 20 + ["sand"] * 20, dtype=object)
+        labels[19] = "silt"                       # the sample at the boundary
+        labels[20] = "silt"
+        assert interface_lithology(labels, [19])["pair"][0] == "silt over silt"
+        found = lobe_lithology(labels, self._bounds((12, 20), (19, 28)))
+        assert found["pair"][0] == "shale over sand"
+
+    def test_undefined_samples_are_ignored_unless_the_half_is_all_undefined(self):
+        labels = np.array([UNDEFINED] * 20 + ["sand"] * 20, dtype=object)
+        labels[15:20] = "shale"
+        found = lobe_lithology(labels, self._bounds((10, 20), (19, 28)))
+        assert found["pair"][0] == "shale over sand"
+
+        blank = np.full(40, UNDEFINED, dtype=object)
+        found = lobe_lithology(blank, self._bounds((10, 20), (19, 28)))
+        assert found["pair"][0] == f"{UNDEFINED} over {UNDEFINED}"
+
+    def test_an_unresolved_lobe_falls_back_to_the_interface(self):
+        labels = np.array(["shale"] * 20 + ["sand"] * 20, dtype=object)
+        found = lobe_lithology(labels, self._bounds((0, 0), (0, 0), resolved=False),
+                               samples=[19])
+        assert found["pair"][0] == "shale over sand"
+
+    def test_no_labels_at_all_is_not_an_error(self):
+        found = lobe_lithology(np.array([], dtype=object),
+                               self._bounds((0, 1), (1, 2)))
+        assert found["pair"].size == 0

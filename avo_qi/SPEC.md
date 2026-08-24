@@ -165,9 +165,15 @@ peak. Add this as a regression test.
   Expose `a_tol` in the UI — the boundary between II and I/III is a tunable
   intercept band, not a hard sign split. (Prototype note: a marginal case at
   A=−0.037 sat on the II/III line; the tolerance band is what resolves it.)
+- `trace_events(trace, relative)` — **the trace picks the reflectors.** Every
+  turning point on the full stack above a fraction of the strongest event is
+  one. The logs are never consulted about *where* a reflector is, only about
+  what the rock does there, so a reflector is always something that could be
+  picked on a section. (Superseded the earlier log-side |R| threshold: on
+  15/9-19-A that found 269 interfaces, 114 of which produced no turning point
+  of their own; trace picking finds 25, each on a lobe of its own.)
 - `reflector_avo(gather_or_rc, vp,vs,rho, angles, method, both=True)` —
-  detect reflectors (interfaces above an amplitude/contrast threshold, or
-  every non-trivial interface), fit A/B by **both** Shuey and Aki-Richards,
+  fit A/B at the given samples by **both** Shuey and Aki-Richards,
   classify, and return a table: depth/TWT, A_shuey, B_shuey, A_ar, B_ar,
   class, and Δ between the two fits.
 - `background_trend(A, B)` — robust line through the A–B cloud for the

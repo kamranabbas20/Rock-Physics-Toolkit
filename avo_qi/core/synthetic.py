@@ -18,6 +18,7 @@ __all__ = [
     "full_stack",
     "twt_axis",
     "trace_extrema",
+    "trace_events",
 ]
 
 
@@ -123,6 +124,63 @@ def _local_extrema(trace):
     signs = slope[moving]
     reversals = np.flatnonzero(signs[:-1] != signs[1:]) + 1
     return moving[reversals]
+
+
+def trace_events(trace, relative=0.05, min_amplitude=None):
+    """The reflection events the **trace itself** shows — its turning points.
+
+    This is the other way round from picking interfaces off the logs and then
+    hunting for the amplitude each one produced.  Here the seismic decides
+    where the reflectors are, and the logs are asked only what the rock is
+    doing there.  Two things follow, and both are the point rather than a
+    limitation:
+
+    * **Every event has its own lobe**, by construction.  There is no such
+      thing here as a reflector buried in a neighbour's — the neighbour *is*
+      the event.
+    * **A thin bed gives one event, not two.**  Where a top and a base
+      interfere into a single trough, that trough is what the seismic shows
+      and what can be picked; splitting it into two answers would be inventing
+      resolution the data does not have.
+
+    Parameters
+    ----------
+    trace : array_like
+        The trace to pick, normally the full stack.
+    relative : float
+        Amplitude cut as a fraction of the strongest event on the trace.  A
+        fraction rather than an absolute level, because trace amplitude scales
+        with the wavelet and carries no fixed units — the same absolute cut
+        would mean quite different things at two peak frequencies.
+    min_amplitude : float, optional
+        Absolute cut, used instead of ``relative`` when given.
+
+    Returns
+    -------
+    dict of ndarray
+        ``index`` (sample of each event, ascending), ``amplitude`` and
+        ``polarity`` (+1 peak, -1 trough).
+    """
+    trace = np.asarray(trace, dtype=float).ravel()
+    turning = _local_extrema(trace)
+    if turning.size == 0:
+        empty_i, empty_f = np.array([], dtype=int), np.array([], dtype=float)
+        return {"index": empty_i, "amplitude": empty_f, "polarity": empty_i}
+
+    amplitude = trace[turning]
+    finite = np.isfinite(amplitude)
+    turning, amplitude = turning[finite], amplitude[finite]
+
+    if min_amplitude is not None:
+        cut = float(min_amplitude)
+    else:
+        strongest = float(np.nanmax(np.abs(amplitude))) if amplitude.size else 0.0
+        cut = float(relative) * strongest
+    keep = np.abs(amplitude) >= cut
+    turning, amplitude = turning[keep], amplitude[keep]
+
+    return {"index": turning.astype(int), "amplitude": amplitude,
+            "polarity": np.sign(amplitude).astype(int)}
 
 
 def trace_extrema(trace, samples, half_window=5, polarity=None):

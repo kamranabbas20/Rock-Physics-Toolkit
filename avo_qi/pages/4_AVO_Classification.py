@@ -20,7 +20,7 @@ from avo_qi.core.blocking import (  # noqa: E402
     half_cycle_samples,
     lobe_windows,
 )
-from avo_qi.core.lithology import interface_lithology  # noqa: E402
+from avo_qi.core.lithology import interface_lithology, lobe_lithology  # noqa: E402
 from avo_qi.core.zones import zone_of_interface  # noqa: E402
 from avo_qi.core.tuning import (  # noqa: E402
     apparent_period,
@@ -45,6 +45,7 @@ from avo_qi.core.synthetic import (  # noqa: E402
     angle_stack,
     build_gather,
     full_stack,
+    trace_events,
     trace_extrema,
 )
 from avo_qi.core.uncertainty import (  # noqa: E402
@@ -105,13 +106,14 @@ rc = reflectivity_series(vp, vs, rho, angles, method=settings.method)
 # --- how the untuned response is measured ------------------------------------
 st.subheader("Untuned response")
 st.caption(
-    "Layer properties come from each reflector's **own lobe** on the full "
-    "stack. For a trough, the upper half — from the zero crossing above down "
-    "to the extremum — gives the layer above, and the lower half gives the "
-    "layer below; the logs are averaged over each. The window is therefore "
-    "measured on the data rather than assumed from the wavelet, so it narrows "
-    "where interference squeezes the lobe and opens where the reflector stands "
-    "alone."
+    "**The trace says where the reflectors are; the logs say what they are.** "
+    "Every turning point on the full stack above the amplitude cut is an "
+    "event, so a reflector here is something you could actually pick. The "
+    "logs are then asked only what the rock is doing there: each event's own "
+    "lobe is halved at its extremum, the upper half — from the zero crossing "
+    "above down to the extremum — giving the layer above and the lower half "
+    "the layer below, and the logs are averaged over each to get the two "
+    "layers the AVO is computed between."
 )
 c1, c2 = st.columns(2)
 block_method = c1.selectbox("Average", ["backus", "mean"],
@@ -136,16 +138,20 @@ page_full_stack = full_stack(page_gather)
 
 blocked_props = None
 lobe_bounds = None
-table = reflector_avo(
-    rc, vp, vs, rho, angles, method=settings.method, both=True,
-    depth=depth, twt=twt, threshold=settings.threshold, a_tol=settings.a_tol,
-)
+table = pd.DataFrame()
 
-if not table.empty:
-    samples = table["sample"].to_numpy()
-    # The adjacent-sample pass is kept only to seed the polarity of each lobe
-    # and to measure what the lobe window changed; it is no longer offered as
-    # a way to classify.
+# The trace picks the reflectors. Every turning point on the full stack above
+# the amplitude cut is an event; the logs are never consulted about *where* a
+# reflector is, only about what the rock does there. Two consequences, both
+# intended: every event has a lobe of its own by construction — a reflector
+# buried in a neighbour's is no longer possible, because the neighbour is the
+# event — and a thin bed whose top and base interfere into one trough gives one
+# event rather than two, which is what the seismic actually shows.
+events = trace_events(page_full_stack, relative=settings.threshold)
+samples = events["index"]
+polarity = events["polarity"].astype(float)
+
+if samples.size:
     fixed = blocked_reflectivity(
         vp, vs, rho, samples, angles, window=window, method=block_method,
         guard=int(guard), reflectivity_method=settings.method,
@@ -157,14 +163,10 @@ if not table.empty:
         mask_post_critical=False,
     )
 
-    dominant = dominant_frequency(page_wavelet, settings.dt) or 30.0
-    search = max(int(round(0.25 / dominant / settings.dt)), 2)
-    lobe_extrema = trace_extrema(page_full_stack, samples, half_window=search,
-                                 polarity=np.sign(table["R0"].to_numpy(float)))
-    lobe_bounds = lobe_windows(page_full_stack, lobe_extrema["index"],
-                               polarity=np.sign(table["R0"].to_numpy(float)),
-                               max_half_width=2 * window,
-                               is_extremum=lobe_extrema["is_extremum"])
+    # Polarity comes from the trace now, not from a log-derived R0: the event
+    # is a trough or a peak because that is what the trace does there.
+    lobe_bounds = lobe_windows(page_full_stack, samples, polarity=polarity,
+                               max_half_width=2 * window)
 
     blocked = blocked_reflectivity(
         vp, vs, rho, samples, angles, window=window, method=block_method,
@@ -185,11 +187,8 @@ if not table.empty:
     table["critical_angle"] = blocked["critical_angle"]
     table["n_angles"] = (~blocked_mask).sum(axis=1)
     table["blocking"] = np.where(blocked["from_lobe"], "lobe", "fixed window")
-    # Why a reflector fell back: no turning point of its own polarity on the
-    # full stack means it is buried in a neighbour's lobe and has none of its
-    # own to halve. Carried into the table and the CSV so `fixed window` is
-    # explicable rather than mysterious.
-    table["own_extremum"] = lobe_extrema["is_extremum"]
+    table["amplitude"] = events["amplitude"]
+    table["polarity"] = np.where(events["polarity"] > 0, "peak", "trough")
     table["lobe_samples"] = (
         np.asarray(blocked["n_upper"]) + np.asarray(blocked["n_lower"]))
     table["A_fixed"] = fixed_table["A_shuey"].to_numpy()
@@ -222,18 +221,12 @@ if not table.empty:
     )
 
     if from_lobe < len(table):
-        buried = int(np.count_nonzero(~lobe_extrema["is_extremum"]))
-        why = (
-            f"{buried} of them have no turning point of their own polarity on "
-            "the full stack at all — they are buried in a neighbour's lobe, so "
-            "there is nothing of theirs to halve. "
-        ) if buried else ""
         st.warning(
-            f"{len(table) - from_lobe} of {len(table)} reflector(s) have no "
-            f"resolvable lobe on the full stack. {why}The rest have no zero "
-            f"crossing within {2 * window} samples, or a lobe too narrow to "
-            f"halve. All of them fall back to the fixed ±{window}-sample half "
-            "cycle and are marked `fixed window` in the reflector table.",
+            f"{len(table) - from_lobe} of {len(table)} event(s) have a lobe "
+            f"that cannot be halved — no zero crossing within {2 * window} "
+            "samples, or a lobe only one sample wide. Those fall back to the "
+            f"fixed ±{window}-sample half cycle and are marked `fixed window` "
+            "in the reflector table.",
             icon=":material/warning:")
     if moved:
         st.info(
@@ -242,12 +235,24 @@ if not table.empty:
             "keeps more of the contrast instead of averaging it away.",
             icon=":material/info:")
 
-    shared = len(lobe_extrema["index"]) - len(np.unique(lobe_extrema["index"]))
+    # Distinct extrema no longer guarantee distinct lobes: two turning points
+    # of the same sign with no zero crossing between them — a shoulder on one
+    # lobe — walk out to the same pair of crossings.
+    spans = list(zip(lobe_bounds["upper_start"], lobe_bounds["lower_stop"],
+                     lobe_bounds["resolved"]))
+    seen, shared = set(), 0
+    for lo, hi, ok in spans:
+        if not ok:
+            continue
+        if (int(lo), int(hi)) in seen:
+            shared += 1
+        seen.add((int(lo), int(hi)))
     if shared:
         st.info(
-            f"{shared} reflector(s) share a lobe with a neighbour, so they get "
-            "the same blocked layers and the same A and B. That is what the "
-            "seismic sees: interfaces inside one lobe are not separable at "
+            f"{shared} event(s) sit on a lobe they share with a neighbour — a "
+            "shoulder rather than a lobe of their own — so they get the same "
+            "blocked layers and the same A and B. That is what the seismic "
+            "sees: two turning points inside one lobe are not separable at "
             "this bandwidth, and reporting different answers for them would "
             "be inventing resolution the data does not have.",
             icon=":material/info:")
@@ -255,15 +260,22 @@ st.divider()
 
 if table.empty:
     st.warning(
-        f"No interface exceeds the |R| threshold of {settings.threshold:.3f}. "
-        "Lower it in the sidebar."
+        f"No turning point on the full stack reaches "
+        f"{settings.threshold:.0%} of the strongest event. Lower the event "
+        "amplitude threshold in the sidebar."
     )
     st.stop()
 
 # Lithology either side of each reflector.  For AVO the pair is what matters:
 # a "shale over sand" top is a different event from a "sand over shale" base.
 litho = lithology_labels(tw, settings)
-pairs = interface_lithology(litho, table["sample"].to_numpy())
+# Read over the *same half-lobes* the elastic properties were averaged over, so
+# "shale over sand" names the rock the intercept and gradient actually came
+# from rather than the two samples nearest the extremum.
+if lobe_bounds is not None:
+    pairs = lobe_lithology(litho, lobe_bounds, samples=table["sample"].to_numpy())
+else:
+    pairs = interface_lithology(litho, table["sample"].to_numpy())
 table = table.assign(litho_upper=pairs["upper"], litho_lower=pairs["lower"],
                      litho_pair=pairs["pair"])
 
@@ -342,42 +354,6 @@ if len(pair_options) > 1:
                        "selection above.")
             st.stop()
 
-# Separability. A class is computed from the *logs* — the Zoeppritz response
-# between the two blocked layers — so every interface gets one whether or not
-# the seismic can see it. `own_extremum` is the other question: does this
-# reflector produce a turning point of its own polarity on the full stack? Where
-# it does not, the class is a statement about the interface, not about anything
-# you could pick: the amplitude at that time belongs to a neighbour. Both are
-# worth having, so they are separated rather than merged.
-if "own_extremum" in table.columns:
-    buried_here = int((~table["own_extremum"]).sum())
-    if buried_here:
-        separable_only = st.checkbox(
-            f"Only reflectors the seismic can separate "
-            f"({len(table) - buried_here} of {len(table)})",
-            value=False,
-            help="Hides reflectors with no turning point of their own polarity "
-                 "on the full stack. Their class is still real interface "
-                 "physics, but it is modelled rather than observable — you "
-                 "could not pick that event, because the amplitude there "
-                 "belongs to a neighbouring reflector.",
-        )
-        st.caption(
-            f"{buried_here} of {len(table)} reflectors "
-            f"({buried_here / len(table):.0%}) are buried in a neighbour's lobe. "
-            "They keep a class — the interface is real — but it is a modelled "
-            "answer, not a measurable one, and they are blocked on the fixed "
-            "half cycle rather than on a lobe of their own. They also pull the "
-            "background trend and the class counts, so it is worth seeing the "
-            "crossplot both ways."
-        )
-        if separable_only:
-            table = table[table["own_extremum"].to_numpy(bool)].reset_index(drop=True)
-            if table.empty:
-                st.warning("No reflector has an extremum of its own on the full "
-                           "stack. Untick the box above.")
-                st.stop()
-
 trend = background_trend(table["A_shuey"], table["B_shuey"])
 
 # ------------------------------------------------------------- summary -----
@@ -388,7 +364,8 @@ for col, label in zip(cols, CLASS_COLOURS):
     col.metric(f"Class {label}" if label != "background/other" else "Background",
                int(counts.get(label, 0)))
 st.caption(
-    f"{len(table)} reflectors above |R| > {settings.threshold:.3f}, "
+    f"{len(table)} events picked on the full stack at "
+    f"{settings.threshold:.0%} of the strongest amplitude, "
     f"classified at a_tol = {settings.a_tol:.3f} using "
     f"{settings.method.replace('_', '-')} reflectivity over "
     f"{angles[0]:.0f}–{angles[-1]:.0f}°."
@@ -671,7 +648,8 @@ half_window = max(int(round(0.25 / dominant / settings.dt)), 2)
 # loud neighbour's lobe.
 extrema = trace_extrema(detail_trace, table["sample"].to_numpy(),
                         half_window=half_window,
-                        polarity=np.sign(table["R0"].to_numpy(float)))
+                        polarity=table["polarity"].map(
+                            {"peak": 1.0, "trough": -1.0}).to_numpy(float))
 marker_twt = twt[np.clip(extrema["index"], 0, twt.size - 1)]
 
 
@@ -687,7 +665,7 @@ def _label(row):
 labels = [_label(r) for _, r in table.iterrows()]
 # Open on the strongest reflector rather than the shallowest, which on a noisy
 # log is often a near-zero interface that happens to clear the threshold.
-strongest = int(np.argmax(np.abs(table["R0"].to_numpy(float))))
+strongest = int(np.argmax(np.abs(table["amplitude"].to_numpy(float))))
 
 # A click on the trace arrives in this run's session state, before the
 # selectbox below is drawn, so reading it here lets the click drive the
@@ -941,7 +919,7 @@ tuned_gather = build_gather(vp, vs, rho, angles, page_wavelet, dt=settings.dt,
 picks = tuned_amplitudes(
     tuned_gather, table["sample"].to_numpy(),
     half_window=max(window // 2, 2),
-    polarity=np.sign(table["R0"].to_numpy(float)),
+    polarity=table["polarity"].map({"peak": 1.0, "trough": -1.0}).to_numpy(float),
 )
 measured = picks["amplitude"].copy()
 theta_c = table["critical_angle"].to_numpy(float)

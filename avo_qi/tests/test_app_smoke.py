@@ -912,39 +912,54 @@ class TestAStaleDropdownLabel:
     def test_the_anchor_keeps_the_same_reflector_not_the_same_row(self):
         """The point of the sample anchor: when the stored value is unusable,
         re-select the reflector that was chosen, not whatever now sits at that
-        row index."""
+        row index.
+
+        Asserted against the page's real reflector table but through the
+        resolver directly. Neither half of the real trigger can be driven
+        through AppTest: it applies the selectbox's ``format_func`` to whatever
+        raw widget state it holds, so a stale label or an out-of-range index
+        raises inside the harness before the page's own handling is reached.
+        The page-level guarantee — a stale label does not crash the run — is
+        pinned by the first test in this class.
+        """
+        from avo_qi.ui import resolve_reflector_pick
+
         at = self._run()
         table = reflector_table(at)
-        target = int(table["sample"].iloc[6])
+        samples = table["sample"].to_numpy()
+        row = len(table) - 2
+        target = int(samples[row])
 
-        at.session_state["reflector_pick"] = 6
+        at.session_state["reflector_pick"] = row
         at.run()
         assert at.session_state["reflector_pick_sample"] == target
 
-        # Now a filter renumbers the table and the dropdown hands back a label.
-        at.session_state["settings"].lithologies = ["sand"]
-        at.session_state["reflector_pick"] = self.STALE
-        at.run()
-        assert not at.exception
-        filtered = reflector_table(at)
-        pick = at.session_state["reflector_pick"]
-        assert int(filtered["sample"].iloc[pick]) == target
+        # Drop the rows above it, exactly as a filter would, and hand the
+        # resolver a value it cannot use.
+        shortened = samples[row - 1:]
+        moved = resolve_reflector_pick(self.STALE, shortened,
+                                       anchor_sample=target, fallback=0)
+        assert int(shortened[moved]) == target
+        assert moved != row, "otherwise the row index alone would have done"
 
     def test_a_reflector_that_the_filter_removed_falls_back(self):
         at = self._run()
         table = reflector_table(at)
-        # sample 26 is shale over shale, so the pair filter drops it.
-        gone = int(np.flatnonzero(table["sample"].to_numpy() == 26)[0])
+        dropped = table[table["litho_pair"] == "shale over shale"]
+        assert len(dropped), "the demo well must have a shale-on-shale event"
+        gone = int(np.flatnonzero(
+            table["sample"].to_numpy() == int(dropped["sample"].iloc[0]))[0])
         at.session_state["reflector_pick"] = gone
         at.run()
-        assert at.session_state["reflector_pick_sample"] == 26
+        assert at.session_state["reflector_pick_sample"] == int(
+            dropped["sample"].iloc[0])
 
         picker = next(m for m in at.multiselect
                       if m.label == "Interface pairs to keep")
         picker.set_value(["shale over sand"]).run()
         assert not at.exception
         survivors = reflector_table(at)
-        assert 26 not in set(survivors["sample"])
+        assert set(survivors["litho_pair"]) == {"shale over sand"}
         pick = at.session_state["reflector_pick"]
         assert 0 <= pick < len(survivors)
 
@@ -1204,64 +1219,66 @@ class TestBlockingAndTuningInTheApp:
         for column in ("A_untuned", "A_tuned", "class_untuned", "changes_class"):
             assert column in table.columns
 
-    def test_a_reflector_with_no_extremum_never_claims_a_lobe(self):
-        """A reflector buried in a neighbour's lobe has no lobe of its own, so
-        it must fall back to the fixed window rather than split the neighbour's
-        at wherever its interface happens to land.
+    def test_every_reflector_is_a_turning_point_of_the_trace(self):
+        """The trace decides where the reflectors are.
 
-        The demo well's nine default reflectors all have their own extremum, so
-        this drops the |R| threshold until the weak, buried ones qualify — two
-        of which were previously blocked on a window that was not theirs.
+        This is the invariant the whole page now rests on, and it is what makes
+        a reflector with no extremum of its own impossible: each one *is* an
+        extremum. Checked against the full stack rebuilt independently here,
+        not against anything the page hands back.
         """
-        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
-                               default_timeout=180)
-        _inject_demo_well(at)
-        at.run()
-        at.session_state["settings"].threshold = 0.005
-        at.run()
-        assert not at.exception
+        from avo_qi.core.synthetic import build_gather, full_stack, _local_extrema
+        from avo_qi.core.reflectivity import reflectivity_series
+        from avo_qi.ui import build_wavelet, time_well
 
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
+        assert not at.exception
         table = reflector_table(at)
-        assert "own_extremum" in table.columns
-        buried = ~table["own_extremum"].to_numpy(bool)
-        assert buried.sum() >= 2, "this well/threshold must exercise the case"
-        assert (table.loc[buried, "blocking"] == "fixed window").all()
-        # ...and the ones that do have an extremum are still mostly on a lobe,
-        # so the guard has not simply switched blocking off.
-        assert (table.loc[~buried, "blocking"] == "lobe").any()
+        settings = at.session_state["settings"]
+        well = at.session_state["well"]
 
-    def test_the_buried_reflectors_can_be_filtered_out(self):
-        """A class is computed from the logs, so a reflector the seismic cannot
-        separate still gets one. That is right — the interface is real — but it
-        is a modelled answer rather than a pickable one, so it must be possible
-        to see the crossplot without them."""
+        tw = time_well(well, settings, settings.case)
+        vp = tw["VP"].to_numpy(float)
+        vs = tw["VS"].to_numpy(float)
+        rho = tw["RHOB"].to_numpy(float)
+        _, wavelet = build_wavelet(settings)
+        stack = full_stack(build_gather(vp, vs, rho, settings.angles, wavelet,
+                                        dt=settings.dt, method=settings.method))
+        turning = set(_local_extrema(stack).tolist())
+
+        assert len(table) > 0
+        assert set(table["sample"].astype(int)) <= turning
+        # ...and the polarity reported is the trace's own sign there.
+        for _, row in table.iterrows():
+            sign = "peak" if stack[int(row["sample"])] > 0 else "trough"
+            assert row["polarity"] == sign
+
+    def test_raising_the_amplitude_cut_keeps_only_the_louder_events(self):
         at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
                                default_timeout=180)
         _inject_demo_well(at)
         at.run()
-        at.session_state["settings"].threshold = 0.005
-        at.run()
-        everything = reflector_table(at)
-        buried = int((~everything["own_extremum"]).sum())
-        assert buried > 0
+        loud = reflector_table(at)
 
-        box = next(c for c in at.checkbox
-                   if c.label.startswith("Only reflectors the seismic can"))
-        box.set_value(True).run()
+        at.session_state["settings"].threshold = 0.30
+        at.run()
         assert not at.exception
-        kept = reflector_table(at)
-        assert len(kept) == len(everything) - buried
-        assert kept["own_extremum"].all()
+        louder = reflector_table(at)
+        assert len(louder) < len(loud)
+        assert set(louder["sample"]) <= set(loud["sample"])
+        # Everything kept clears the cut, as a fraction of the strongest event.
+        strongest = loud["amplitude"].abs().max()
+        assert (louder["amplitude"].abs() >= 0.30 * strongest - 1e-12).all()
 
-    def test_the_page_says_how_many_were_buried(self, avo_page):
-        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
-                               default_timeout=180)
-        _inject_demo_well(at)
-        at.run()
-        at.session_state["settings"].threshold = 0.005
-        at.run()
-        warnings = " ".join(w.value for w in at.warning)
-        assert "no turning point of their own polarity" in warnings
+    def test_no_reflector_is_left_without_a_lobe_of_its_own(self):
+        """The old failure mode — 42% of a real well buried in a neighbour's
+        lobe — cannot arise once the trace does the picking."""
+        table = reflector_table(run_page(
+            os.path.join(PAGES, "4_AVO_Classification.py")))
+        assert "own_extremum" not in table.columns
+        # A lobe may still be unhalvable (one sample wide), but never absent
+        # because the reflector belonged to someone else's lobe.
+        assert (table["blocking"] == "lobe").mean() > 0.5
 
     def test_the_spec_pinned_gas_sand_survives_the_narrower_window(self):
         """SPEC.md 4.1 fixes the gas sand as Class III. Narrowing the window
