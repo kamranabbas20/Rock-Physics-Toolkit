@@ -253,6 +253,142 @@ class TestRockPhysicsPage:
         assert boxes[0].value is False
 
 
+class TestAWellWithNoZonation:
+    """Not every well carries a ZONE curve, and one that does not must work.
+
+    The failure this pins was severe and silent: zone names belong to the well
+    they came from, but the selection lived on the session. Load a zoned well,
+    then an unzoned one, and every sample reads as unzoned while the filter is
+    still looking for the *previous* well's zone names — so the filter matched
+    nothing and hid the entire well behind "no reflector lies in the selected
+    zones", which looks like a broken app rather than an empty filter.
+    """
+
+    @staticmethod
+    def _unzoned_well():
+        well, _, _ = demo_well()
+        well.df = well.df.drop(columns=["ZONE"])
+        return well
+
+    def _page(self, name, zones=("Shale", "Gas Sand"), lithologies=None):
+        from avo_qi.ui import Settings
+
+        at = AppTest.from_file(os.path.join(PAGES, name), default_timeout=90)
+        settings = Settings()
+        settings.zones = list(zones)          # left over from another well
+        if lithologies is not None:
+            settings.lithologies = list(lithologies)
+        at.session_state["settings"] = settings
+        at.session_state["well"] = self._unzoned_well()
+        at.session_state["raw_df"] = None
+        at.session_state["raw_units"] = {}
+        at.run()
+        return at
+
+    def test_the_avo_page_still_finds_its_reflectors(self):
+        at = self._page("4_AVO_Classification.py")
+        assert not at.exception
+        assert not any("No reflector lies in the selected zones" in w.value
+                       for w in at.warning)
+        assert len(reflector_table(at)) > 0
+
+    def test_nothing_is_reported_as_hidden_by_a_zone_filter(self):
+        at = self._page("4_AVO_Classification.py")
+        assert not any("Zone filter is hiding" in c.value for c in at.caption)
+
+    def test_the_rock_physics_page_keeps_its_samples(self):
+        at = self._page("5_Rock_Physics.py")
+        assert not at.exception
+        assert not any("excluded every sample" in w.value for w in at.warning)
+
+    def test_the_sidebar_says_the_well_has_no_zonation(self):
+        at = self._page("5_Rock_Physics.py")
+        captions = " ".join(c.value for c in at.sidebar.caption)
+        assert "no zonation" in captions
+        # ...and says how to get one, rather than only that it is missing.
+        assert "Load & QC" in captions
+
+    def test_a_stale_lithology_selection_cannot_blank_it_either(self):
+        """Same shape of bug on the other filter, so the same guard."""
+        well = self._unzoned_well()
+        well.df = well.df.drop(columns=[c for c in ("VSH", "GR")
+                                        if c in well.df.columns])
+        from avo_qi.ui import Settings
+
+        at = AppTest.from_file(os.path.join(PAGES, "5_Rock_Physics.py"),
+                               default_timeout=90)
+        settings = Settings()
+        settings.lithologies = ["sand"]       # every sample here is undefined
+        at.session_state["settings"] = settings
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = None
+        at.session_state["raw_units"] = {}
+        at.run()
+        assert not at.exception
+        assert not any("excluded every sample" in w.value for w in at.warning)
+
+
+class TestTheFiltersThemselves:
+    """Unit-level cover for the two guards, away from any page."""
+
+    @staticmethod
+    def _settings(**kwargs):
+        from avo_qi.ui import Settings
+
+        settings = Settings()
+        for key, value in kwargs.items():
+            setattr(settings, key, value)
+        return settings
+
+    def test_an_unzoned_well_ignores_a_zone_selection(self):
+        from avo_qi.core.zones import UNZONED
+        from avo_qi.ui import apply_zone_filter
+
+        labels = np.array([UNZONED] * 5, dtype=object)
+        mask = apply_zone_filter(labels, self._settings(zones=["Shale"]))
+        assert mask.all()
+
+    def test_a_real_selection_that_excludes_everything_is_still_honoured(self):
+        """The guard must not paper over a genuine empty answer."""
+        from avo_qi.ui import apply_zone_filter
+
+        labels = np.array(["Shale", "Shale", "Sand"], dtype=object)
+        mask = apply_zone_filter(labels, self._settings(zones=["Limestone"]))
+        assert not mask.any()
+
+    def test_a_partly_zoned_well_filters_as_before(self):
+        from avo_qi.core.zones import UNZONED
+        from avo_qi.ui import apply_zone_filter
+
+        labels = np.array(["Shale", UNZONED, "Sand"], dtype=object)
+        mask = apply_zone_filter(labels, self._settings(zones=["Shale"]))
+        assert list(mask) == [True, False, False]
+
+    def test_no_selection_keeps_everything(self):
+        from avo_qi.ui import apply_zone_filter
+
+        labels = np.array(["Shale", "Sand"], dtype=object)
+        assert apply_zone_filter(labels, self._settings(zones=[])).all()
+
+    def test_a_well_with_no_lithology_ignores_a_lithology_selection(self):
+        from avo_qi.core.lithology import UNDEFINED
+        from avo_qi.ui import apply_lithology_filter
+
+        labels = np.array([UNDEFINED] * 4, dtype=object)
+        mask = apply_lithology_filter(None, labels,
+                                      self._settings(lithologies=["sand"]))
+        assert mask.all()
+
+    def test_a_real_lithology_selection_still_filters(self):
+        from avo_qi.core.lithology import UNDEFINED
+        from avo_qi.ui import apply_lithology_filter
+
+        labels = np.array(["sand", "shale", UNDEFINED], dtype=object)
+        mask = apply_lithology_filter(None, labels,
+                                      self._settings(lithologies=["sand"]))
+        assert list(mask) == [True, False, False]
+
+
 class TestUncertaintyInTheApp:
     """The Monte Carlo panels, off by default and honest when switched on."""
 

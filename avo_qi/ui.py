@@ -119,9 +119,14 @@ def set_well(well, raw=None, units=None):
     st.session_state["raw_df"] = raw
     st.session_state["raw_units"] = units or {}
     st.session_state.pop("time_well_cache", None)
+    st.session_state.pop("zone_cache", None)
     settings = st.session_state.get("settings")
     if settings is not None:
         settings.case = well.active_case if well is not None else None
+        # Zone names belong to the well that was loaded, not to the session.
+        # Carrying a previous well's selection into a new one silently hides
+        # every sample, because none of those names exists here.
+        settings.zones = []
 
 
 def load_demo_well():
@@ -288,10 +293,10 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
             s.wavelet_length = st.number_input("Wavelet length (s)", 0.032, 0.512,
                                                float(s.wavelet_length), 0.016, format="%.3f")
 
-        if well is not None and "ZONE" in well.df.columns:
-            table = well_zones(well, s)
+        if well is not None:
+            table = well_zones(well, s) if "ZONE" in well.df.columns else None
+            st.header("Zonation")
             if table is not None and len(table):
-                st.header("Zonation")
                 available = list(dict.fromkeys(table["zone"]))
                 current = [z for z in (s.zones or available) if z in available]
                 s.zones = st.multiselect(
@@ -300,6 +305,15 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
                          "physics to the selected zones.",
                 )
                 st.caption(f"{len(table)} interval(s) from the ZONE curve.")
+            else:
+                # Shown rather than hidden: an absent control leaves a reader
+                # guessing whether the well has no zones or the app forgot them.
+                s.zones = []
+                st.caption(
+                    "This well carries no zonation, so nothing is filtered by "
+                    "zone. Map a discrete ZONE, FORMATION or MARKER curve on "
+                    "the **Load & QC** page to enable it."
+                )
 
         if well is not None:
             st.header("Lithology")
@@ -334,7 +348,15 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
                          "of it is a selected lithology.",
                 )
             else:
-                st.caption("No VSH or GR curve, so lithology is unavailable.")
+                # Same reasoning as the zonation branch: drop any selection
+                # carried in from another well, or it would filter out a well
+                # whose every sample is undefined.
+                s.lithologies = list(LITHOLOGIES) + [UNDEFINED]
+                st.caption(
+                    "This well carries neither VSH nor GR, so nothing is "
+                    "filtered by lithology. Map one on the **Load & QC** page "
+                    "to enable it."
+                )
 
         if show_classifier:
             st.header("Classifier")
@@ -774,8 +796,16 @@ def lithology_colour(label):
 
 
 def apply_lithology_filter(frame, labels, settings):
-    """Boolean mask of samples whose lithology is currently selected."""
+    """Boolean mask of samples whose lithology is currently selected.
+
+    A well with neither VSH nor GR is never filtered: every sample reads as
+    undefined, so a selection made against another well would match nothing
+    and blank the page.  The same reasoning as :func:`apply_zone_filter`.
+    """
+    labels = np.asarray(labels, dtype=object)
     selected = set(settings.lithologies or (LITHOLOGIES + [UNDEFINED]))
+    if labels.size and all(label == UNDEFINED for label in labels):
+        return np.ones(labels.shape, dtype=bool)
     return np.array([label in selected for label in labels], dtype=bool)
 
 
@@ -833,9 +863,18 @@ def zone_labels(frame, well, settings):
 
 
 def apply_zone_filter(labels, settings):
-    """Mask of samples in the selected zones; everything when none is chosen."""
+    """Mask of samples in the selected zones; everything when none is chosen.
+
+    A well with no zonation at all is never filtered.  Every sample then reads
+    as unzoned, so any selection carried over from another well would match
+    nothing and blank the page — which looks like a broken app rather than an
+    empty filter.  A selection that legitimately excludes everything in a well
+    that *does* have zones is still honoured, because that is a real answer.
+    """
     labels = np.asarray(labels, dtype=object)
     if not settings.zones:
+        return np.ones(labels.shape, dtype=bool)
+    if labels.size and all(label == UNZONED for label in labels):
         return np.ones(labels.shape, dtype=bool)
     selected = set(settings.zones)
     return np.array([label in selected for label in labels], dtype=bool)
