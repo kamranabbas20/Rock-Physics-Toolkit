@@ -880,6 +880,104 @@ class TestTheTracePanelBesideTheDetail:
         assert {"Vp, Vs and RHOB tracks", "Gather", "Lobe halves"} <= labels
 
 
+class TestAStaleDropdownLabel:
+    """A Streamlit selectbox round-trips its *formatted label*, not its option.
+
+    The browser sends the label string back and Streamlit looks it up in a
+    mapping rebuilt from this run's options, returning the raw string when the
+    lookup misses.  The reflector labels carry depth, class, A and B, so
+    anything that moves those numbers — a filter, a different wavelet, another
+    blocking average — rewrites them, and the stored "index" comes back as a
+    sentence.  Comparing it to a row count raised
+    ``TypeError: '>=' not supported between instances of 'str' and 'int'``.
+    """
+
+    STALE = "2119.1 m / 1.701 s — Class I (A +0.117, B -0.079) · shale over sand"
+
+    @staticmethod
+    def _run(**state):
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=180)
+        _inject_demo_well(at)
+        for key, value in state.items():
+            at.session_state[key] = value
+        at.run()
+        return at
+
+    def test_a_label_left_in_state_does_not_crash_the_page(self):
+        at = self._run(reflector_pick=self.STALE)
+        assert not at.exception
+        assert isinstance(at.session_state["reflector_pick"], int)
+
+    def test_the_anchor_keeps_the_same_reflector_not_the_same_row(self):
+        """The point of the sample anchor: when the stored value is unusable,
+        re-select the reflector that was chosen, not whatever now sits at that
+        row index."""
+        at = self._run()
+        table = reflector_table(at)
+        target = int(table["sample"].iloc[6])
+
+        at.session_state["reflector_pick"] = 6
+        at.run()
+        assert at.session_state["reflector_pick_sample"] == target
+
+        # Now a filter renumbers the table and the dropdown hands back a label.
+        at.session_state["settings"].lithologies = ["sand"]
+        at.session_state["reflector_pick"] = self.STALE
+        at.run()
+        assert not at.exception
+        filtered = reflector_table(at)
+        pick = at.session_state["reflector_pick"]
+        assert int(filtered["sample"].iloc[pick]) == target
+
+    def test_a_reflector_that_the_filter_removed_falls_back(self):
+        at = self._run()
+        table = reflector_table(at)
+        # sample 26 is shale over shale, so the pair filter drops it.
+        gone = int(np.flatnonzero(table["sample"].to_numpy() == 26)[0])
+        at.session_state["reflector_pick"] = gone
+        at.run()
+        assert at.session_state["reflector_pick_sample"] == 26
+
+        picker = next(m for m in at.multiselect
+                      if m.label == "Interface pairs to keep")
+        picker.set_value(["shale over sand"]).run()
+        assert not at.exception
+        survivors = reflector_table(at)
+        assert 26 not in set(survivors["sample"])
+        pick = at.session_state["reflector_pick"]
+        assert 0 <= pick < len(survivors)
+
+    def test_the_resolver_itself(self):
+        from avo_qi.ui import resolve_reflector_pick
+
+        samples = np.array([26, 33, 54, 61])
+        # An in-range integer is the successful round-trip and is trusted.
+        assert resolve_reflector_pick(2, samples, anchor_sample=26) == 2
+        # A stale label is not an index, whatever it looks like.
+        assert resolve_reflector_pick("2119.1 m — Class I", samples,
+                                      anchor_sample=54) == 2
+        # Nor is a numeric string, which would otherwise index by accident.
+        assert resolve_reflector_pick("3", samples, anchor_sample=26) == 0
+        # Out of range after a filter: the anchor wins, then the fallback.
+        assert resolve_reflector_pick(9, samples, anchor_sample=61) == 3
+        assert resolve_reflector_pick(9, samples, anchor_sample=999,
+                                      fallback=1) == 1
+        assert resolve_reflector_pick(None, samples, fallback=2) == 2
+        # An out-of-range fallback cannot itself be returned.
+        assert resolve_reflector_pick(None, samples, fallback=99) == 0
+        assert resolve_reflector_pick(0, np.array([])) == 0
+
+    def test_a_dropdown_the_page_does_not_read_first_repairs_itself(self):
+        """Why the fix is only on the detail dropdown. The fluid-case dropdown
+        has equally volatile labels, but nothing reads its key before the
+        widget exists, so Streamlit's own validation resets an unrecognised
+        value instead of leaving a string in play."""
+        at = self._run(fluid_reflector="2119.1 m — class changes")
+        assert not at.exception
+        assert at.session_state["fluid_reflector"] == 0
+
+
 class TestInterfacePairFilter:
     """Filtering on the *pair* — a shale-over-sand top is a different event
     from the shale-over-shale contrast a few samples above it."""

@@ -63,6 +63,7 @@ from avo_qi.ui import (  # noqa: E402
     classified_trace_figure,
     fluid_vector_crossplot,
     gather_figure,
+    resolve_reflector_pick,
     selected_reflector_index,
     page_setup,
     require_well,
@@ -639,8 +640,6 @@ labels = [_label(r) for _, r in table.iterrows()]
 # Open on the strongest reflector rather than the shallowest, which on a noisy
 # log is often a near-zero interface that happens to clear the threshold.
 strongest = int(np.argmax(np.abs(table["R0"].to_numpy(float))))
-if "reflector_pick" not in st.session_state:
-    st.session_state["reflector_pick"] = strongest
 
 # A click on the trace arrives in this run's session state, before the
 # selectbox below is drawn, so reading it here lets the click drive the
@@ -649,9 +648,19 @@ if "reflector_pick" not in st.session_state:
 clicked = selected_reflector_index(st.session_state.get("class_trace"), marker_twt)
 if clicked is not None and clicked != st.session_state.get("_last_trace_click"):
     st.session_state["_last_trace_click"] = clicked
-    st.session_state["reflector_pick"] = clicked
-if st.session_state["reflector_pick"] >= len(labels):
-    st.session_state["reflector_pick"] = strongest
+    st.session_state["reflector_pick"] = int(clicked)
+
+# What the dropdown left behind is not necessarily a row index — see
+# `resolve_reflector_pick`.  The sample recorded below is the anchor that keeps
+# the same reflector selected when a filter renumbers the table.
+pick_samples = table["sample"].to_numpy()
+st.session_state["reflector_pick"] = resolve_reflector_pick(
+    st.session_state.get("reflector_pick"), pick_samples,
+    anchor_sample=st.session_state.get("reflector_pick_sample"),
+    fallback=strongest,
+)
+st.session_state["reflector_pick_sample"] = int(
+    pick_samples[st.session_state["reflector_pick"]])
 
 d1, d2, d3, d4 = st.columns([2, 1, 1, 1])
 detail_height = d1.slider(
@@ -1047,6 +1056,10 @@ if well.has_fluid_cases:
         st.info("No reflector changes AVO class across the fluid cases.")
 
     st.subheader("Amplitude vs angle, by fluid case")
+    # This dropdown's labels are volatile too, but nothing reads its key before
+    # the widget is created, so Streamlit's own validation repairs a value it
+    # no longer recognises. The detail dropdown above is the one that needs
+    # help, precisely because the page reads it first.
     pick_cmp = st.selectbox(
         "Reflector", range(len(comparison)),
         format_func=lambda i: (

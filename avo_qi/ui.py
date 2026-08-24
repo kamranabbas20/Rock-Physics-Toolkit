@@ -865,6 +865,49 @@ def classified_trace_figure(trace, twt, table, extrema, selected=None, height=90
     return fig
 
 
+def resolve_reflector_pick(stored, samples, anchor_sample=None, fallback=0):
+    """Turn whatever a reflector dropdown left in session state into a row.
+
+    A Streamlit selectbox does not round-trip its *option*; it round-trips the
+    **formatted label**.  The browser sends the label string back, and
+    ``SelectboxSerde.deserialize`` looks it up in a mapping rebuilt from this
+    run's options — handing back the raw string when the lookup misses.  The
+    reflector labels carry depth, class, A and B, so anything that moves those
+    numbers (a different wavelet, angle range, blocking average, fluid case, or
+    any of the zone, lithology and interface-pair filters) rewrites them, the
+    lookup misses, and the stored "index" is suddenly a sentence.  Comparing
+    that against a row count raises ``TypeError``, which is a crash rather than
+    a lost selection.
+
+    So a stored value is trusted only when it is an in-range integer.  Failing
+    that, ``anchor_sample`` — the sample index of whatever was selected last
+    run — is looked up in ``samples``, which keeps the *same reflector* chosen
+    when a filter renumbers the table underneath it rather than jumping to
+    whichever reflector now occupies that row.  Failing both, ``fallback``.
+    """
+    samples = np.asarray(samples)
+    n = samples.size
+    if n == 0:
+        return 0
+
+    if isinstance(stored, (bool, str, bytes)):
+        stored = None                    # a stale label, not an index
+    if stored is not None:
+        try:
+            row = int(stored)
+        except (TypeError, ValueError):
+            row = None
+        if row is not None and 0 <= row < n:
+            return row
+
+    if anchor_sample is not None:
+        match = np.flatnonzero(samples == anchor_sample)
+        if match.size:
+            return int(match[0])
+
+    return int(fallback) if 0 <= int(fallback) < n else 0
+
+
 def selected_reflector_index(selection, marker_twt):
     """Resolve a Plotly selection payload back to a reflector row index.
 
