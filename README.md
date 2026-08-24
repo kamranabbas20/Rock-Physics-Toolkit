@@ -64,6 +64,7 @@ avo_qi/
 ├── pages/                      # the five Streamlit pages
 ├── sample_data/                # demo_well.las and its generator
 └── tests/                      # acceptance + smoke tests
+    └── data/15_9_19_A.las   # a real well, for the tests that need mess
 ```
 
 `core/` is dependency-light — numpy and scipy only, with pandas used just to
@@ -484,6 +485,19 @@ shared time axis, and the cross-case comparison.
 `test_rockphysics.py` covers the diagnostic models: bound ordering
 (Reuss ≤ HS⁻ ≤ HS⁺ ≤ Voigt), end-member collapse, the frame models bracketing
 each other and meeting at the Hertz-Mindlin pack, and the empirical trends.
+
+`test_real_well.py` runs the whole thing against a **real** well —
+`tests/data/15_9_19_A.las`, a North Sea well of 3905 samples over 3500–4095 m
+MD, with the gaps real logs have: VSH on 2812 samples of 3905, SW on 1965,
+RHOB carrying null sentinels. The bundled demo well is a clean three-layer
+model and is the right fixture for pinning a known answer; it is the wrong one
+for finding out what breaks. Every defect in the blocking and
+reflector-picking work came from this well and none from the demo — a
+reflector split on a neighbour's lobe, a NaN polarity cast to `INT_MIN`, three
+reflectors reaching the table and the CSV with **non-finite A and B**, and 42%
+of the reflector table describing interfaces the seismic could not separate.
+Most of these tests assert invariants; the two that pin numbers say so, and
+exist to make a change in the defaults visible rather than silent.
 `test_app_smoke.py` runs each Streamlit page headless against the demo well
 and is skipped if Streamlit is not installed.
 
