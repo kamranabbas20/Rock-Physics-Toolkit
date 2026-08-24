@@ -287,6 +287,7 @@ def wedge_model(upper, reservoir, lower, thicknesses, angles, wavelet,
 
     top_amp = np.full((thicknesses.size, angles.size), np.nan)
     base_amp = np.full((thicknesses.size, angles.size), np.nan)
+    apparent = np.full((thicknesses.size, angles.size), np.nan)
     gathers = []
 
     # The isolated-interface response: what the top would show with no base
@@ -322,6 +323,11 @@ def wedge_model(upper, reservoir, lower, thicknesses, angles, wavelet,
             base = tuned_amplitudes(gather, [base_start - 1],
                                     half_window=half_window, polarity=[-polarity])
             base_amp[k] = base["amplitude"][0]
+            # What an interpreter would *measure* off the section: the time
+            # between the two picked events.  Above tuning it tracks the bed;
+            # below it the two lobes have merged and it stops shortening,
+            # which is why a thin bed reads thicker than it is.
+            apparent[k] = (base["index"][0] - top["index"][0]) * float(dt)
 
     A_top = np.full(thicknesses.size, np.nan)
     B_top = np.full(thicknesses.size, np.nan)
@@ -335,6 +341,7 @@ def wedge_model(upper, reservoir, lower, thicknesses, angles, wavelet,
         "angles": angles,
         "top_amplitude": top_amp,
         "base_amplitude": base_amp,
+        "apparent_thickness_twt": apparent,
         "A_top": A_top,
         "B_top": B_top,
         "A_interface": float(A_iface),

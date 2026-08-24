@@ -137,6 +137,73 @@ class TestThickBedIsUntuned:
         assert row["A_tuned"] == pytest.approx(row["A_thick"], abs=1e-4)
 
 
+class TestApparentThickness:
+    """What an interpreter measures off the section, against what is there.
+
+    Above tuning the two picked events track the bed one for one.  Below it
+    their lobes have merged and the separation stops shortening, so a thin bed
+    reads thicker than it is — which is why a thickness picked off seismic is
+    only trustworthy above the tuning thickness.
+    """
+
+    def test_a_thick_bed_is_measured_correctly(self, wavelet):
+        thicknesses = np.arange(0, 81, 2)
+        wedge = wedge_model(SHALE, GAS_SAND, SHALE, thicknesses, ANGLES,
+                            wavelet, dt=DT)
+        true_twt = wedge["thickness_twt"]
+        apparent = wedge["apparent_thickness_twt"][:, 0]
+        tuning = tuning_thickness_from_wavelet(wavelet, DT)
+
+        thick = true_twt > 2.0 * tuning
+        assert thick.any()
+        assert np.allclose(apparent[thick], true_twt[thick], atol=1.5 * DT)
+
+    def test_below_tuning_it_stops_shortening(self, wavelet):
+        thicknesses = np.arange(1, 81, 1)
+        wedge = wedge_model(SHALE, GAS_SAND, SHALE, thicknesses, ANGLES,
+                            wavelet, dt=DT)
+        true_twt = wedge["thickness_twt"]
+        apparent = wedge["apparent_thickness_twt"][:, 0]
+        tuning = tuning_thickness_from_wavelet(wavelet, DT)
+
+        thin = true_twt < 0.6 * tuning
+        assert thin.any()
+        # The measurement never gets far below the tuning thickness, however
+        # thin the bed really is, and so overstates it.
+        assert (apparent[thin] > true_twt[thin]).all()
+        assert np.nanmin(apparent) > 0.7 * tuning
+
+    def test_it_never_reads_thinner_going_down(self, wavelet):
+        """Thickening the bed can leave the measurement flat but must not make
+        it shrink.
+
+        Picks land on samples, so consecutive values dither by up to one
+        sample either way near tuning — 11, 12, 11, 12 ms.  That is
+        quantisation, not the model going backwards, so the step-to-step
+        assertion allows a sample and the trend is checked over a span where
+        quantisation cannot hide a real reversal.
+        """
+        thicknesses = np.arange(1, 81, 1)
+        wedge = wedge_model(SHALE, GAS_SAND, SHALE, thicknesses, ANGLES,
+                            wavelet, dt=DT)
+        apparent = wedge["apparent_thickness_twt"][:, 0]
+        good = np.isfinite(apparent)
+        assert good.sum() > 40
+
+        steps = np.diff(apparent[good])
+        assert np.all(steps >= -DT - 1e-12)
+        assert np.all(np.diff(apparent[good][::10]) >= -1e-12)
+
+    def test_it_is_reported_for_every_angle(self, wavelet):
+        thicknesses = np.arange(0, 41, 4)
+        wedge = wedge_model(SHALE, GAS_SAND, SHALE, thicknesses, ANGLES,
+                            wavelet, dt=DT)
+        assert wedge["apparent_thickness_twt"].shape == (thicknesses.size,
+                                                         ANGLES.size)
+        # Thickness zero means no reservoir, so there is nothing to measure.
+        assert np.isnan(wedge["apparent_thickness_twt"][0]).all()
+
+
 class TestThinBedTunes:
     def test_amplitude_brightens_towards_tuning_thickness(self, wavelet):
         thicknesses = np.arange(0, 61, 1)

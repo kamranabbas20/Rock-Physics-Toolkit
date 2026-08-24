@@ -12,6 +12,7 @@ if _ROOT not in sys.path:
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
+from plotly.subplots import make_subplots  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from avo_qi.core.blocking import (  # noqa: E402
@@ -26,6 +27,7 @@ from avo_qi.core.tuning import (  # noqa: E402
     apparent_period,
     tuned_amplitudes,
     tuning_thickness_from_wavelet,
+    wedge_model,
 )
 from avo_qi.core.avo import (  # noqa: E402
     CLASSES,
@@ -994,6 +996,154 @@ fig.update_layout(xaxis_title="Intercept A", yaxis_title="Gradient B", height=56
                   legend=dict(orientation="h", yanchor="bottom", y=1.02))
 st.plotly_chart(fig, use_container_width=True)
 st.caption("Each arrow is what tuning does to that reflector on this well.")
+
+# ------------------------------------------------------------- wedge model --
+st.divider()
+st.subheader("Wedge model")
+st.caption(
+    "The section above says what tuning does to *this* well's beds at the "
+    "thicknesses they happen to have. A wedge asks the more useful question: "
+    "take one reservoir and thin it from thick to nothing, and watch what the "
+    "seismic does the whole way down. Two things come out of it — the "
+    "**tuning curve**, where a thinning bed brightens before it dims, and the "
+    "**apparent thickness**, which stops tracking the bed once its top and "
+    "base lobes merge, so a thin bed reads thicker than it is."
+)
+
+wedge_row = table.iloc[int(st.session_state["reflector_pick"])]
+wedge_p = int(wedge_row["props_row"])
+_up = (float(blocked_props["vp_upper"][wedge_p]),
+       float(blocked_props["vs_upper"][wedge_p]),
+       float(blocked_props["rho_upper"][wedge_p]))
+_lo = (float(blocked_props["vp_lower"][wedge_p]),
+       float(blocked_props["vs_lower"][wedge_p]),
+       float(blocked_props["rho_lower"][wedge_p]))
+
+st.caption(
+    f"Seeded from the reflector selected above — "
+    f"{wedge_row['depth']:.1f} m, class {wedge_row['avo_class']}" +
+    (f", {wedge_row['litho_pair']}" if "undefined" not in str(
+        wedge_row.get("litho_pair", "undefined")) else "") +
+    ". Its blocked upper layer is the encasing rock and its lower layer the "
+    "reservoir; the wedge is symmetric, so the same encasing sits beneath."
+)
+
+w1, w2, w3 = st.columns(3)
+max_ms = w1.slider("Thickest bed (ms TWT)", 20, 200, 80, 10,
+                   help="The wedge runs from this down to zero.")
+wedge_symmetric = w2.checkbox(
+    "Same rock above and below", value=True,
+    help="Untick to use the next event's lower layer beneath the reservoir, "
+         "which makes the base a different contrast from the top.")
+wedge_angle_idx = w3.selectbox(
+    "Amplitude at", range(angles.size), index=0,
+    format_func=lambda i: f"{angles[i]:.0f}°",
+    help="Which angle the tuning curve is read at. Tuning moves the gradient "
+         "as well as the intercept, so near and far need not peak together.")
+
+if wedge_symmetric or wedge_p + 1 >= len(blocked_props["vp_lower"]):
+    _below = _up
+else:
+    _below = (float(blocked_props["vp_lower"][wedge_p + 1]),
+              float(blocked_props["vs_lower"][wedge_p + 1]),
+              float(blocked_props["rho_lower"][wedge_p + 1]))
+
+if not all(np.isfinite(v) for v in _up + _lo + _below):
+    st.warning("The selected reflector has a non-finite blocked layer, so it "
+               "cannot seed a wedge. Pick another one above.")
+else:
+    _thick = np.arange(0, int(round(max_ms / 1000.0 / settings.dt)) + 1)
+    wedge = wedge_model(_up, _lo, _below, _thick, angles, page_wavelet,
+                        dt=settings.dt, method=settings.method)
+
+    _twt_ms = wedge["thickness_twt"] * 1000.0
+    _amp = np.abs(wedge["top_amplitude"][:, int(wedge_angle_idx)])
+    _apparent_ms = wedge["apparent_thickness_twt"][:, int(wedge_angle_idx)] * 1000.0
+    _thick_bed = abs(float(wedge["reference_amplitude"][int(wedge_angle_idx)]))
+    _tuning_ms = tuning_twt * 1000.0
+
+    _finite = np.isfinite(_amp)
+    _peak_ms = float(_twt_ms[_finite][int(np.nanargmax(_amp[_finite]))]) \
+        if _finite.any() else float("nan")
+    _brightening = (float(np.nanmax(_amp)) / _thick_bed) if _thick_bed else float("nan")
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Tuning thickness", f"{_tuning_ms:.0f} ms",
+              help="Predicted from the wavelet: half its apparent period.")
+    m2.metric("Amplitude peaks at", f"{_peak_ms:.0f} ms",
+              help="Measured on the wedge. It should land on the predicted "
+                   "tuning thickness; a gap means the wavelet and the model "
+                   "disagree about the bandwidth.")
+    m3.metric("Tuning brightening", f"{_brightening:.2f}×",
+              help="Peak amplitude against the same interface in a thick bed. "
+                   "Above 1 the bed is brighter purely because it is thin.")
+
+    wfig = make_subplots(
+        rows=1, cols=2, subplot_titles=("Tuning curve", "Apparent vs true thickness"),
+        horizontal_spacing=0.09)
+    wfig.add_trace(go.Scatter(
+        x=_twt_ms, y=_amp, mode="lines+markers", name="picked top amplitude",
+        line=dict(color="#1565c0", width=2.4), marker=dict(size=4),
+        hovertemplate="%{x:.0f} ms<br>|amp| %{y:.4f}<extra></extra>"),
+        row=1, col=1)
+    wfig.add_hline(y=_thick_bed, line=dict(color="#666", width=1, dash="dash"),
+                   annotation_text="thick bed", annotation_position="bottom right",
+                   annotation_font_size=10, row=1, col=1)
+    wfig.add_trace(go.Scatter(
+        x=_twt_ms, y=_apparent_ms, mode="lines+markers", name="apparent",
+        line=dict(color="#c62828", width=2.4), marker=dict(size=4),
+        hovertemplate="true %{x:.0f} ms<br>apparent %{y:.0f} ms<extra></extra>"),
+        row=1, col=2)
+    wfig.add_trace(go.Scatter(
+        x=_twt_ms, y=_twt_ms, mode="lines", name="true (1:1)",
+        line=dict(color="#999", width=1.5, dash="dot"), hoverinfo="skip"),
+        row=1, col=2)
+    # Only the left panel gets the label: passing annotation_text=None still
+    # creates an annotation, and Plotly fills it with its placeholder.
+    wfig.add_vline(x=_tuning_ms, line=dict(color="#2e7d32", width=1.5, dash="dot"),
+                   annotation_text="tuning", annotation_position="top right",
+                   annotation_font_size=10, row=1, col=1)
+    wfig.add_vline(x=_tuning_ms, line=dict(color="#2e7d32", width=1.5, dash="dot"),
+                   row=1, col=2)
+    wfig.update_xaxes(title_text="True bed thickness (ms TWT)")
+    wfig.update_yaxes(title_text="|amplitude|", row=1, col=1)
+    wfig.update_yaxes(title_text="Apparent thickness (ms TWT)", row=1, col=2)
+    wfig.update_layout(height=430, margin=dict(l=60, r=20, t=50, b=50),
+                       legend=dict(orientation="h", yanchor="bottom", y=1.06))
+    st.plotly_chart(wfig, use_container_width=True)
+
+    # Does this bed change AVO class purely by getting thinner?
+    _cls = classify_array(wedge["A_top"], wedge["B_top"], a_tol=settings.a_tol)
+    _known = np.array([c is not None and str(c) != "nan" for c in _cls])
+    _valid = np.isfinite(wedge["A_top"]) & np.isfinite(wedge["B_top"]) & _known
+    _thick_class = str(_cls[_valid][-1]) if _valid.any() else None
+    _moved = _valid & (_cls != _thick_class)
+    if _thick_class is not None and _moved.any():
+        # The thickest bed that still misreads: below this the label moves.
+        _first = float(np.nanmax(_twt_ms[_moved]))
+        _classes_seen = [c for c in dict.fromkeys(_cls[_valid].tolist())]
+        st.info(
+            f"Thick, this bed is class **{_thick_class}**. Thinner than about "
+            f"**{_first:.0f} ms** it reads as "
+            + " or ".join(f"**{c}**" for c in _classes_seen if c != _thick_class)
+            + " instead — the same rock, the same fluid, a different answer "
+              "purely because of thickness. That is the trap a class label "
+              "walks into when the bed is near tuning.",
+            icon=":material/info:")
+    elif _thick_class is not None:
+        st.success(
+            f"This bed reads class **{_thick_class}** at every thickness from "
+            f"{max_ms} ms down to nothing, so its label is not a thickness "
+            "artefact.",
+            icon=":material/check_circle:")
+
+    st.caption(
+        f"Left: the picked top amplitude at {angles[int(wedge_angle_idx)]:.0f}° "
+        "against bed thickness, with the thick-bed value it should return to. "
+        "Right: what an interpreter would measure off the section against what "
+        "is really there — the two part company below tuning, where the top "
+        "and base lobes have merged and the separation stops shortening."
+    )
 
 # ------------------------------------------------- gather, class-coloured --
 st.divider()

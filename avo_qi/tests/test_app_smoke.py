@@ -1370,6 +1370,47 @@ class TestBlockingAndTuningInTheApp:
         # because the reflector belonged to someone else's lobe.
         assert (table["blocking"] == "lobe").mean() > 0.5
 
+    def test_the_wedge_model_is_on_the_page(self, avo_page):
+        """It was in core/tuning.py, tested, with no way to reach it."""
+        assert "Wedge model" in {s.value for s in avo_page.subheader}
+        labels = {m.label for m in avo_page.metric}
+        assert {"Tuning thickness", "Amplitude peaks at",
+                "Tuning brightening"} <= labels
+
+    def test_the_wedge_controls_are_offered(self, avo_page):
+        assert any(s.label == "Thickest bed (ms TWT)" for s in avo_page.slider)
+        assert any(c.label == "Same rock above and below"
+                   for c in avo_page.checkbox)
+        assert any(s.label == "Amplitude at" for s in avo_page.selectbox)
+
+    def test_the_wedge_follows_the_selected_reflector(self):
+        """It is seeded from whichever reflector the detail panel is on, so
+        moving the selection must move the wedge."""
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=240)
+        _inject_demo_well(at)
+        at.run()
+        table = reflector_table(at)
+
+        seen = set()
+        for row in (0, len(table) - 1):
+            at.session_state["reflector_pick"] = row
+            at.run()
+            assert not at.exception
+            captions = " ".join(c.value for c in at.caption)
+            assert "Seeded from the reflector selected above" in captions
+            seen.add(f"{table['depth'].iloc[row]:.1f} m")
+        # The seeding caption names the depth, so the two runs must differ.
+        assert len(seen) == 2
+
+    def test_it_reports_whether_thickness_alone_moves_the_class(self, avo_page):
+        """The whole point of a wedge: the same rock and the same fluid can
+        classify differently purely because the bed is thin."""
+        messages = " ".join(
+            [i.value for i in avo_page.info] + [s.value for s in avo_page.success])
+        assert ("purely because of thickness" in messages
+                or "not a thickness artefact" in messages)
+
     def test_the_spec_pinned_gas_sand_survives_the_narrower_window(self):
         """SPEC.md 4.1 fixes the gas sand as Class III. Narrowing the window
         sharpens contrasts, and that must not quietly move the one answer the
