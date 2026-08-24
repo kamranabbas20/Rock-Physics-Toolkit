@@ -323,3 +323,24 @@ class TestWedgeModel:
         wedge = wedge_model(SHALE, GAS_SAND, SHALE, [80], ANGLES, wavelet, dt=DT)
         assert wedge["A_top"][0] == pytest.approx(wedge["A_interface"], abs=1e-4)
         assert wedge["B_top"][0] == pytest.approx(wedge["B_interface"], abs=1e-4)
+
+
+class TestTuningThicknessInMetres:
+    """A quarter wavelength in depth is the same bed as half a period in time."""
+
+    @pytest.mark.parametrize("f_app", [15.0, 30.0, 60.0])
+    @pytest.mark.parametrize("velocity", [1800.0, 2500.0, 4200.0])
+    def test_depth_and_time_describe_the_same_bed(self, f_app, velocity):
+        in_time = tuning_thickness_twt(f_app)
+        in_depth = tuning_thickness_depth(f_app, velocity)
+        # Two-way time through a bed of thickness d is 2d/v, so d = twt*v/2.
+        assert in_depth == pytest.approx(in_time * velocity / 2.0)
+        assert in_depth == pytest.approx(velocity / (4.0 * f_app))
+
+    def test_a_faster_bed_tunes_thicker(self, wavelet):
+        f_app = apparent_frequency(wavelet, DT)
+        slow = tuning_thickness_depth(f_app, 2000.0)
+        fast = tuning_thickness_depth(f_app, 4000.0)
+        assert fast == pytest.approx(2.0 * slow)
+        # ...but takes exactly as long, which is why time is the modelling unit.
+        assert tuning_thickness_twt(f_app) > 0

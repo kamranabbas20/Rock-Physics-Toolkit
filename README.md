@@ -153,8 +153,23 @@ as shale.
 
 ## Zonation
 
-A LAS carrying a discrete `ZONE`, `FORMATION`, `MARKER` or `UNIT` curve is
-recognised on load and turned into named intervals. Codes map to names through
+Wells arrive zoned two ways, and both work here. A LAS carrying a discrete
+`ZONE`, `FORMATION`, `MARKER` or `UNIT` curve is recognised on load and turned
+into named intervals. Most wells carry no such curve — 15/9-19-A does not —
+which used to leave the zone filter, the zone-boundary flag and every per-zone
+summary with nothing to work from; **formation tops** entered or uploaded on
+the *Load & QC* page now fill that gap. Each zone runs to the next top and the
+deepest to the bottom of the well. Tops are cleared when another well is
+loaded, because a top is a depth in the well it was typed against.
+
+An event is flagged as sitting on a zone boundary when a top falls anywhere
+inside **its lobe**, not merely between the two samples at its extremum. With
+reflectors picked off the trace there are few of them and a top almost never
+lands in that one-sample gap, so the older test went quiet and stopped meaning
+anything. The lobe is the event's zone of influence, which is the right
+question to ask of a reflector.
+
+ Codes map to names through
 the sidebar; an unmapped code stands in as its own name, so a zonation with no
 legend is still usable. A tops list — names and depths, from a dict or a
 DataFrame — works too.

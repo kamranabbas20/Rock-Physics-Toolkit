@@ -1403,6 +1403,50 @@ class TestBlockingAndTuningInTheApp:
         # The seeding caption names the depth, so the two runs must differ.
         assert len(seen) == 2
 
+    def test_the_wedge_can_be_read_in_metres(self):
+        """Time is what the wavelet knows about; metres are that time carried
+        through the reservoir's own Vp.
+
+        Asserted as self-consistency rather than against a velocity guessed
+        from the table: every thickness on the panel must convert by the *same*
+        factor, which is what a conversion applied to one number and not
+        another would break. The physics of the conversion itself is pinned in
+        test_tuning.py.
+        """
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=240)
+        _inject_demo_well(at)
+        at.run()
+        unit = next(r for r in at.radio if r.label == "Thickness in")
+        assert list(unit.options) == ["ms TWT", "metres"]
+
+        # The wedge's own metric, not the well-wide one in "Tuned vs untuned":
+        # they answer different questions and carry different labels.
+        def reading(page, label):
+            return float(next(m for m in page.metric
+                              if m.label == label).value.split()[0])
+
+        tuning_ms = reading(at, "Tuning thickness (this bed)")
+        peak_ms = reading(at, "Amplitude peaks at")
+
+        unit.set_value("metres").run()
+        assert not at.exception
+        tuning_m = reading(at, "Tuning thickness (this bed)")
+        peak_m = reading(at, "Amplitude peaks at")
+
+        assert tuning_ms > 0 and peak_ms > 0
+        factor = tuning_m / tuning_ms
+        assert peak_m == pytest.approx(peak_ms * factor, rel=0.02)
+        # ms TWT -> m is v/2000, so any rock velocity lands the factor here.
+        assert 0.75 <= factor <= 3.0
+
+    def test_the_two_tuning_metrics_are_labelled_apart(self, avo_page):
+        """One is well-wide, the other is the wedge's reservoir. Sharing a
+        label made them indistinguishable on the page as well as in a test."""
+        labels = [m.label for m in avo_page.metric]
+        assert "Tuning thickness" in labels
+        assert "Tuning thickness (this bed)" in labels
+
     def test_it_reports_whether_thickness_alone_moves_the_class(self, avo_page):
         """The whole point of a wedge: the same rock and the same fluid can
         classify differently purely because the bed is thin."""

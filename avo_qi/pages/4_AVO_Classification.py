@@ -22,11 +22,13 @@ from avo_qi.core.blocking import (  # noqa: E402
     lobe_windows,
 )
 from avo_qi.core.lithology import interface_lithology, lobe_lithology  # noqa: E402
-from avo_qi.core.zones import zone_of_interface  # noqa: E402
+from avo_qi.core.zones import zone_of_interface, zone_of_lobe  # noqa: E402
 from avo_qi.core.tuning import (  # noqa: E402
     apparent_period,
     tuned_amplitudes,
     tuning_thickness_from_wavelet,
+    tuning_thickness_depth,
+    apparent_frequency,
     wedge_model,
 )
 from avo_qi.core.avo import (  # noqa: E402
@@ -299,7 +301,14 @@ table = table.assign(litho_upper=pairs["upper"], litho_lower=pairs["lower"],
 # Zone per reflector. An interface whose two sides are in different zones is
 # the zone boundary itself, which is usually the reflector of interest.
 zone_per_sample = zone_labels(tw, well, settings)
-zoning = zone_of_interface(zone_per_sample, table["sample"].to_numpy())
+# Over the lobe, not the two samples at the extremum: with events picked off
+# the trace there are few of them, and a formation top almost never falls
+# exactly between one event's two samples, which left the boundary flag dead.
+if lobe_bounds is not None:
+    zoning = zone_of_lobe(zone_per_sample, lobe_bounds,
+                          samples=table["sample"].to_numpy())
+else:
+    zoning = zone_of_interface(zone_per_sample, table["sample"].to_numpy())
 table = table.assign(zone=zoning["zone"], zone_below=zoning["zone_below"],
                      is_zone_boundary=zoning["is_zone_boundary"])
 if settings.zones:
@@ -952,8 +961,10 @@ class_tuned = classify_array(A_tuned, B_tuned, a_tol=settings.a_tol)
 changed = class_tuned != table["avo_class"].to_numpy()
 
 c1, c2, c3 = st.columns(3)
+_well_vp = float(np.nanmean(vp))
 c1.metric("Tuning thickness", f"{tuning_twt * 1000:.1f} ms TWT",
-          "half a wavelet cycle")
+          f"{tuning_thickness_depth(apparent_frequency(page_wavelet, settings.dt), _well_vp):.1f} m "
+          f"at {_well_vp:,.0f} m/s", delta_color="off")
 c2.metric("Largest gradient shift", f"{np.nanmax(np.abs(B_tuned - B_thick)):+.4f}")
 c3.metric("Reflectors that change class", int(changed.sum()),
           delta=None if not changed.any() else "tuning alone", delta_color="off")
@@ -1028,9 +1039,23 @@ st.caption(
     "reservoir; the wedge is symmetric, so the same encasing sits beneath."
 )
 
-w1, w2, w3 = st.columns(3)
+# Thickness is modelled in two-way time, because that is what the wavelet
+# knows about; metres are that time carried through the reservoir's own Vp,
+# so the conversion is only as good as that velocity.
+_res_vp = float(_lo[0])
+_f_app = apparent_frequency(page_wavelet, settings.dt)
+_tuning_m = tuning_thickness_depth(_f_app, _res_vp)
+_ms_to_m = _res_vp / 2000.0                       # ms TWT -> m of bed
+
+w0, w1, w2, w3 = st.columns([1, 2, 1, 1])
+_unit = w0.radio("Thickness in", ["ms TWT", "metres"], horizontal=False,
+                 key="wedge_unit",
+                 help=f"Metres use the reservoir's own Vp of {_res_vp:,.0f} m/s: "
+                      "a bed's thickness in time is the same however fast it "
+                      "is, but in metres it is not.")
 max_ms = w1.slider("Thickest bed (ms TWT)", 20, 200, 80, 10,
-                   help="The wedge runs from this down to zero.")
+                   help="The wedge runs from this down to zero. Always set in "
+                        "time; the display converts.")
 wedge_symmetric = w2.checkbox(
     "Same rock above and below", value=True,
     help="Untick to use the next event's lower layer beneath the reservoir, "
@@ -1056,6 +1081,7 @@ else:
     wedge = wedge_model(_up, _lo, _below, _thick, angles, page_wavelet,
                         dt=settings.dt, method=settings.method)
 
+    _in_metres = _unit == "metres"
     _twt_ms = wedge["thickness_twt"] * 1000.0
     _amp = np.abs(wedge["top_amplitude"][:, int(wedge_angle_idx)])
     _apparent_ms = wedge["apparent_thickness_twt"][:, int(wedge_angle_idx)] * 1000.0
@@ -1067,10 +1093,18 @@ else:
         if _finite.any() else float("nan")
     _brightening = (float(np.nanmax(_amp)) / _thick_bed) if _thick_bed else float("nan")
 
+    _fmt = ((lambda ms: f"{ms * _ms_to_m:.1f} m") if _in_metres
+            else (lambda ms: f"{ms:.0f} ms"))
+    _axis = "True bed thickness (m)" if _in_metres else "True bed thickness (ms TWT)"
+    _x = _twt_ms * _ms_to_m if _in_metres else _twt_ms
+
     m1, m2, m3 = st.columns(3)
-    m1.metric("Tuning thickness", f"{_tuning_ms:.0f} ms",
-              help="Predicted from the wavelet: half its apparent period.")
-    m2.metric("Amplitude peaks at", f"{_peak_ms:.0f} ms",
+    m1.metric("Tuning thickness (this bed)", _fmt(_tuning_ms),
+              help=f"Predicted from the wavelet: half its apparent period, "
+                   f"{_tuning_ms:.0f} ms TWT. In metres that is a quarter "
+                   f"wavelength at the reservoir's {_res_vp:,.0f} m/s, "
+                   f"{_tuning_m:.1f} m.")
+    m2.metric("Amplitude peaks at", _fmt(_peak_ms),
               help="Measured on the wedge. It should land on the predicted "
                    "tuning thickness; a gap means the wavelet and the model "
                    "disagree about the bandwidth.")
@@ -1081,33 +1115,40 @@ else:
     wfig = make_subplots(
         rows=1, cols=2, subplot_titles=("Tuning curve", "Apparent vs true thickness"),
         horizontal_spacing=0.09)
+    _hover = "%{x:.1f} m" if _in_metres else "%{x:.0f} ms"
     wfig.add_trace(go.Scatter(
-        x=_twt_ms, y=_amp, mode="lines+markers", name="picked top amplitude",
+        x=_x, y=_amp, mode="lines+markers", name="picked top amplitude",
         line=dict(color="#1565c0", width=2.4), marker=dict(size=4),
-        hovertemplate="%{x:.0f} ms<br>|amp| %{y:.4f}<extra></extra>"),
+        hovertemplate=_hover + "<br>|amp| %{y:.4f}<extra></extra>"),
         row=1, col=1)
     wfig.add_hline(y=_thick_bed, line=dict(color="#666", width=1, dash="dash"),
                    annotation_text="thick bed", annotation_position="bottom right",
                    annotation_font_size=10, row=1, col=1)
+    _apparent_y = _apparent_ms * _ms_to_m if _in_metres else _apparent_ms
     wfig.add_trace(go.Scatter(
-        x=_twt_ms, y=_apparent_ms, mode="lines+markers", name="apparent",
+        x=_x, y=_apparent_y, mode="lines+markers", name="apparent",
         line=dict(color="#c62828", width=2.4), marker=dict(size=4),
-        hovertemplate="true %{x:.0f} ms<br>apparent %{y:.0f} ms<extra></extra>"),
+        hovertemplate="true " + _hover + "<br>apparent "
+                      + ("%{y:.1f} m" if _in_metres else "%{y:.0f} ms")
+                      + "<extra></extra>"),
         row=1, col=2)
     wfig.add_trace(go.Scatter(
-        x=_twt_ms, y=_twt_ms, mode="lines", name="true (1:1)",
+        x=_x, y=_x, mode="lines", name="true (1:1)",
         line=dict(color="#999", width=1.5, dash="dot"), hoverinfo="skip"),
         row=1, col=2)
     # Only the left panel gets the label: passing annotation_text=None still
     # creates an annotation, and Plotly fills it with its placeholder.
-    wfig.add_vline(x=_tuning_ms, line=dict(color="#2e7d32", width=1.5, dash="dot"),
+    _tuning_x = _tuning_ms * _ms_to_m if _in_metres else _tuning_ms
+    wfig.add_vline(x=_tuning_x, line=dict(color="#2e7d32", width=1.5, dash="dot"),
                    annotation_text="tuning", annotation_position="top right",
                    annotation_font_size=10, row=1, col=1)
-    wfig.add_vline(x=_tuning_ms, line=dict(color="#2e7d32", width=1.5, dash="dot"),
+    wfig.add_vline(x=_tuning_x, line=dict(color="#2e7d32", width=1.5, dash="dot"),
                    row=1, col=2)
-    wfig.update_xaxes(title_text="True bed thickness (ms TWT)")
+    wfig.update_xaxes(title_text=_axis)
     wfig.update_yaxes(title_text="|amplitude|", row=1, col=1)
-    wfig.update_yaxes(title_text="Apparent thickness (ms TWT)", row=1, col=2)
+    wfig.update_yaxes(
+        title_text="Apparent thickness (m)" if _in_metres
+        else "Apparent thickness (ms TWT)", row=1, col=2)
     wfig.update_layout(height=430, margin=dict(l=60, r=20, t=50, b=50),
                        legend=dict(orientation="h", yanchor="bottom", y=1.06))
     st.plotly_chart(wfig, use_container_width=True)
@@ -1124,7 +1165,7 @@ else:
         _classes_seen = [c for c in dict.fromkeys(_cls[_valid].tolist())]
         st.info(
             f"Thick, this bed is class **{_thick_class}**. Thinner than about "
-            f"**{_first:.0f} ms** it reads as "
+            f"**{_fmt(_first)}** it reads as "
             + " or ".join(f"**{c}**" for c in _classes_seen if c != _thick_class)
             + " instead — the same rock, the same fluid, a different answer "
               "purely because of thickness. That is the trap a class label "
@@ -1133,7 +1174,7 @@ else:
     elif _thick_class is not None:
         st.success(
             f"This bed reads class **{_thick_class}** at every thickness from "
-            f"{max_ms} ms down to nothing, so its label is not a thickness "
+            f"{_fmt(max_ms)} down to nothing, so its label is not a thickness "
             "artefact.",
             icon=":material/check_circle:")
 

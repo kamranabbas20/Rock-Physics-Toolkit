@@ -14,6 +14,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import io as _stdlib_io  # noqa: E402
+
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
@@ -33,8 +35,10 @@ from avo_qi.io.loader import (  # noqa: E402
     guess_mnemonics,
     standardise,
 )
+from avo_qi.core.zones import zones_from_tops  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     DEMO_WELL,
+    well_zones,
     load_demo_well,
     load_uploaded_well,
     log_track_figure,
@@ -153,9 +157,103 @@ if missing:
     )
     st.stop()
 
+# ---------------------------------------------------------------- zonation --
+st.divider()
+st.subheader("3 · Zonation")
+
+_has_zone_curve = "ZONE" in well.df.columns
+if _has_zone_curve:
+    _intervals = well_zones(well, settings)
+    st.success(
+        f"This well carries a discrete zone curve — "
+        f"{0 if _intervals is None else len(_intervals)} interval(s). Formation "
+        "tops are not needed, and the curve is used in preference to them "
+        "because it is per-sample and cannot be mistyped.",
+        icon=":material/check_circle:")
+    if _intervals is not None and len(_intervals):
+        st.dataframe(_intervals.round(2), use_container_width=True,
+                     hide_index=True, height=200)
+else:
+    st.caption(
+        "Many wells carry no discrete zone curve — this one does not — which "
+        "leaves the zone filter, the zone-boundary flag on each reflector and "
+        "every per-zone summary with nothing to work from. Enter **formation "
+        "tops** here instead: a name and the measured depth it starts at. Each "
+        "zone runs down to the next top, and the deepest to the bottom of the "
+        "well."
+    )
+
+    _depth_md = well.df["DEPTH"].to_numpy(float)
+    _lo = float(np.nanmin(_depth_md)) if _depth_md.size else 0.0
+    _hi = float(np.nanmax(_depth_md)) if _depth_md.size else 0.0
+    st.caption(f"This well runs {_lo:,.1f} – {_hi:,.1f} m MD.")
+
+    _upload = st.file_uploader(
+        "Tops as CSV (a name column and a depth column)", type=["csv", "txt"],
+        key="tops_csv",
+        help="Column names are matched loosely: zone/name/formation/marker "
+             "for the name, and top/depth/md/tvd for the depth.")
+    if _upload is not None and st.session_state.get("_tops_file") != _upload.name:
+        try:
+            _read = pd.read_csv(_stdlib_io.BytesIO(_upload.getvalue()))
+            settings.zone_tops = zones_from_tops(_read)[["zone", "top"]].to_dict("records")
+            st.session_state["_tops_file"] = _upload.name
+            st.session_state.pop("zone_cache", None)
+            st.success(f"Read {len(settings.zone_tops)} top(s) from {_upload.name}.")
+            st.rerun()
+        except Exception as exc:              # a bad file must not kill the page
+            st.error(f"Could not read {_upload.name}: {exc}")
+
+    _seed = pd.DataFrame(settings.zone_tops or [{"zone": "", "top": None}])
+    _edited = st.data_editor(
+        _seed, num_rows="dynamic", use_container_width=True, key="tops_editor",
+        column_config={
+            "zone": st.column_config.TextColumn("Zone / formation", required=False),
+            "top": st.column_config.NumberColumn("Top (m MD)", format="%.2f"),
+        })
+
+    _clean = [
+        {"zone": str(r["zone"]).strip(), "top": float(r["top"])}
+        for _, r in _edited.iterrows()
+        if str(r.get("zone", "")).strip() and pd.notna(r.get("top"))
+    ]
+    if _clean != list(settings.zone_tops or []):
+        settings.zone_tops = _clean
+        st.session_state.pop("zone_cache", None)
+        st.rerun()
+
+    if settings.zone_tops:
+        _intervals = well_zones(well, settings)
+        # Test the *interval*, not the top. A top above the first sample still
+        # labels everything below it, so comparing the top against the well's
+        # range flags a zone that is working perfectly well.
+        _counts = [
+            int(((_depth_md >= float(r["top"])) &
+                 (_depth_md < (float(r["base"]) if pd.notna(r["base"]) else np.inf))
+                 ).sum())
+            for _, r in _intervals.iterrows()
+        ]
+        _empty = [str(_intervals["zone"].iloc[i])
+                  for i, n in enumerate(_counts) if n == 0]
+        if _empty:
+            st.warning(
+                f"{len(_empty)} zone(s) contain no samples of this well "
+                f"({', '.join(_empty)}) — their interval falls outside "
+                f"{_lo:,.1f}–{_hi:,.1f} m MD, so they label nothing.",
+                icon=":material/warning:")
+        st.dataframe(_intervals.round(2), use_container_width=True,
+                     hide_index=True, height=200)
+        st.caption(
+            f"{len(_intervals)} interval(s). Pick which to analyse in the "
+            "sidebar; the reflector table will then carry a zone per event and "
+            "flag the ones sitting on a boundary."
+        )
+    else:
+        st.caption("No tops entered, so nothing is filtered by zone.")
+
 # -------------------------------------------------------------------- QC ---
 st.divider()
-st.subheader("3 · Quality control")
+st.subheader("4 · Quality control")
 
 frame = well.frame(settings.case)
 numeric = [c for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c])]
@@ -257,7 +355,7 @@ if flagged:
 
 # ------------------------------------------------------- analysis window ---
 st.divider()
-st.subheader("4 · Analysis window")
+st.subheader("5 · Analysis window")
 
 depth = work["DEPTH"].to_numpy(float)
 lo, hi = float(np.nanmin(depth)), float(np.nanmax(depth))

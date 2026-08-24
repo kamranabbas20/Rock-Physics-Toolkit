@@ -25,7 +25,8 @@ from avo_qi.core.lithology import (
     vsh_from_gr,
 )
 from avo_qi.core.wavelet import bandpass_ormsby, load_wavelet, ricker
-from avo_qi.core.zones import UNZONED, assign_zones, zones_from_curve
+from avo_qi.core.zones import (UNZONED, assign_zones, zones_from_curve,
+                               zones_from_tops)
 from avo_qi.io.loader import depth_to_twt, read_well, resample_to_time, standardise
 
 DEMO_WELL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data", "demo_well.las")
@@ -84,6 +85,9 @@ class Settings:
     case: str = None
     zones: list = field(default_factory=list)
     zone_names: dict = field(default_factory=dict)
+    #: Formation tops entered by hand, for a well whose LAS carries no
+    #: discrete zone curve: a list of ``{"zone": name, "top": depth_md}``.
+    zone_tops: list = field(default_factory=list)
     vsh_cutoffs: dict = field(default_factory=lambda: dict(DEFAULT_VSH_CUTOFFS))
     lithologies: list = field(default_factory=lambda: list(LITHOLOGIES) + [UNDEFINED])
     gr_method: str = "linear"
@@ -125,8 +129,10 @@ def set_well(well, raw=None, units=None):
         settings.case = well.active_case if well is not None else None
         # Zone names belong to the well that was loaded, not to the session.
         # Carrying a previous well's selection into a new one silently hides
-        # every sample, because none of those names exists here.
+        # every sample, because none of those names exists here.  Tops are the
+        # same: they are depths in *this* well and mean nothing in the next.
         settings.zones = []
+        settings.zone_tops = []
 
 
 def load_demo_well():
@@ -294,7 +300,7 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
                                                float(s.wavelet_length), 0.016, format="%.3f")
 
         if well is not None:
-            table = well_zones(well, s) if "ZONE" in well.df.columns else None
+            table = well_zones(well, s)
             st.header("Zonation")
             if table is not None and len(table):
                 available = list(dict.fromkeys(table["zone"]))
@@ -304,7 +310,9 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
                     help="Restricts the crossplots, the reflectors and the rock "
                          "physics to the selected zones.",
                 )
-                st.caption(f"{len(table)} interval(s) from the ZONE curve.")
+                source = ("the ZONE curve" if "ZONE" in well.df.columns
+                          else "formation tops")
+                st.caption(f"{len(table)} interval(s) from {source}.")
             else:
                 # Shown rather than hidden: an absent control leaves a reader
                 # guessing whether the well has no zones or the app forgot them.
@@ -312,7 +320,8 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
                 st.caption(
                     "This well carries no zonation, so nothing is filtered by "
                     "zone. Map a discrete ZONE, FORMATION or MARKER curve on "
-                    "the **Load & QC** page to enable it."
+                    "the **Load & QC** page, or enter **formation tops** "
+                    "there, to enable it."
                 )
 
         if well is not None:
@@ -1110,20 +1119,42 @@ def lithology_crossplot(frame, labels, x, y, title=None, height=520, size=4):
 
 
 def well_zones(well, settings):
-    """Zone intervals from the well's ZONE curve, cached on the settings.
+    """Zone intervals for a well: its ZONE curve, else hand-entered tops.
 
-    Returns None when the well carries no zonation.
+    The curve wins where there is one — it is per-sample and cannot be
+    mistyped.  Tops are the fallback for the many wells whose LAS carries no
+    discrete zonation at all, which would otherwise leave the zone filter, the
+    zone-boundary flag and every per-zone summary permanently dead.
+
+    Returns None when the well has neither.
     """
-    if "ZONE" not in well.df.columns:
+    has_curve = "ZONE" in well.df.columns
+    tops = list(settings.zone_tops or [])
+    if not has_curve and not tops:
         return None
-    key = ("zones", id(well), tuple(sorted(settings.zone_names.items())))
+
+    depth = well.df["DEPTH"].to_numpy(float)
+    key = ("zones", id(well), tuple(sorted(settings.zone_names.items())),
+           tuple((str(t.get("zone")), t.get("top")) for t in tops))
     cache = st.session_state.setdefault("zone_cache", {})
     if key in cache:
         return cache[key]
-    table = zones_from_curve(
-        well.df["DEPTH"].to_numpy(float), well.df["ZONE"].to_numpy(),
-        names=settings.zone_names or None,
-    )
+
+    if has_curve:
+        table = zones_from_curve(
+            depth, well.df["ZONE"].to_numpy(),
+            names=settings.zone_names or None,
+        )
+    else:
+        # Close the deepest interval just *past* the last sample. Assignment
+        # is `top <= depth < base`, so closing it exactly at total depth would
+        # leave the deepest sample of the well unzoned.
+        if depth.size:
+            step = float(np.median(np.diff(np.sort(depth)))) if depth.size > 1 else 0.0
+            base_depth = float(np.nanmax(depth)) + (step if step > 0 else 1e-6)
+        else:
+            base_depth = None
+        table = zones_from_tops(tops, base_depth=base_depth)
     if len(cache) > 8:
         cache.clear()
     cache[key] = table

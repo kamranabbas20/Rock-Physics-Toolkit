@@ -22,6 +22,7 @@ __all__ = [
     "zones_from_tops",
     "assign_zones",
     "zone_of_interface",
+    "zone_of_lobe",
     "UNZONED",
 ]
 
@@ -173,6 +174,56 @@ def assign_zones(depth, zones, unzoned=UNZONED):
         base = float(base) if base is not None and np.isfinite(base) else np.inf
         labels[(depth >= top) & (depth < base)] = row["zone"]
     return labels
+
+
+def zone_of_lobe(zone_labels, bounds, samples=None, unzoned=UNZONED):
+    """The zone either side of an event, read over its two half-lobes.
+
+    :func:`zone_of_interface` compares the two samples straddling a boundary,
+    which is right when every interface is a candidate reflector.  Once events
+    are picked off the trace there are far fewer of them, and a formation top
+    almost never falls exactly between one event's two samples — so that flag
+    goes quiet and stops meaning anything.
+
+    An event's lobe is its zone of influence: the samples it was blocked over
+    and the ones its amplitude actually came from.  A top falling anywhere
+    inside that lobe is a top this event is carrying, which is the question
+    worth asking of a reflector.  The upper and lower halves take their
+    commonest label, matching :func:`avo_qi.core.lithology.lobe_lithology`.
+    """
+    labels = np.asarray(zone_labels, dtype=object)
+    n = labels.size
+    count = np.asarray(bounds["upper_start"]).size
+    if n == 0:
+        empty = np.array([], dtype=object)
+        return {"zone": empty, "zone_below": empty.copy(),
+                "is_zone_boundary": np.array([], dtype=bool)}
+
+    resolved = np.asarray(bounds.get("resolved", np.ones(count, bool)), dtype=bool)
+    samples = None if samples is None else np.asarray(samples, dtype=int)
+
+    def commonest(lo, hi):
+        window = labels[max(int(lo), 0):min(int(hi), n)]
+        if window.size == 0:
+            return unzoned
+        names, counts = np.unique(window.astype(str), return_counts=True)
+        return str(names[int(np.argmax(counts))])
+
+    above = np.empty(count, dtype=object)
+    below = np.empty(count, dtype=object)
+    for k in range(count):
+        if resolved[k]:
+            above[k] = commonest(bounds["upper_start"][k], bounds["upper_stop"][k])
+            below[k] = commonest(bounds["lower_start"][k], bounds["lower_stop"][k])
+        elif samples is not None:
+            i = int(np.clip(samples[k], 0, n - 1))
+            above[k] = labels[i]
+            below[k] = labels[min(i + 1, n - 1)]
+        else:
+            above[k] = below[k] = unzoned
+
+    return {"zone": above, "zone_below": below,
+            "is_zone_boundary": above != below}
 
 
 def zone_of_interface(zone_labels, samples):

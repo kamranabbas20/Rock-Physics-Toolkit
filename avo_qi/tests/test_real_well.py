@@ -211,6 +211,125 @@ class TestNoSilentNumericalDamage:
         assert np.abs(table[["dA", "dB"]].to_numpy(float)).max() < 1e-6
 
 
+class TestZonationFromTops:
+    """15/9-19-A has no ZONE curve, so without tops the whole zone machinery —
+    the filter, the boundary flag, the per-zone summaries — is dead on it.
+
+    The depths below are invented for the test, not this field's real
+    stratigraphy; what is being checked is the wiring, not the geology.
+    """
+
+    TOPS = [{"zone": "Upper", "top": 3500.0},
+            {"zone": "Middle", "top": 3700.0},
+            {"zone": "Reservoir", "top": 3900.0}]
+
+    def test_the_well_has_no_zone_curve_to_begin_with(self):
+        assert "ZONE" not in load()[0].df.columns
+
+    def test_tops_produce_intervals_closed_at_the_bottom_of_the_well(self):
+        from avo_qi.ui import Settings, well_zones
+
+        well = load()[0]
+        settings = Settings()
+        assert well_zones(well, settings) is None      # nothing without tops
+
+        settings.zone_tops = list(self.TOPS)
+        intervals = well_zones(well, settings)
+        assert list(intervals["zone"]) == ["Upper", "Middle", "Reservoir"]
+        assert list(intervals["top"]) == [3500.0, 3700.0, 3900.0]
+        # Each runs to the next, and the deepest is closed just *past* the last
+        # sample rather than on it: assignment is `top <= depth < base`, so a
+        # base exactly at total depth leaves the bottom sample unzoned.
+        assert list(intervals["base"])[:2] == [3700.0, 3900.0]
+        deepest = float(well.df["DEPTH"].max())
+        step = float(np.median(np.diff(np.sort(well.df["DEPTH"].to_numpy(float)))))
+        assert intervals["base"].iloc[-1] == pytest.approx(deepest + step)
+        assert intervals["base"].iloc[-1] > deepest
+
+    def test_every_sample_gets_a_zone(self):
+        from avo_qi.core.zones import UNZONED
+        from avo_qi.ui import Settings, zone_labels
+
+        well = load()[0]
+        settings = Settings()
+        settings.zone_tops = list(self.TOPS)
+        labels = zone_labels(well.df, well, settings)
+        assert set(labels) == {"Upper", "Middle", "Reservoir"}
+        assert UNZONED not in set(labels)
+
+    def test_the_avo_page_carries_a_zone_per_event(self):
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
+        assert set(reflector_table(at)["zone"]) == {"unzoned"}
+
+        at.session_state["settings"].zone_tops = list(self.TOPS)
+        at.run()
+        assert not at.exception
+        table = reflector_table(at)
+        assert set(table["zone"]) <= {"Upper", "Middle", "Reservoir"}
+        assert len(set(table["zone"])) > 1
+
+    def test_events_on_a_top_are_flagged_as_zone_boundaries(self):
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
+        at.session_state["settings"].zone_tops = list(self.TOPS)
+        at.run()
+        table = reflector_table(at)
+        flagged = table[table["is_zone_boundary"]]
+        assert len(flagged), "no event straddles a top"
+        # A flagged event has different zones above and below it.
+        for _, row in flagged.iterrows():
+            assert row["zone"] != row["zone_below"]
+
+    def test_a_top_at_the_very_start_of_the_well_still_labels_samples(self):
+        """The warning on the load page tested the *top* against the well's
+        range and called this empty: the shallowest top is 3500.0 while the
+        first sample is at 3500.0183, and `depth >= top` matches it fine."""
+        from avo_qi.core.zones import assign_zones
+        from avo_qi.ui import Settings, well_zones
+
+        well = load()[0]
+        settings = Settings()
+        settings.zone_tops = list(self.TOPS)
+        intervals = well_zones(well, settings)
+
+        depth = well.df["DEPTH"].to_numpy(float)
+        assert depth.min() > 3500.0, "the fixture must start below the top"
+        labels = assign_zones(depth, intervals)
+        assert (labels == "Upper").sum() > 0
+
+    def test_the_zone_filter_narrows_the_events(self):
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
+        at.session_state["settings"].zone_tops = list(self.TOPS)
+        at.run()
+        everything = len(reflector_table(at))
+
+        at.session_state["settings"].zones = ["Reservoir"]
+        at.run()
+        assert not at.exception
+        narrowed = reflector_table(at)
+        assert 0 < len(narrowed) < everything
+        # Kept when *either* side is in the zone, so the top of the interval
+        # survives along with everything inside it.
+        assert {"Reservoir"} <= set(narrowed["zone"]) | set(narrowed["zone_below"])
+
+    def test_tops_do_not_leak_into_the_next_well(self):
+        """The same failure the zone *selection* had once: a top is a depth in
+        the well it was typed against and means nothing in another.
+
+        Driven by actually loading a second well through the page's own button,
+        so it is `set_well` doing the clearing and not the test.
+        """
+        at = run_page(os.path.join(PAGES, "1_Load_and_QC.py"))
+        at.session_state["settings"].zone_tops = list(self.TOPS)
+        at.run()
+        assert at.session_state["settings"].zone_tops
+        assert at.session_state["well"].name == "15/9-19-A"
+
+        next(b for b in at.button if b.label == "Load demo well").click().run()
+        assert not at.exception
+        assert at.session_state["well"].name == "DEMO-1"
+        assert at.session_state["settings"].zone_tops == []
+
+
 class TestLithologyOnRealCurves:
     def test_pairs_come_from_the_wells_own_vsh(self, table):
         from avo_qi.core.lithology import LITHOLOGIES

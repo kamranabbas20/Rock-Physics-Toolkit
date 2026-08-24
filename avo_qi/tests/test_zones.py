@@ -13,6 +13,7 @@ from avo_qi.core.zones import (
     zone_of_interface,
     zones_from_curve,
     zones_from_tops,
+    zone_of_lobe,
 )
 
 STEP = 0.1524
@@ -218,3 +219,57 @@ class TestZoneCurveInALas:
         raw, units = read_well(path)
         loaded = standardise(raw, units=units).df["ZONE"].to_numpy(float)
         assert set(np.unique(loaded[np.isfinite(loaded)])) == {1.0, 2.0, 3.0}
+
+
+class TestZoneOfLobe:
+    """A top inside an event's lobe is a top that event is carrying.
+
+    Comparing only the two samples at the extremum was right when every
+    interface was a candidate reflector.  With events picked off the trace
+    there are far fewer of them, and a top almost never lands exactly between
+    one event's two samples, so that flag went quiet.
+    """
+
+    @staticmethod
+    def _bounds(upper, lower, resolved=True):
+        return {"upper_start": np.array([upper[0]]),
+                "upper_stop": np.array([upper[1]]),
+                "lower_start": np.array([lower[0]]),
+                "lower_stop": np.array([lower[1]]),
+                "resolved": np.array([resolved])}
+
+    def test_a_top_inside_the_lobe_is_flagged(self):
+        labels = np.array(["Upper"] * 20 + ["Reservoir"] * 20, dtype=object)
+        found = zone_of_lobe(labels, self._bounds((12, 20), (19, 28)))
+        assert found["zone"][0] == "Upper"
+        assert found["zone_below"][0] == "Reservoir"
+        assert bool(found["is_zone_boundary"][0])
+
+    def test_an_event_well_inside_one_zone_is_not_flagged(self):
+        labels = np.array(["Upper"] * 20 + ["Reservoir"] * 20, dtype=object)
+        found = zone_of_lobe(labels, self._bounds((2, 9), (8, 15)))
+        assert found["zone"][0] == found["zone_below"][0] == "Upper"
+        assert not bool(found["is_zone_boundary"][0])
+
+    def test_the_interface_flag_misses_what_the_lobe_catches(self):
+        """The reason this function exists, stated as a comparison."""
+        from avo_qi.core.zones import zone_of_interface
+
+        labels = np.array(["Upper"] * 20 + ["Reservoir"] * 20, dtype=object)
+        # The event sits at sample 16, four samples above the top at 20, so
+        # samples 16 and 17 are both in "Upper" and the interface test is blind
+        # to a boundary its lobe plainly spans.
+        assert not zone_of_interface(labels, [16])["is_zone_boundary"][0]
+        assert zone_of_lobe(labels, self._bounds((12, 17), (16, 26)),
+                            samples=[16])["is_zone_boundary"][0]
+
+    def test_an_unresolved_lobe_falls_back_to_the_interface(self):
+        labels = np.array(["Upper"] * 20 + ["Reservoir"] * 20, dtype=object)
+        found = zone_of_lobe(labels, self._bounds((0, 0), (0, 0), resolved=False),
+                             samples=[19])
+        assert found["zone"][0] == "Upper"
+        assert found["zone_below"][0] == "Reservoir"
+
+    def test_no_labels_at_all_is_not_an_error(self):
+        found = zone_of_lobe(np.array([], dtype=object), self._bounds((0, 1), (1, 2)))
+        assert found["zone"].size == 0
