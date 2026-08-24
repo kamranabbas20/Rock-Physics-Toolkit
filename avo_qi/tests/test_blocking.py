@@ -17,6 +17,7 @@ from avo_qi.core.blocking import (
     block_properties,
     blocked_reflectivity,
     half_cycle_samples,
+    lobe_windows,
 )
 from avo_qi.core.reflectivity import zoeppritz_rpp
 from avo_qi.core.tuning import apparent_period
@@ -306,3 +307,108 @@ class TestBlockedAndAdjacentAreDifferentInterfaces:
         adjacent = abs(float(rc[200, 0]))
         blocked_r = abs(float(np.asarray(blocked["rc"])[0, 0]))
         assert blocked_r > 5 * adjacent
+
+
+class TestLobeWindows:
+    """The window is measured on the trace, not assumed from the wavelet.
+
+    A reflector shows up as a lobe running zero crossing to zero crossing.
+    Its upper half belongs to the layer above and its lower half to the layer
+    below, so halving it at the extremum gives the two layers the seismic
+    actually resolves there.
+    """
+
+    @staticmethod
+    def _isolated_lobe(freq=30.0, dt=0.001, coefficient=-0.2, n=400):
+        from avo_qi.core.wavelet import ricker
+
+        _, wavelet = ricker(freq, dt)
+        rc = np.zeros(n)
+        rc[n // 2] = coefficient
+        return np.convolve(rc, wavelet, mode="same")
+
+    def test_the_bounds_are_the_lobe_s_own_zero_crossings(self):
+        """A Ricker's central lobe crosses zero at ±sqrt(2)/(2 pi f), so the
+        half-lobe found here has to match that, not a nominal half period."""
+        dt, freq = 0.001, 30.0
+        trace = self._isolated_lobe(freq, dt)
+        found = lobe_windows(trace, [200], polarity=[-1])
+        upper = found["upper_stop"][0] - found["upper_start"][0]
+        lower = found["lower_stop"][0] - found["lower_start"][0]
+        analytic = np.sqrt(2) / (2 * np.pi * freq) / dt
+        assert abs(upper - analytic) <= 1.0
+        assert abs(lower - analytic) <= 1.0
+
+    def test_a_higher_frequency_gives_a_narrower_window(self):
+        widths = []
+        for freq in (20.0, 30.0, 50.0):
+            found = lobe_windows(self._isolated_lobe(freq), [200], polarity=[-1])
+            widths.append(found["upper_stop"][0] - found["upper_start"][0])
+        assert widths[0] > widths[1] > widths[2]
+
+    def test_the_halves_meet_at_the_extremum(self):
+        found = lobe_windows(self._isolated_lobe(), [200], polarity=[-1])
+        assert found["upper_stop"][0] - 1 == found["lower_start"][0] == 200
+
+    def test_it_is_narrower_than_the_fixed_half_cycle_it_replaces(self):
+        """Halving the lobe gives about a quarter period a side, against the
+        half period the fixed window used. Contrasts sharpen as a result."""
+        from avo_qi.core.tuning import apparent_period
+        from avo_qi.core.wavelet import ricker
+
+        dt = 0.001
+        _, wavelet = ricker(30.0, dt)
+        fixed = half_cycle_samples(apparent_period(wavelet, dt), dt)
+        found = lobe_windows(self._isolated_lobe(30.0, dt), [200], polarity=[-1])
+        assert found["upper_stop"][0] - found["upper_start"][0] < fixed
+
+    def test_a_peak_works_the_same_way_as_a_trough(self):
+        trace = self._isolated_lobe(coefficient=+0.2)
+        found = lobe_windows(trace, [200], polarity=[+1])
+        assert found["resolved"][0]
+        assert found["upper_start"][0] < 200 < found["lower_stop"][0] - 1
+
+    def test_a_lobe_too_thin_to_halve_is_reported_not_guessed(self):
+        """Both windows would collapse onto the extremum and the contrast
+        would come out as exactly zero — a wrong answer, not a narrow one."""
+        thin = np.concatenate([np.zeros(20), [0.3], np.zeros(29)])
+        assert not lobe_windows(thin, [20], polarity=[1])["resolved"][0]
+
+    def test_a_flat_trace_has_no_lobe(self):
+        assert not lobe_windows(np.zeros(50), [25], polarity=[1])["resolved"][0]
+
+    def test_a_lobe_of_the_wrong_sign_is_not_claimed(self):
+        trace = np.concatenate([np.zeros(20), [0.1, 0.3, 0.1], np.zeros(27)])
+        assert not lobe_windows(trace, [21], polarity=[-1])["resolved"][0]
+
+    def test_it_gives_up_rather_than_swallowing_the_trace(self):
+        ramp = np.linspace(0.1, 1.0, 50)
+        assert not lobe_windows(ramp, [25], polarity=[1],
+                                max_half_width=5)["resolved"][0]
+
+    def test_unresolved_reflectors_fall_back_to_the_fixed_window(self):
+        """A lobe that cannot be found costs that reflector its measured
+        window, not its answer."""
+        n = 200
+        vp = np.concatenate([np.full(100, 2400.0), np.full(100, 3000.0)])
+        vs = np.concatenate([np.full(100, 1200.0), np.full(100, 1500.0)])
+        rho = np.concatenate([np.full(100, 2.35), np.full(100, 2.50)])
+        bounds = lobe_windows(np.zeros(n), [99], polarity=[1])   # no lobe
+        blocked = block_properties(vp, vs, rho, [99], window=10, bounds=bounds)
+        assert not blocked["from_lobe"][0]
+        assert blocked["vp_upper"][0] == pytest.approx(2400.0)
+        assert blocked["vp_lower"][0] == pytest.approx(3000.0)
+
+    def test_explicit_bounds_average_exactly_those_samples(self):
+        vp = np.arange(100, dtype=float) * 10.0 + 1000.0
+        vs = vp / 2.0
+        rho = np.full(100, 2.4)
+        bounds = {"upper_start": np.array([10]), "upper_stop": np.array([20]),
+                  "lower_start": np.array([20]), "lower_stop": np.array([30]),
+                  "resolved": np.array([True])}
+        blocked = block_properties(vp, vs, rho, [19], window=5, method="mean",
+                                   bounds=bounds)
+        assert blocked["from_lobe"][0]
+        assert blocked["vp_upper"][0] == pytest.approx(vp[10:20].mean())
+        assert blocked["vp_lower"][0] == pytest.approx(vp[20:30].mean())
+        assert blocked["n_upper"][0] == 10 and blocked["n_lower"][0] == 10

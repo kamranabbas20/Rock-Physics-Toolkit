@@ -332,43 +332,20 @@ class TestTheDetailPanelShowsWhatItFitted:
     """The panel plots A and B over a modelled curve; both must come from the
     same layers, or the fit appears wrong when it is not."""
 
-    @staticmethod
-    def _page(mode):
-        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
-                               default_timeout=90)
-        _inject_demo_well(at)
-        at.run()
-        radio = next(r for r in at.radio if "blocked layers" in " ".join(r.options))
-        radio.set_value(mode).run()
-        return at
-
-    def test_it_names_the_blocked_layers_when_blocking_is_on(self):
-        at = self._page("Half-cycle blocked layers")
-        assert not at.exception
-        captions = " ".join(c.value for c in at.caption)
-        assert "half-cycle blocked layers" in captions
+    def test_it_names_the_lobe_it_blocked_on(self, avo_page):
+        captions = " ".join(c.value for c in avo_page.caption)
+        assert "the reflector's own lobe" in captions
         assert "the same layers the A and B above were fitted to" in captions
 
-    def test_it_names_the_adjacent_samples_when_blocking_is_off(self):
-        at = self._page("Adjacent samples")
-        assert not at.exception
-        captions = " ".join(c.value for c in at.caption)
-        assert "Modelled on **adjacent samples**" in captions
+    def test_the_quoted_layer_properties_come_from_the_same_window(self, avo_page):
+        captions = " ".join(c.value for c in avo_page.caption)
+        assert "from the reflector's own lobe" in captions
 
-    def test_the_quoted_layer_properties_follow_the_same_choice(self):
-        """The numbers under the chart are the ones behind A and B."""
-        on = " ".join(c.value for c in self._page("Half-cycle blocked layers").caption)
-        off = " ".join(c.value for c in self._page("Adjacent samples").caption)
-        assert "from half-cycle blocked layers" in on
-        assert "from adjacent samples" in off
-
-    def test_the_unfitted_adjacent_curve_is_offered_only_when_blocking(self):
-        """Seeing the gap is useful; mistaking it for the fit is not, so it is
-        drawn only where it differs and is labelled as not fitted."""
-        on = " ".join(c.value for c in self._page("Half-cycle blocked layers").caption)
-        off = " ".join(c.value for c in self._page("Adjacent samples").caption)
-        assert "not what was fitted" in on
-        assert "not what was fitted" not in off
+    def test_the_unfitted_adjacent_curve_is_still_offered_for_contrast(self, avo_page):
+        """Seeing the gap between the lobe and the raw adjacent pair is the
+        point of blocking; it is drawn, but labelled as not fitted."""
+        captions = " ".join(c.value for c in avo_page.caption)
+        assert "not what was fitted" in captions
 
 
 class TestAWellWithNoZonation:
@@ -579,24 +556,22 @@ class TestUncertaintyInTheApp:
         assert differs.value == "0"
 
     def test_the_odds_are_computed_on_the_layers_the_label_used(self):
-        """Adjacent samples and blocked layers are different interfaces.
+        """The Monte Carlo must re-average over the *same* lobe windows.
 
-        Run both blocking modes with a perfect tool: each must agree with its
-        own label, which only holds if the Monte Carlo follows the page.
+        Block on anything else and the odds describe a different interface, so
+        every disagreement with the label is that mismatch rather than a
+        finding. With a perfect tool the two must land on the same class.
         """
-        for mode in ("Half-cycle blocked layers", "Adjacent samples"):
-            at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
-            next(r for r in at.radio
-                 if "blocked layers" in " ".join(r.options)).set_value(mode)
-            next(c for c in at.checkbox
-                 if "class probabilities" in c.label).set_value(True)
-            for label in ("Vp \u00b1 (%)", "Vs \u00b1 (%)", "RHOB \u00b1 (%)"):
-                next(s for s in at.slider if s.label == label).set_value(0.0)
-            at.run()
-            assert not at.exception, mode
-            differs = next(m for m in at.metric
-                           if m.label == "Modal class differs from the label")
-            assert differs.value == "0", mode
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
+        next(c for c in at.checkbox
+             if "class probabilities" in c.label).set_value(True)
+        for label in ("Vp \u00b1 (%)", "Vs \u00b1 (%)", "RHOB \u00b1 (%)"):
+            next(s for s in at.slider if s.label == label).set_value(0.0)
+        at.run()
+        assert not at.exception
+        differs = next(m for m in at.metric
+                       if m.label == "Modal class differs from the label")
+        assert differs.value == "0"
 
 
 class TestTheZoneFilterScopesTheModel:
@@ -864,18 +839,30 @@ class TestBlockingAndTuningInTheApp:
     """Both were built in core/ before they reached a page; these pin that they
     are now actually wired in."""
 
-    def test_the_untuned_source_is_selectable(self, avo_page):
-        labels = {r.label for r in avo_page.radio}
-        assert "Layer properties from" in labels
+    def test_there_is_no_longer_a_choice_of_layer_source(self):
+        """Adjacent samples were removed; lobe blocking is what the page does."""
+        labels = {r.label for r in run_page(
+            os.path.join(PAGES, "4_AVO_Classification.py")).radio}
+        assert "Layer properties from" not in labels
 
-    def test_blocking_defaults_to_half_cycle_layers(self, avo_page):
-        control = next(r for r in avo_page.radio if r.label == "Layer properties from")
-        assert control.value.startswith("Half-cycle")
-
-    def test_blocking_reports_its_window(self, avo_page):
+    def test_blocking_reports_the_lobe_window_it_measured(self, avo_page):
         labels = {m.label for m in avo_page.metric}
-        assert "Blocking window" in labels
+        assert "Median lobe window" in labels
         assert "Largest change in A" in labels
+
+    def test_the_lobe_window_is_narrower_than_a_fixed_half_cycle(self, avo_page):
+        """Halving the lobe gives about a quarter period each side, against the
+        half period the fixed window used — the contrasts should sharpen."""
+        table = reflector_table(avo_page)
+        assert "lobe_samples" in table.columns
+        lobe = table.loc[table["blocking"] == "lobe", "lobe_samples"]
+        assert len(lobe) > 0
+        assert lobe.median() < 26          # the demo well's fixed window
+
+    def test_every_reflector_says_which_window_it_used(self, avo_page):
+        table = reflector_table(avo_page)
+        assert set(table["blocking"]) <= {"lobe", "fixed window"}
+        assert (table["blocking"] == "lobe").any()
 
     def test_the_tuning_section_is_present(self, avo_page):
         headers = {h.value for h in avo_page.header}
@@ -892,17 +879,15 @@ class TestBlockingAndTuningInTheApp:
         for column in ("A_untuned", "A_tuned", "class_untuned", "changes_class"):
             assert column in table.columns
 
-    def test_switching_to_adjacent_samples_still_runs(self):
-        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
-                               default_timeout=180)
-        _inject_demo_well(at)
-        at.run()
-        assert not at.exception
-        control = next(r for r in at.radio if r.label == "Layer properties from")
-        control.set_value("Adjacent samples").run()
-        assert not at.exception
-        # Without blocking there is nothing to compare against.
-        assert "Blocking window" not in {m.label for m in at.metric}
+    def test_the_spec_pinned_gas_sand_survives_the_narrower_window(self):
+        """SPEC.md 4.1 fixes the gas sand as Class III. Narrowing the window
+        sharpens contrasts, and that must not quietly move the one answer the
+        spec nails down."""
+        table = reflector_table(run_page(
+            os.path.join(PAGES, "4_AVO_Classification.py")))
+        gas = table[table["sample"] == 33]
+        assert len(gas) == 1
+        assert gas["avo_class"].iloc[0] == "III"
 
 
 class TestZonationAndMixingInTheApp:

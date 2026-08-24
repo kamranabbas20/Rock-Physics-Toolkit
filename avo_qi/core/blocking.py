@@ -25,6 +25,7 @@ __all__ = [
     "backus_average",
     "arithmetic_average",
     "half_cycle_samples",
+    "lobe_windows",
     "block_properties",
     "blocked_reflectivity",
 ]
@@ -80,7 +81,115 @@ def arithmetic_average(vp, vs, rho):
 _AVERAGES = {"backus": backus_average, "mean": arithmetic_average}
 
 
-def block_properties(vp, vs, rho, samples, window, method="backus", guard=0):
+def lobe_windows(trace, extrema_index, polarity=None, max_half_width=None):
+    """Half-lobe bounds either side of each reflector's amplitude extremum.
+
+    A reflector shows up on the trace as a lobe — a trough or a peak — running
+    from one zero crossing to the next.  Its **upper half**, from the crossing
+    above down to the extremum, is the part of the trace the layer above
+    produced; its **lower half**, from the extremum down to the crossing below,
+    belongs to the layer beneath.  Averaging the logs over those two halves
+    gives the layers the seismic actually resolves at that reflector.
+
+    That is a different window from a fixed half cycle of the wavelet.  This
+    one is measured on the data, so it narrows where beds are thin or where
+    interference squeezes the lobe, and opens up where the reflector stands
+    alone.  Each half is about a quarter period rather than a half, so the
+    contrasts it produces are sharper.
+
+    Parameters
+    ----------
+    trace : array_like
+        The trace the lobes are read from — normally the full stack, so that
+        one blocking serves every angle.
+    extrema_index : array_like
+        Sample index of each reflector's extremum, from
+        :func:`avo_qi.core.synthetic.trace_extrema`.
+    polarity : array_like, optional
+        Expected sign per reflector.  Defaults to the sign of the trace at the
+        extremum, which is the same thing whenever the extremum was resolved.
+    max_half_width : int, optional
+        Give up after this many samples in either direction.  Without a cap a
+        reflector sitting on a long one-sided ramp would swallow most of the
+        trace.
+
+    Returns
+    -------
+    dict of ndarray
+        ``upper_start``, ``upper_stop``, ``lower_start``, ``lower_stop`` —
+        half-open slice bounds into the trace — with ``resolved`` False where
+        no crossing was found in range, in which case the bounds are left at
+        the extremum and the caller should fall back to a fixed window rather
+        than average an empty or arbitrary slice.
+    """
+    trace = np.asarray(trace, dtype=float).ravel()
+    index = np.atleast_1d(np.asarray(extrema_index, dtype=int))
+    n = trace.size
+    cap = int(max_half_width) if max_half_width else n
+
+    if polarity is None:
+        at = np.clip(index, 0, max(n - 1, 0))
+        sign = np.sign(trace[at]) if n else np.zeros(index.size)
+    else:
+        sign = np.sign(np.asarray(polarity, dtype=float))
+    sign = np.where(sign == 0, 1.0, sign)
+
+    out = {k: np.zeros(index.size, dtype=int)
+           for k in ("upper_start", "upper_stop", "lower_start", "lower_stop")}
+    resolved = np.zeros(index.size, dtype=bool)
+
+    for k, centre in enumerate(index):
+        centre = int(np.clip(centre, 0, max(n - 1, 0)))
+        out["upper_start"][k] = out["upper_stop"][k] = centre
+        out["lower_start"][k] = out["lower_stop"][k] = centre
+        if n < 3:
+            continue
+        want = sign[k]
+        # There has to be a lobe to halve.  A flat or zero trace would let both
+        # walks stop immediately and hand back an empty window that still
+        # looked resolved.
+        if not np.isfinite(trace[centre]) or trace[centre] * want <= 0:
+            continue
+
+        # Walk up until the trace stops matching the lobe's sign.
+        top = centre
+        while top - 1 >= 0 and centre - (top - 1) <= cap:
+            value = trace[top - 1]
+            if not np.isfinite(value) or value * want <= 0:
+                break
+            top -= 1
+        found_top = top > 0 and (centre - top) <= cap and (
+            not np.isfinite(trace[top - 1]) or trace[top - 1] * want <= 0)
+
+        # ...and down.
+        base = centre
+        while base + 1 < n and (base + 1) - centre <= cap:
+            value = trace[base + 1]
+            if not np.isfinite(value) or value * want <= 0:
+                break
+            base += 1
+        found_base = base < n - 1 and (base - centre) <= cap and (
+            not np.isfinite(trace[base + 1]) or trace[base + 1] * want <= 0)
+
+        # A lobe only one sample wide cannot be halved: both windows would
+        # collapse onto the extremum itself, the two "layers" would be the
+        # same sample, and the contrast would come out as exactly zero — a
+        # wrong answer dressed as a narrow one.  Such a reflector is reported
+        # unresolved so the caller falls back to the fixed window.
+        if not (found_top and found_base) or top >= centre or base <= centre:
+            continue
+        # Half-open slices: [top, centre + 1) above, [centre, base + 1) below,
+        # so the extremum itself belongs to both halves rather than to neither.
+        out["upper_start"][k], out["upper_stop"][k] = top, centre + 1
+        out["lower_start"][k], out["lower_stop"][k] = centre, base + 1
+        resolved[k] = True
+
+    out["resolved"] = resolved
+    return out
+
+
+def block_properties(vp, vs, rho, samples, window, method="backus", guard=0,
+                     bounds=None):
     """Average the logs a half cycle either side of each interface.
 
     Parameters
@@ -97,7 +206,14 @@ def block_properties(vp, vs, rho, samples, window, method="backus", guard=0):
     guard : int
         Samples to skip immediately either side of the boundary, so a
         gradational ramp is excluded from both averages rather than pulling
-        them together.
+        them together.  Ignored where ``bounds`` supplies the window, since
+        those bounds already say exactly which samples belong to each side.
+    bounds : dict, optional
+        Explicit per-reflector windows from :func:`lobe_windows` —
+        ``upper_start``, ``upper_stop``, ``lower_start``, ``lower_stop`` and
+        ``resolved``.  Reflectors marked unresolved fall back to the fixed
+        ``window``, so a lobe that could not be found costs that reflector its
+        measured window rather than costing it an answer.
 
     Returns
     -------
@@ -125,13 +241,26 @@ def block_properties(vp, vs, rho, samples, window, method="backus", guard=0):
     out["n_upper"] = np.zeros(samples.size, dtype=int)
     out["n_lower"] = np.zeros(samples.size, dtype=int)
 
+    use_bounds = bounds is not None
+    if use_bounds:
+        resolved = np.asarray(bounds.get(
+            "resolved", np.ones(samples.size, dtype=bool)), dtype=bool)
+    out["from_lobe"] = np.zeros(samples.size, dtype=bool)
+
     for k, i in enumerate(samples):
         i = int(np.clip(i, 0, n - 2)) if n >= 2 else 0
 
-        hi_upper = max(i + 1 - guard, 0)                 # boundary sits at i | i+1
-        lo_upper = max(hi_upper - window, 0)
-        lo_lower = min(i + 1 + guard, n)
-        hi_lower = min(lo_lower + window, n)
+        if use_bounds and resolved[k]:
+            lo_upper = int(np.clip(bounds["upper_start"][k], 0, n))
+            hi_upper = int(np.clip(bounds["upper_stop"][k], 0, n))
+            lo_lower = int(np.clip(bounds["lower_start"][k], 0, n))
+            hi_lower = int(np.clip(bounds["lower_stop"][k], 0, n))
+            out["from_lobe"][k] = True
+        else:
+            hi_upper = max(i + 1 - guard, 0)             # boundary sits at i | i+1
+            lo_upper = max(hi_upper - window, 0)
+            lo_lower = min(i + 1 + guard, n)
+            hi_lower = min(lo_lower + window, n)
 
         if hi_upper > lo_upper:
             up = average(vp[lo_upper:hi_upper], vs[lo_upper:hi_upper],
@@ -149,7 +278,7 @@ def block_properties(vp, vs, rho, samples, window, method="backus", guard=0):
 
 def blocked_reflectivity(vp, vs, rho, samples, angles, window, method="backus",
                          guard=0, reflectivity_method="zoeppritz",
-                         mask_post_critical=True):
+                         mask_post_critical=True, bounds=None):
     """Reflectivity of each interface between its **blocked** layers.
 
     Blocks a half cycle either side of every interface, then computes
@@ -172,7 +301,7 @@ def blocked_reflectivity(vp, vs, rho, samples, angles, window, method="backus",
     angles = np.atleast_1d(np.asarray(angles, dtype=float))
     samples = np.atleast_1d(np.asarray(samples, dtype=int))
     blocked = block_properties(vp, vs, rho, samples, window=window, method=method,
-                               guard=guard)
+                               guard=guard, bounds=bounds)
 
     fn = _resolve_method(reflectivity_method)
     exact = fn is METHODS["zoeppritz"]

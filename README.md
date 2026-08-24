@@ -32,7 +32,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 | **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
-| **AVO Classification** | Per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. Layer properties come from half-cycle blocked layers by default rather than two adjacent samples, and a tuned-versus-untuned section shows what bed thickness does to each reflector's class. |
+| **AVO Classification** | Per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — and a tuned-versus-untuned section shows what bed thickness does to each reflector's class. |
 | **Rock Physics** | Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus Hertz-Mindlin soft-sand, stiff-sand and critical-porosity frames — raised dry-to-saturated through Gassmann on request. Then a **forward model** driven per-sample from VSH, PHIT and SW with a misfit readout, an optional **Monte Carlo** P10–P90 band, and **fluid substitution** at Batzle-Wang reservoir conditions. |
 
 ## Layout
@@ -50,7 +50,7 @@ avo_qi/
 │   ├── avo.py                  # A/B fits + classifier + background trend
 │   ├── attributes.py           # AI, SI, Vp/Vs, Poisson, LMR, EEI
 │   ├── rockphysics.py          # bounds, trends, dry-frame granular models
-│   ├── blocking.py             # half-cycle upscaling to seismic resolution
+│   ├── blocking.py             # lobe windows, Backus upscaling to seismic resolution
 │   ├── lithology.py            # VSH cutoffs, lithology pairs, GR transforms
 │   ├── mixing.py               # fluid and mineral mixing laws
 │   ├── gassmann.py             # fluid substitution, with a per-sample validity mask
@@ -89,6 +89,34 @@ Hashin-Shtrikman bounds, which is asserted in the tests.
 Both are on the *Rock Physics* page under **Mineral matrix** and **Pore
 fluid**, with the same saturations shown under every law so the spread is
 visible rather than hidden behind one number.
+
+## Blocking to the lobe
+
+An interface coefficient taken from two adjacent log samples is the true layer
+contrast only when the boundary is a step. Real boundaries are gradational, and
+then the contrast splits across several samples: no single interface carries it
+and the untuned response comes out far too weak. On the demo well the gap
+reaches **0.25 in Rpp**.
+
+The AVO Classification page therefore always blocks, and blocks on the
+reflector's **own lobe** on the full stack. A reflector shows up as a trough or
+a peak running from one zero crossing to the next; its **upper half**, from the
+crossing above down to the extremum, is what the layer above produced, and its
+**lower half** belongs to the layer beneath. The logs are averaged over each —
+by Backus, which is the correct elastic upscaling, or by an arithmetic mean.
+
+The window is measured on the data rather than assumed from the wavelet, so it
+narrows where interference squeezes the lobe and opens where the reflector
+stands alone. On the demo well the median lobe spans 17 samples against the 26
+of the fixed half cycle it replaces, which is why contrasts come out sharper.
+
+Two consequences are surfaced rather than hidden. A reflector with no
+resolvable lobe — buried in a neighbour's, or with no crossing in range — falls
+back to the fixed half-cycle window and is marked `fixed window` in the
+reflector table. And reflectors that **share** a lobe get the same blocked
+layers and the same A and B, because interfaces inside one lobe are not
+separable at that bandwidth; reporting different answers for them would be
+inventing resolution the data does not have.
 
 ## Zonation
 

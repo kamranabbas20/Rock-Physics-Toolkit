@@ -18,6 +18,7 @@ from avo_qi.core.blocking import (  # noqa: E402
     block_properties,
     blocked_reflectivity,
     half_cycle_samples,
+    lobe_windows,
 )
 from avo_qi.core.lithology import interface_lithology  # noqa: E402
 from avo_qi.core.zones import zone_of_interface  # noqa: E402
@@ -90,86 +91,146 @@ if angles.size < 2:
     st.error("At least two angles are needed for an intercept–gradient fit.")
     st.stop()
 
+
+def _rc_at(reference, samples, values):
+    """A full-length RC matrix carrying ``values`` at ``samples``, else zero."""
+    out = np.zeros_like(reference)
+    out[np.asarray(samples, dtype=int), :] = values
+    return out
+
+
 rc = reflectivity_series(vp, vs, rho, angles, method=settings.method)
 
 # --- how the untuned response is measured ------------------------------------
 st.subheader("Untuned response")
-c1, c2, c3 = st.columns([2, 1, 1])
-blocking_mode = c1.radio(
-    "Layer properties from",
-    ["Half-cycle blocked layers", "Adjacent samples"],
-    horizontal=True,
-    help="Two adjacent samples carry the true layer contrast only when the "
-         "boundary is a step. On a gradational boundary the contrast splits "
-         "across several samples and no single interface carries it.",
+st.caption(
+    "Layer properties come from each reflector's **own lobe** on the full "
+    "stack. For a trough, the upper half — from the zero crossing above down "
+    "to the extremum — gives the layer above, and the lower half gives the "
+    "layer below; the logs are averaged over each. The window is therefore "
+    "measured on the data rather than assumed from the wavelet, so it narrows "
+    "where interference squeezes the lobe and opens where the reflector stands "
+    "alone."
 )
-use_blocking = blocking_mode.startswith("Half-cycle")
-block_method = c2.selectbox("Average", ["backus", "mean"], disabled=not use_blocking,
+c1, c2 = st.columns(2)
+block_method = c1.selectbox("Average", ["backus", "mean"],
                             help="Backus is the correct elastic upscaling; the "
                                  "arithmetic mean is easier to read but is not "
                                  "what a wave does.")
-guard = c3.number_input("Guard (samples)", 0, 20, 2, 1, disabled=not use_blocking,
-                        help="Skip this many samples either side of the boundary "
-                             "so a gradational ramp is excluded from both averages.")
+guard = c2.number_input(
+    "Guard (samples)", 0, 20, 2, 1,
+    help="Only used where a lobe cannot be found and the fixed half-cycle "
+         "window stands in — the lobe halves meet at the extremum and need no "
+         "gap.")
 
 _, page_wavelet = build_wavelet(settings)
 window = half_cycle_samples(apparent_period(page_wavelet, settings.dt), settings.dt)
 tuning_twt = tuning_thickness_from_wavelet(page_wavelet, settings.dt)
 
+# The gather is built once here rather than again further down: the full stack
+# is what the lobes are read from, so blocking needs it before anything else.
+page_gather = build_gather(vp, vs, rho, angles, page_wavelet,
+                           dt=settings.dt, method=settings.method)
+page_full_stack = full_stack(page_gather)
+
 blocked_props = None
+lobe_bounds = None
 table = reflector_avo(
     rc, vp, vs, rho, angles, method=settings.method, both=True,
     depth=depth, twt=twt, threshold=settings.threshold, a_tol=settings.a_tol,
 )
 
-if use_blocking and not table.empty:
-    adjacent = table[["A_shuey", "B_shuey", "avo_class"]].rename(
-        columns={"A_shuey": "A_adjacent", "B_shuey": "B_adjacent",
-                 "avo_class": "class_adjacent"}).reset_index(drop=True)
-    blocked = blocked_reflectivity(
-        vp, vs, rho, table["sample"].to_numpy(), angles, window=window,
-        method=block_method, guard=int(guard), reflectivity_method=settings.method,
+if not table.empty:
+    samples = table["sample"].to_numpy()
+    # The adjacent-sample pass is kept only to seed the polarity of each lobe
+    # and to measure what the lobe window changed; it is no longer offered as
+    # a way to classify.
+    fixed = blocked_reflectivity(
+        vp, vs, rho, samples, angles, window=window, method=block_method,
+        guard=int(guard), reflectivity_method=settings.method,
     )
-    rc_blocked = np.zeros_like(rc)
-    rc_blocked[table["sample"].to_numpy(), :] = np.nan_to_num(blocked["rc"], nan=0.0)
+    fixed_table = reflector_avo(
+        _rc_at(rc, samples, fixed["rc"]),
+        vp, vs, rho, angles, method=settings.method, both=False,
+        depth=depth, twt=twt, samples=samples, a_tol=settings.a_tol,
+        mask_post_critical=False,
+    )
+
+    dominant = dominant_frequency(page_wavelet, settings.dt) or 30.0
+    search = max(int(round(0.25 / dominant / settings.dt)), 2)
+    lobe_extrema = trace_extrema(page_full_stack, samples, half_window=search,
+                                 polarity=np.sign(table["R0"].to_numpy(float)))
+    lobe_bounds = lobe_windows(page_full_stack, lobe_extrema["index"],
+                               polarity=np.sign(table["R0"].to_numpy(float)),
+                               max_half_width=2 * window)
+
+    blocked = blocked_reflectivity(
+        vp, vs, rho, samples, angles, window=window, method=block_method,
+        guard=int(guard), reflectivity_method=settings.method,
+        bounds=lobe_bounds,
+    )
     blocked_mask = np.isnan(blocked["rc"])
 
-    rc_for_fit = rc_blocked.copy()
-    rc_for_fit[table["sample"].to_numpy(), :] = blocked["rc"]
+    rc_for_fit = _rc_at(rc, samples, blocked["rc"])
     # Kept for the reflector detail panel, which has to show the *same* layers
     # the fit was made on.
     blocked_props = blocked
     table = reflector_avo(
         rc_for_fit, vp, vs, rho, angles, method=settings.method, both=True,
-        depth=depth, twt=twt, samples=table["sample"].to_numpy(),
+        depth=depth, twt=twt, samples=samples,
         a_tol=settings.a_tol, mask_post_critical=False,
     )
     table["critical_angle"] = blocked["critical_angle"]
     table["n_angles"] = (~blocked_mask).sum(axis=1)
-    table = pd.concat([table, adjacent], axis=1)
-    table["dA_blocking"] = table["A_shuey"] - table["A_adjacent"]
+    table["blocking"] = np.where(blocked["from_lobe"], "lobe", "fixed window")
+    table["lobe_samples"] = (
+        np.asarray(blocked["n_upper"]) + np.asarray(blocked["n_lower"]))
+    table["A_fixed"] = fixed_table["A_shuey"].to_numpy()
+    table["class_fixed"] = fixed_table["avo_class"].to_numpy()
+    table["dA_blocking"] = table["A_shuey"] - table["A_fixed"]
 
-    moved = int((table["avo_class"] != table["class_adjacent"]).sum())
+    from_lobe = int(np.count_nonzero(blocked["from_lobe"]))
+    moved = int((table["avo_class"] != table["class_fixed"]).sum())
+    median_lobe = float(np.median(table["lobe_samples"])) if len(table) else 0.0
     c1, c2, c3 = st.columns(3)
-    c1.metric("Blocking window", f"±{window} samples",
-              f"{window * settings.dt * 1000:.0f} ms — a half cycle")
+    # No deltas here: these are descriptions, and Streamlit renders a delta
+    # with an arrow, which would read as "up is better" on numbers that have
+    # no direction.
+    c1.metric("Median lobe window", f"{median_lobe:.0f} samples")
     c2.metric("Largest change in A", f"{table['dA_blocking'].abs().max():+.4f}")
-    c3.metric("Reflectors that change class", moved,
-              delta=None if moved == 0 else "vs adjacent samples",
-              delta_color="off")
+    c3.metric("Reflectors that change class", moved)
+    st.caption(
+        f"The median lobe spans {median_lobe * settings.dt * 1000:.0f} ms across "
+        f"both halves, against the ±{window}-sample "
+        f"({2 * window * settings.dt * 1000:.0f} ms) fixed half cycle it "
+        "replaces. The two right-hand figures compare the lobe window with "
+        "that fixed one."
+    )
+
+    if from_lobe < len(table):
+        st.warning(
+            f"{len(table) - from_lobe} of {len(table)} reflector(s) have no "
+            "resolvable lobe on the full stack — buried in a neighbour's, or "
+            f"with no zero crossing within {2 * window} samples. Those fall "
+            f"back to the fixed ±{window}-sample half cycle and are marked "
+            "`fixed window` in the reflector table.",
+            icon=":material/warning:")
     if moved:
         st.info(
-            f"{moved} reflector(s) classify differently once each side is averaged "
-            "over a half cycle. On a gradational boundary the adjacent-sample "
-            "coefficient is the weaker, not the truer, of the two.",
-            icon=":material/info:",
-        )
-else:
-    st.caption(
-        "Using two adjacent log samples per interface. Exact for a blocky log; "
-        "on a gradational boundary the contrast splits across samples and this "
-        "under-reads it."
-    )
+            f"{moved} reflector(s) classify differently on their own lobe than "
+            "on a fixed half cycle. The lobe is the narrower window, so it "
+            "keeps more of the contrast instead of averaging it away.",
+            icon=":material/info:")
+
+    shared = len(lobe_extrema["index"]) - len(np.unique(lobe_extrema["index"]))
+    if shared:
+        st.info(
+            f"{shared} reflector(s) share a lobe with a neighbour, so they get "
+            "the same blocked layers and the same A and B. That is what the "
+            "seismic sees: interfaces inside one lobe are not separable at "
+            "this bandwidth, and reporting different answers for them would "
+            "be inventing resolution the data does not have.",
+            icon=":material/info:")
 st.divider()
 
 if table.empty:
@@ -302,8 +363,8 @@ st.caption(
 confidence_on = st.checkbox("Estimate class probabilities", value=False,
                             key="avo_confidence_on")
 st.caption(
-    f"Reclassified on the same **{blocking_mode.lower()}** the labels above "
-    "use, so the odds and the label describe the same interface."
+    "Reclassified on the same **lobe windows** the labels above use, so the "
+    "odds and the label describe the same interface."
 )
 q1, q2, q3, q4 = st.columns(4)
 n_draws = q1.slider("Realisations", 50, 1000, 300, 50, disabled=not confidence_on)
@@ -320,32 +381,29 @@ if confidence_on and len(table):
         realisations = perturb_logs(vp, vs, rho, n_realisations=int(n_draws),
                                     seed=0, vp_pct=pct_vp, vs_pct=pct_vs,
                                     rho_pct=pct_rho)
-        if use_blocking:
-            # The label above is fitted to *blocked* layers, so the odds must
-            # be too. Classifying adjacent samples here would describe a
-            # different interface, and every disagreement with the label would
-            # be that mismatch rather than a finding. Re-blocking each
-            # realisation also carries the noise through the averaging, which
-            # is where most of it cancels.
-            keys = ("vp_upper", "vs_upper", "rho_upper",
-                    "vp_lower", "vs_lower", "rho_lower")
-            stacked = {k: np.empty((int(n_draws), reflector_samples.size))
-                       for k in keys}
-            for r in range(int(n_draws)):
-                one = block_properties(
-                    realisations["VP"][r], realisations["VS"][r],
-                    realisations["RHOB"][r], reflector_samples,
-                    window=window, method=block_method, guard=int(guard))
-                for k in keys:
-                    stacked[k][r] = one[k]
-            probabilities = class_probabilities_from_layers(
-                (stacked["vp_upper"], stacked["vs_upper"], stacked["rho_upper"]),
-                (stacked["vp_lower"], stacked["vs_lower"], stacked["rho_lower"]),
-                angles, samples=reflector_samples, a_tol=settings.a_tol)
-        else:
-            probabilities = class_probabilities(
-                realisations["VP"], realisations["VS"], realisations["RHOB"],
-                samples=reflector_samples, angles=angles, a_tol=settings.a_tol)
+        # The label above is fitted to the lobe windows, so the odds must be
+        # too: classify a different interface and every disagreement with the
+        # label is that mismatch rather than a finding. The lobe bounds are
+        # held fixed across realisations — they come from the full stack of the
+        # unperturbed logs, which is the interface being asked about — while
+        # re-averaging each realisation carries the noise through the window,
+        # where most of it cancels.
+        keys = ("vp_upper", "vs_upper", "rho_upper",
+                "vp_lower", "vs_lower", "rho_lower")
+        stacked = {k: np.empty((int(n_draws), reflector_samples.size))
+                   for k in keys}
+        for r in range(int(n_draws)):
+            one = block_properties(
+                realisations["VP"][r], realisations["VS"][r],
+                realisations["RHOB"][r], reflector_samples,
+                window=window, method=block_method, guard=int(guard),
+                bounds=lobe_bounds)
+            for k in keys:
+                stacked[k][r] = one[k]
+        probabilities = class_probabilities_from_layers(
+            (stacked["vp_upper"], stacked["vs_upper"], stacked["rho_upper"]),
+            (stacked["vp_lower"], stacked["vs_lower"], stacked["rho_lower"]),
+            angles, samples=reflector_samples, a_tol=settings.a_tol)
 
     merged = table[["sample"]].merge(probabilities, on="sample", how="left")
     agree = (merged["modal_class"].to_numpy() == table["avo_class"].to_numpy())
@@ -495,9 +553,9 @@ st.caption(
 )
 
 # The gather this page's trace is drawn from.
-_, detail_wavelet = build_wavelet(settings)
-detail_gather = build_gather(vp, vs, rho, angles, detail_wavelet,
-                             dt=settings.dt, method=settings.method)
+# Built once near the top, where the lobes were read from it.
+detail_wavelet = page_wavelet
+detail_gather = page_gather
 
 trace_options = ["Full stack", "Near", "Mid", "Far"] + [f"{a:.0f}°" for a in angles]
 trace_choice = st.selectbox("Trace", trace_options, index=0)
@@ -620,7 +678,11 @@ with detail_col:
                  blocked_props["rho_upper"][pick], blocked_props["vp_lower"][pick],
                  blocked_props["vs_lower"][pick], blocked_props["rho_lower"][pick])
         modelled = np.asarray(blocked_props["rc"])[pick, :]
-        layer_source = f"half-cycle blocked layers (±{window} samples)"
+        rows = int(blocked_props["n_upper"][pick] + blocked_props["n_lower"][pick])
+        layer_source = (
+            f"the reflector's own lobe ({rows} samples across both halves)"
+            if blocked_props["from_lobe"][pick]
+            else f"the fallback fixed half cycle (±{window} samples)")
     else:
         layer = (vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1]) \
             if i + 1 < vp.size else None
@@ -673,6 +735,21 @@ with detail_col:
                       annotation_position="top left")
 
     fig.add_hline(y=0, line=dict(color="#bbb", width=1))
+    # Scale to what was fitted.  The unfitted adjacent-sample curve runs past
+    # its own critical angle, where the real continuation of the exact solution
+    # spikes; left to set the axis it squashes the actual data into a strip.
+    fitted_values = np.concatenate([
+        np.asarray(modelled, dtype=float).ravel(),
+        row["A_shuey"] + row["B_shuey"] * sin2_fine,
+        row["A_ar"] + row["B_ar"] * sin2_fine,
+    ])
+    fitted_values = fitted_values[np.isfinite(fitted_values)]
+    if fitted_values.size:
+        span = float(np.ptp(fitted_values)) or max(abs(float(fitted_values[0])), 0.05)
+        low = float(fitted_values.min()) - 0.35 * span
+        high = float(fitted_values.max()) + 0.35 * span
+        fig.update_yaxes(range=[low, high])
+
     fig.update_layout(xaxis_title="Incidence angle (deg)", yaxis_title="Rpp",
                       height=460, margin=dict(l=60, r=20, t=30, b=45),
                       legend=dict(orientation="h", yanchor="bottom", y=1.02))
