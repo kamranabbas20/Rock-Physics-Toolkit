@@ -875,6 +875,96 @@ class TestTheTracePanelBesideTheDetail:
         assert not [s for s in fig.layout.shapes
                     if s.fillcolor in LOBE_COLOURS.values()]
 
+    def test_the_trace_is_filled_red_left_and_blue_right(self):
+        """Variable area in the usual seismic convention: troughs red, peaks
+        blue. Each side needs its own baseline, because `fill="tonextx"` fills
+        to the previous trace and one shared zero line cannot serve both."""
+        from avo_qi.ui import (TRACE_FILL_NEGATIVE, TRACE_FILL_POSITIVE,
+                               classified_trace_figure)
+
+        trace, twt, table, extrema, _ = self._inputs()
+        fig = classified_trace_figure(trace, twt, table, extrema)
+
+        filled = [t for t in fig.data if getattr(t, "fill", None) == "tonextx"]
+        assert len(filled) == 2
+        by_colour = {t.fillcolor: t for t in filled}
+        assert set(by_colour) == {TRACE_FILL_NEGATIVE, TRACE_FILL_POSITIVE}
+        # The red one carries only the negative half, the blue only the positive.
+        assert (np.asarray(by_colour[TRACE_FILL_NEGATIVE].x) <= 0).all()
+        assert (np.asarray(by_colour[TRACE_FILL_POSITIVE].x) >= 0).all()
+        # ...and between them they still describe the whole trace.
+        rebuilt = (np.asarray(by_colour[TRACE_FILL_NEGATIVE].x)
+                   + np.asarray(by_colour[TRACE_FILL_POSITIVE].x))
+        assert np.allclose(rebuilt, trace)
+
+    def test_the_logs_are_drawn_left_to_right_in_the_order_given(self):
+        from avo_qi.ui import classified_trace_figure
+
+        trace, twt, table, extrema, _ = self._inputs()
+        logs = {"VSH (v/v)": np.linspace(0, 1, 40),
+                "Vp (m/s)": np.full(40, 2500.0),
+                "Vs (m/s)": np.full(40, 1200.0)}
+        fig = classified_trace_figure(trace, twt, table, extrema, logs=logs)
+        titles = [a.text for a in fig.layout.annotations]
+        assert titles[:3] == list(logs)
+        assert titles[3] == "Trace"
+
+
+class TestTheVshTrack:
+    """VSH leads the tracks, because it is what the lithology pair is cut from."""
+
+    @staticmethod
+    def _frame(**columns):
+        import pandas as pd
+
+        base = {"VP": np.full(20, 2500.0), "VS": np.full(20, 1200.0),
+                "RHOB": np.full(20, 2.3)}
+        base.update(columns)
+        return pd.DataFrame(base)
+
+    def test_a_well_with_vsh_puts_it_first(self):
+        from avo_qi.ui import Settings, detail_log_tracks
+
+        tracks = detail_log_tracks(self._frame(VSH=np.linspace(0, 1, 20)), Settings())
+        assert list(tracks) == ["VSH (v/v)", "Vp (m/s)", "Vs (m/s)", "RHOB (g/cc)"]
+
+    def test_a_well_with_only_gr_says_the_vsh_is_derived(self):
+        from avo_qi.ui import Settings, detail_log_tracks
+
+        tracks = detail_log_tracks(self._frame(GR=np.linspace(20, 140, 20)),
+                                   Settings())
+        assert list(tracks)[0] == "VSH from GR (v/v)"
+        assert np.isfinite(tracks["VSH from GR (v/v)"]).all()
+
+    def test_a_well_with_neither_gets_no_vsh_track(self):
+        """Rather than an empty one, which would read as a curve of zeros."""
+        from avo_qi.ui import Settings, detail_log_tracks
+
+        tracks = detail_log_tracks(self._frame(), Settings())
+        assert not any(k.startswith("VSH") for k in tracks)
+        assert list(tracks)[0] == "Vp (m/s)"
+
+    def test_the_real_well_shows_its_own_vsh_curve(self):
+        """15/9-19-A carries VSH on 2812 of 3905 samples, so the track must be
+        the curve rather than a GR derivation."""
+        import os
+
+        from avo_qi.io.loader import read_well, standardise
+        from avo_qi.ui import Settings, detail_log_tracks
+
+        las = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "data", "15_9_19_A.las")
+        raw, units = read_well(las)
+        well = standardise(raw, units=units, name="15/9-19-A")
+        tracks = detail_log_tracks(well.df, Settings())
+        assert list(tracks)[0] == "VSH (v/v)"
+        vsh = tracks["VSH (v/v)"]
+        assert np.isfinite(vsh).sum() == 2812
+        assert np.nanmax(vsh) <= 1.0 and np.nanmin(vsh) >= 0.0
+
+    def test_the_avo_page_still_runs_with_the_extra_track(self, avo_page):
+        assert not avo_page.exception
+
     def test_the_page_offers_all_three_as_toggles(self, avo_page):
         labels = {c.label for c in avo_page.checkbox}
         assert {"Vp, Vs and RHOB tracks", "Gather", "Lobe halves"} <= labels

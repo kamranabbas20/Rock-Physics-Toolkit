@@ -17,9 +17,12 @@ import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from avo_qi.core.synthetic import angle_stack, build_gather, full_stack  # noqa: E402
+from avo_qi.core.tuning import tuning_thickness_from_wavelet  # noqa: E402
+from avo_qi.core.wavelet import bandwidth, dominant_frequency  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     add_derived_curves,
     build_wavelet,
+    wavelet_spectrum_figure,
     case_colour,
     gather_figure,
     log_track_figure,
@@ -38,14 +41,27 @@ st.subheader("Wavelet")
 wt, wavelet = build_wavelet(settings)
 meta = settings.wavelet_meta or {}
 
-c1, c2 = st.columns([2, 1])
+c1, cs, c2 = st.columns([2, 2, 1])
 with c1:
+    st.caption("**Waveform**")
     fig = go.Figure(go.Scatter(x=wt, y=wavelet, mode="lines", line=dict(width=2)))
     fig.add_hline(y=0, line=dict(color="#999", width=1))
     fig.add_vline(x=0, line=dict(color="#999", width=1, dash="dot"))
     fig.update_layout(xaxis_title="Time (s)", yaxis_title="Amplitude", height=280,
                       margin=dict(l=60, r=20, t=20, b=40))
     st.plotly_chart(fig, use_container_width=True)
+with cs:
+    # The waveform and its spectrum are the same object seen two ways, and the
+    # spectrum is the half that says what the synthetic can resolve.
+    st.caption("**Amplitude spectrum**")
+    st.plotly_chart(wavelet_spectrum_figure(wavelet, settings.dt),
+                    use_container_width=True)
+    _low, _high = bandwidth(wavelet, settings.dt)
+    st.caption(
+        f"Peak {dominant_frequency(wavelet, settings.dt):.0f} Hz · "
+        f"-6 dB band {_low:.0f}-{_high:.0f} Hz · "
+        f"tuning at {tuning_thickness_from_wavelet(wavelet, settings.dt) * 1000:.0f} ms"
+    )
 with c2:
     st.metric("Samples", wavelet.size)
     st.metric("Length", f"{(wavelet.size - 1) * settings.dt * 1000:.0f} ms")

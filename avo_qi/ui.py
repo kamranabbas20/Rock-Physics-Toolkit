@@ -647,6 +647,12 @@ def fluid_vector_crossplot(comparison, reference, targets, a_tol=0.02, height=64
     return fig
 
 
+#: Variable-area fill either side of the zero line, in the usual seismic
+#: convention: troughs (left of zero) red, peaks (right of it) blue.  Muted
+#: enough that the class-coloured markers still read on top of them.
+TRACE_FILL_NEGATIVE = "rgba(198,40,40,0.55)"
+TRACE_FILL_POSITIVE = "rgba(21,101,192,0.55)"
+
 #: Fills for the two halves of a reflector's lobe.  Deliberately not the class
 #: palette: these say *which samples were averaged*, not what the answer was.
 LOBE_COLOURS = {"upper": "rgba(31,119,180,0.16)", "lower": "rgba(214,124,26,0.16)"}
@@ -736,15 +742,20 @@ def classified_trace_figure(trace, twt, table, extrema, selected=None, height=90
                           "<br>amp %{z:.4f}<extra></extra>",
         ), row=1, col=gather_col)
 
-    fig.add_trace(go.Scatter(
-        x=np.zeros_like(twt), y=twt, mode="lines", line=dict(width=0),
-        showlegend=False, hoverinfo="skip",
-    ), row=1, col=trace_col)
-    fig.add_trace(go.Scatter(
-        x=np.maximum(trace, 0.0), y=twt, mode="lines", line=dict(width=0),
-        fill="tonextx", fillcolor="rgba(20,20,20,0.75)",
-        showlegend=False, hoverinfo="skip",
-    ), row=1, col=trace_col)
+    # Variable area, filled both ways: red left of the zero line, blue right.
+    # Each half needs its own baseline trace because ``fill="tonextx"`` fills
+    # to the *previous* trace, so one shared zero line cannot serve both.
+    for side, colour in ((np.maximum, TRACE_FILL_POSITIVE),
+                         (np.minimum, TRACE_FILL_NEGATIVE)):
+        fig.add_trace(go.Scatter(
+            x=np.zeros_like(twt), y=twt, mode="lines", line=dict(width=0),
+            showlegend=False, hoverinfo="skip",
+        ), row=1, col=trace_col)
+        fig.add_trace(go.Scatter(
+            x=side(trace, 0.0), y=twt, mode="lines", line=dict(width=0),
+            fill="tonextx", fillcolor=colour,
+            showlegend=False, hoverinfo="skip",
+        ), row=1, col=trace_col)
     fig.add_trace(go.Scatter(
         x=trace, y=twt, mode="lines", line=dict(color="#222", width=1.2),
         name="trace", showlegend=False,
@@ -958,17 +969,99 @@ GR_METHOD_LABELS = {
 }
 
 
+def wavelet_spectrum_figure(w, dt, height=280, max_hz=None):
+    """Amplitude spectrum of the wavelet, with its peak and -6 dB band marked.
+
+    The bandwidth is what sets everything downstream — the lobe each reflector
+    gets blocked on, the thickness at which a bed tunes, whether two interfaces
+    are separable at all — so it is worth being able to see rather than infer
+    from a peak-frequency number.
+    """
+    from avo_qi.core.wavelet import amplitude_spectrum, bandwidth, dominant_frequency
+
+    freqs, amplitude = amplitude_spectrum(w, dt)
+    fig = go.Figure()
+    if freqs.size == 0:
+        fig.update_layout(height=height)
+        return fig
+
+    peak = dominant_frequency(w, dt)
+    low, high = bandwidth(w, dt)
+
+    # Show to a little past the band rather than to Nyquist, which is mostly
+    # empty axis on a wavelet this short.
+    if max_hz is None:
+        max_hz = min(float(freqs[-1]),
+                     (high if np.isfinite(high) else peak * 3.0) * 1.6 or float(freqs[-1]))
+
+    fig.add_trace(go.Scatter(
+        x=freqs, y=amplitude, mode="lines", name="amplitude",
+        line=dict(color="#1565c0", width=2), fill="tozeroy",
+        fillcolor="rgba(21,101,192,0.16)",
+        hovertemplate="%{x:.1f} Hz<br>%{y:.3f}<extra></extra>",
+    ))
+    if np.isfinite(low) and np.isfinite(high):
+        fig.add_vrect(x0=low, x1=high, fillcolor="#1565c0", opacity=0.07,
+                      line_width=0, layer="below")
+        fig.add_hline(y=10 ** (-6 / 20), line=dict(color="#999", width=1, dash="dot"),
+                      annotation_text="-6 dB", annotation_position="right",
+                      annotation_font_size=10)
+    if peak > 0:
+        fig.add_vline(x=peak, line=dict(color="#c62828", width=1.5, dash="dash"),
+                      annotation_text=f"{peak:.0f} Hz",
+                      annotation_position="top right", annotation_font_size=11)
+
+    fig.update_layout(
+        xaxis_title="Frequency (Hz)", yaxis_title="Normalised amplitude",
+        xaxis_range=[0, max_hz], yaxis_range=[0, 1.08], height=height,
+        margin=dict(l=60, r=20, t=20, b=40), showlegend=False,
+    )
+    return fig
+
+
+def vsh_series(frame, settings):
+    """Shale volume per sample — the curve if there is one, else from GR.
+
+    Returns ``(values, source)``, where ``source`` is ``"VSH"``, ``"GR"`` or
+    ``None``.  A well carrying neither gets all-NaN rather than zeros, so a
+    missing curve reads as *unknown* on a plot instead of as clean sand.
+    """
+    if "VSH" in frame.columns and np.isfinite(frame["VSH"].to_numpy(float)).any():
+        return frame["VSH"].to_numpy(float), "VSH"
+    if "GR" in frame.columns and np.isfinite(frame["GR"].to_numpy(float)).any():
+        return (vsh_from_gr(frame["GR"].to_numpy(float), method=settings.gr_method),
+                "GR")
+    return np.full(len(frame), np.nan), None
+
+
+def detail_log_tracks(frame, settings):
+    """Ordered ``{title: values}`` for the tracks beside the classified trace.
+
+    VSH leads, on the far left, because it is what the lithology pair and the
+    sand/shale reading are cut from — the reflector table's ``shale over sand``
+    is this curve, so it belongs next to the elastic logs rather than only
+    behind them.  A well carrying neither VSH nor GR simply gets no such track
+    instead of an empty one.
+    """
+    tracks = {}
+    vsh, source = vsh_series(frame, settings)
+    if source is not None:
+        tracks["VSH (v/v)" if source == "VSH" else "VSH from GR (v/v)"] = vsh
+    for title, name in (("Vp (m/s)", "VP"), ("Vs (m/s)", "VS"),
+                        ("RHOB (g/cc)", "RHOB")):
+        if name in frame.columns:
+            tracks[title] = frame[name].to_numpy(float)
+    return tracks
+
+
 def lithology_labels(frame, settings):
     """Lithology per sample for a well frame, from VSH or derived from GR.
 
     Returns all-``undefined`` when the well carries neither curve, so a
     missing curve never silently reads as clean sand.
     """
-    if "VSH" in frame.columns and np.isfinite(frame["VSH"].to_numpy(float)).any():
-        vsh = frame["VSH"].to_numpy(float)
-    elif "GR" in frame.columns and np.isfinite(frame["GR"].to_numpy(float)).any():
-        vsh = vsh_from_gr(frame["GR"].to_numpy(float), method=settings.gr_method)
-    else:
+    vsh, source = vsh_series(frame, settings)
+    if source is None:
         return np.full(len(frame), UNDEFINED, dtype=object)
     return classify_lithology(vsh, cutoffs=settings.vsh_cutoffs)
 

@@ -251,6 +251,71 @@ class TestGatherSignature:
 
 
 # ---------------------------------------------------------------- test 6 ----
+class TestAmplitudeSpectrum:
+    """What the wavelet can resolve, read off its spectrum."""
+
+    def test_a_ricker_peaks_at_its_nominal_frequency(self):
+        from avo_qi.core.wavelet import amplitude_spectrum, ricker
+
+        for freq in (20.0, 30.0, 50.0):
+            _, w = ricker(freq, 0.001)
+            freqs, amplitude = amplitude_spectrum(w, 0.001)
+            assert abs(freqs[int(np.argmax(amplitude))] - freq) < 1.0
+
+    def test_the_amplitude_is_normalised_to_its_own_peak(self):
+        """The shape is the point; the level depends on how the wavelet was
+        scaled, which says nothing about bandwidth."""
+        from avo_qi.core.wavelet import amplitude_spectrum, ricker
+
+        _, w = ricker(30.0, 0.001)
+        for scale in (1.0, 1e-4, 250.0):
+            _, amplitude = amplitude_spectrum(w * scale, 0.001)
+            assert amplitude.max() == pytest.approx(1.0)
+            assert (amplitude >= 0).all()
+
+    def test_padding_smooths_without_inventing_bandwidth(self):
+        """Zero-padding interpolates the spectrum; it cannot move the band."""
+        from avo_qi.core.wavelet import amplitude_spectrum, bandwidth, ricker
+
+        _, w = ricker(30.0, 0.001)
+        coarse = bandwidth(w, 0.001)
+        fine_f, _ = amplitude_spectrum(w, 0.001, pad=32)
+        raw_f, _ = amplitude_spectrum(w, 0.001, pad=1)
+        assert fine_f.size > raw_f.size
+        assert coarse[0] == pytest.approx(bandwidth(w, 0.001)[0])
+
+    def test_the_band_scales_with_the_peak_frequency(self):
+        from avo_qi.core.wavelet import bandwidth, ricker
+
+        widths = []
+        for freq in (20.0, 30.0, 50.0):
+            low, high = bandwidth(ricker(freq, 0.001)[1], 0.001)
+            assert 0 < low < freq < high
+            widths.append(high - low)
+        assert widths == sorted(widths)
+
+    def test_an_ormsby_band_matches_the_corners_it_was_built_from(self):
+        from avo_qi.core.wavelet import bandpass_ormsby, bandwidth
+
+        _, w = bandpass_ormsby(5.0, 10.0, 60.0, 80.0, 0.001, 0.128)
+        low, high = bandwidth(w, 0.001)
+        # The -6 dB edges sit inside the outer corners and outside the flat
+        # passband, which is what the taper does.
+        assert 5.0 <= low <= 10.0
+        assert 60.0 <= high <= 80.0
+
+    def test_a_degenerate_wavelet_is_not_an_error(self):
+        from avo_qi.core.wavelet import amplitude_spectrum, bandwidth
+
+        for bad in (np.array([]), np.array([1.0])):
+            freqs, amplitude = amplitude_spectrum(bad, 0.001)
+            assert freqs.size == 0 and amplitude.size == 0
+            assert np.isnan(bandwidth(bad, 0.001)).all()
+        # An all-zero wavelet has a peak of zero and must not divide by it.
+        freqs, amplitude = amplitude_spectrum(np.zeros(64), 0.001)
+        assert np.isfinite(amplitude).all()
+
+
 class TestWavelet:
     """Acceptance test 6: the Ricker wavelet is zero-phase with unit peak."""
 

@@ -16,6 +16,8 @@ __all__ = [
     "bandpass_ormsby",
     "load_wavelet",
     "is_zero_phase",
+    "amplitude_spectrum",
+    "bandwidth",
     "dominant_frequency",
 ]
 
@@ -114,14 +116,70 @@ def symmetry_error(w):
     return float(np.sqrt(np.mean((w - w[::-1]) ** 2)) / peak)
 
 
+def amplitude_spectrum(w, dt, pad=8):
+    """Amplitude spectrum of a wavelet — ``(frequency_hz, amplitude)``.
+
+    The amplitude is normalised to its own peak, because what is being read
+    off a wavelet spectrum is the *shape* — where the energy sits and how far
+    it extends — not an absolute level that depends on how the wavelet was
+    scaled.
+
+    ``pad`` zero-pads by that factor before transforming.  A wavelet is short,
+    so its raw spectrum is sampled at only a handful of frequencies and reads
+    as a jagged line; padding interpolates it onto a smooth curve without
+    inventing bandwidth, since zero-padding cannot add information.
+    """
+    w = np.asarray(w, dtype=float).ravel()
+    dt = float(dt)
+    if w.size < 2 or dt <= 0:
+        return np.array([]), np.array([])
+
+    n = int(max(w.size * max(int(pad), 1), w.size))
+    spec = np.abs(np.fft.rfft(w, n=n))
+    freqs = np.fft.rfftfreq(n, d=dt)
+
+    peak = float(np.max(spec)) if spec.size else 0.0
+    return freqs, (spec / peak if peak > 0 else spec)
+
+
+def bandwidth(w, dt, level_db=-6.0):
+    """Frequencies where the spectrum falls to ``level_db`` of its peak.
+
+    Returns ``(low_hz, high_hz)``, the conventional way of quoting a
+    wavelet's usable band.  Edges are linearly interpolated between spectral
+    samples rather than snapped to the nearest one.
+    """
+    freqs, amplitude = amplitude_spectrum(w, dt)
+    if freqs.size == 0:
+        return float("nan"), float("nan")
+
+    threshold = 10.0 ** (float(level_db) / 20.0)
+    above = amplitude >= threshold
+    if not above.any():
+        return float("nan"), float("nan")
+
+    first, last = int(np.argmax(above)), int(len(above) - 1 - np.argmax(above[::-1]))
+
+    def crossing(inside, outside):
+        """Linear interpolation of the threshold between two samples."""
+        a0, a1 = amplitude[outside], amplitude[inside]
+        if a1 == a0:
+            return float(freqs[inside])
+        t = (threshold - a0) / (a1 - a0)
+        return float(freqs[outside] + t * (freqs[inside] - freqs[outside]))
+
+    low = float(freqs[0]) if first == 0 else crossing(first, first - 1)
+    high = (float(freqs[-1]) if last == len(above) - 1
+            else crossing(last, last + 1))
+    return low, high
+
+
 def dominant_frequency(w, dt):
     """Amplitude-spectrum peak frequency of a wavelet, in Hz."""
-    w = np.asarray(w, dtype=float)
-    if w.size < 2:
+    freqs, amplitude = amplitude_spectrum(w, dt)
+    if freqs.size == 0:
         return 0.0
-    spec = np.abs(np.fft.rfft(w))
-    freqs = np.fft.rfftfreq(w.size, d=dt)
-    return float(freqs[int(np.argmax(spec))])
+    return float(freqs[int(np.argmax(amplitude))])
 
 
 def _read_wavelet_file(path):

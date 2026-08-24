@@ -57,6 +57,8 @@ from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     ab_crossplot,
     lithology_labels,
+    detail_log_tracks,
+    wavelet_spectrum_figure,
     apply_zone_filter,
     zone_labels,
     build_wavelet,
@@ -128,6 +130,19 @@ guard = c2.number_input(
 
 _, page_wavelet = build_wavelet(settings)
 window = half_cycle_samples(apparent_period(page_wavelet, settings.dt), settings.dt)
+
+with st.expander("Wavelet amplitude spectrum"):
+    from avo_qi.core.wavelet import bandwidth as _bandwidth  # noqa: E402
+
+    _low, _high = _bandwidth(page_wavelet, settings.dt)
+    st.plotly_chart(wavelet_spectrum_figure(page_wavelet, settings.dt),
+                    use_container_width=True)
+    st.caption(
+        f"Peak at {dominant_frequency(page_wavelet, settings.dt):.0f} Hz, "
+        f"-6 dB band {_low:.0f}-{_high:.0f} Hz. This is what sets everything "
+        "below it: the lobe each event is blocked on, the thickness at which "
+        "a bed tunes, and whether two interfaces are separable at all."
+    )
 tuning_twt = tuning_thickness_from_wavelet(page_wavelet, settings.dt)
 
 # The gather is built once here rather than again further down: the full stack
@@ -710,7 +725,7 @@ trace_col, detail_col = st.columns([3, 2])
 
 with trace_col:
     st.markdown(f"**{trace_choice}** — reflectors by class")
-    detail_logs = {"Vp (m/s)": vp, "Vs (m/s)": vs, "RHOB (g/cc)": rho} if show_logs else None
+    detail_logs = detail_log_tracks(tw, settings) if show_logs else None
     # Cut to the rows still on screen, so the shading follows the same
     # reflector the dropdown and the curve below are describing.
     detail_lobe = None
