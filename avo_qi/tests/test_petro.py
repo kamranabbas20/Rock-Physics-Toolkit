@@ -7,6 +7,7 @@ import pytest
 
 from avo_qi.core.mixing import mineral_mix
 from avo_qi.core.petro import (
+    rock_physics_template,
     fluid_log,
     forward_model,
     mineral_log,
@@ -281,3 +282,86 @@ class TestPorosityProvenance:
     def test_rejects_mismatched_lengths(self):
         with pytest.raises(ValueError, match="same length"):
             porosity_provenance([0.1, 0.2], [2.3])
+
+
+class TestRockPhysicsTemplate:
+    """A template turns the crossplot axes into porosity and saturation.
+
+    These pin the four things an interpreter reads off one, all of which are
+    directions rather than magnitudes — the magnitudes depend on the model and
+    are the interpreter's to argue with.
+    """
+
+    PHI = np.linspace(0.02, 0.36, 12)
+    SW = np.linspace(1.0, 0.0, 5)
+
+    @classmethod
+    @pytest.fixture(scope="class")
+    def template(cls):
+        return rock_physics_template(cls.PHI, cls.SW, vsh=0.0,
+                                     frame="soft sand")
+
+    def test_it_is_shaped_by_the_grid_it_was_given(self, template):
+        assert template["AI"].shape == (self.PHI.size, self.SW.size)
+        assert template["vpvs"].shape == (self.PHI.size, self.SW.size)
+        assert np.array_equal(template["porosity"], self.PHI)
+        assert np.array_equal(template["saturation"], self.SW)
+        assert template["valid"].all()
+        assert np.isfinite(template["AI"]).all()
+
+    def test_porosity_softens_the_rock(self, template):
+        """More pore space, lower impedance — at every saturation."""
+        for j in range(self.SW.size):
+            assert np.all(np.diff(template["AI"][:, j]) < 0)
+
+    def test_gas_drops_the_impedance_and_the_vpvs(self, template):
+        """The whole reason to look at this crossplot. Sw runs 1 -> 0, so
+        moving along a row is filling the pore with hydrocarbon."""
+        for i in range(self.PHI.size):
+            assert template["AI"][i, -1] < template["AI"][i, 0]
+            assert template["vpvs"][i, -1] < template["vpvs"][i, 0]
+
+    def test_gas_leaves_the_shear_modulus_alone(self, template):
+        """Gassmann does not touch it, so Vs moves only because the rock got
+        lighter — which means Vs goes *up* with gas even as Vp goes down."""
+        for i in range(self.PHI.size):
+            assert template["VS"][i, -1] > template["VS"][i, 0]
+            assert template["VP"][i, -1] < template["VP"][i, 0]
+            assert template["RHOB"][i, -1] < template["RHOB"][i, 0]
+
+    def test_a_shalier_template_is_a_different_curve(self):
+        clean = rock_physics_template(self.PHI, [1.0], vsh=0.0)
+        shaly = rock_physics_template(self.PHI, [1.0], vsh=0.6)
+        # Shale is softer and its Vp/Vs is higher; a template drawn for clean
+        # sand says nothing about a shaly point, which is why vsh is explicit.
+        assert np.all(shaly["vpvs"][:, 0] > clean["vpvs"][:, 0])
+
+    def test_a_stiffer_frame_lifts_the_whole_template(self):
+        soft = rock_physics_template(self.PHI, [1.0], frame="soft sand")
+        stiff = rock_physics_template(self.PHI, [1.0], frame="stiff sand")
+        assert np.all(stiff["AI"][:, 0] >= soft["AI"][:, 0] - 1e-9)
+        assert np.any(stiff["AI"][:, 0] > soft["AI"][:, 0])
+
+    def test_zero_porosity_is_reported_invalid_rather_than_guessed(self):
+        """Gassmann divides by porosity. At phi = 0 there is no pore to
+        saturate, and the mask says so instead of the grid carrying a made-up
+        mineral point."""
+        template = rock_physics_template([0.0, 0.1, 0.2], [1.0])
+        assert not template["valid"][0, 0]
+        assert template["valid"][1:, 0].all()
+        assert not np.isfinite(template["AI"][0, 0])
+
+    def test_it_is_the_same_physics_as_the_per_sample_forward_model(self):
+        """The template must not be a second implementation: a well that misses
+        it should mean the model is wrong, not that two code paths disagree."""
+        from avo_qi.core.attributes import acoustic_impedance
+
+        phi, sw = 0.25, 0.3
+        template = rock_physics_template([phi], [sw], vsh=0.1,
+                                         frame="stiff sand", phi_c=0.38)
+        direct = forward_model([0.1], [phi], [sw], frame="stiff sand",
+                               phi_c=0.38)
+        assert template["VP"][0, 0] == pytest.approx(float(direct["VP"][0]))
+        assert template["VS"][0, 0] == pytest.approx(float(direct["VS"][0]))
+        assert template["AI"][0, 0] == pytest.approx(
+            float(acoustic_impedance(direct["VP"], direct["RHOB"])[0]))

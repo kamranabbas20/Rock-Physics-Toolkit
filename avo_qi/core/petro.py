@@ -53,6 +53,7 @@ __all__ = [
     "mineral_log",
     "fluid_log",
     "forward_model",
+    "rock_physics_template",
     "porosity_provenance",
 ]
 
@@ -285,6 +286,66 @@ def forward_model(vsh, phit, sw, matrix=None, shale="clay", mineral_law="hill",
         "K_dry": np.asarray(k_dry), "G_dry": np.asarray(g_dry),
         "K_sat": saturated.values,
         "valid": saturated.valid, "reasons": saturated.reasons,
+    }
+
+
+def rock_physics_template(porosities, saturations, vsh=0.0, **kwargs):
+    """A rock physics template: AI and Vp/Vs over a porosity–saturation grid.
+
+    The classic QI diagnostic (Ødegaard & Avseth).  Where a bare crossplot
+    shows only that some points are softer than others, a template says *how
+    porous* and *how wet* a point would have to be to land where it does — it
+    turns the axes into something quantitative.
+
+    The grid is built by running :func:`forward_model` itself over every
+    combination, rather than by a separate calculation.  That matters: the
+    template and the page's per-sample prediction are then the same physics
+    with the same mineral law, fluid law, frame model and Gassmann step, so a
+    well that misses its own template is telling you something real instead of
+    exposing a disagreement between two code paths.
+
+    Parameters
+    ----------
+    porosities, saturations : array_like
+        The grid axes.  Saturation is water saturation, so ``1`` is brine and
+        ``0`` is fully hydrocarbon-filled.
+    vsh : float
+        Shale volume held fixed across the template.  A template is drawn for
+        one lithology at a time; a shalier one sits lower and to the right.
+    **kwargs
+        Passed through to :func:`forward_model` — ``frame``, ``phi_c``,
+        ``pressure``, ``hydrocarbon``, ``fluid_law`` and the rest.
+
+    Returns
+    -------
+    dict
+        ``porosity`` and ``saturation`` (the axes), and ``AI``, ``vpvs``,
+        ``VP``, ``VS``, ``RHOB`` and ``valid`` each shaped
+        ``(n_porosities, n_saturations)``.
+    """
+    from .attributes import acoustic_impedance, vpvs as _vpvs
+
+    porosities = np.atleast_1d(np.asarray(porosities, dtype=float))
+    saturations = np.atleast_1d(np.asarray(saturations, dtype=float))
+    shape = (porosities.size, saturations.size)
+
+    phi_grid, sw_grid = np.meshgrid(porosities, saturations, indexing="ij")
+    flat_phi = phi_grid.ravel()
+    flat_sw = sw_grid.ravel()
+
+    predicted = forward_model(np.full(flat_phi.shape, float(vsh)),
+                              flat_phi, flat_sw, **kwargs)
+
+    vp = np.asarray(predicted["VP"], dtype=float).reshape(shape)
+    vs = np.asarray(predicted["VS"], dtype=float).reshape(shape)
+    rho = np.asarray(predicted["RHOB"], dtype=float).reshape(shape)
+    return {
+        "porosity": porosities,
+        "saturation": saturations,
+        "VP": vp, "VS": vs, "RHOB": rho,
+        "AI": acoustic_impedance(vp, rho),
+        "vpvs": _vpvs(vp, vs),
+        "valid": np.asarray(predicted["valid"], dtype=bool).reshape(shape),
     }
 
 

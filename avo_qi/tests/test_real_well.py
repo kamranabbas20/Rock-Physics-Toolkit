@@ -330,6 +330,49 @@ class TestZonationFromTops:
         assert at.session_state["settings"].zone_tops == []
 
 
+class TestRockPhysicsTemplateOnARealWell:
+    """A template is only as relevant as the lithology it was drawn for."""
+
+    PHI = np.linspace(0.02, 0.36, 25)
+
+    def _median(self):
+        from avo_qi.core.attributes import acoustic_impedance, vpvs
+
+        df = load()[0].df
+        good = (np.isfinite(df["VP"]) & np.isfinite(df["VS"])
+                & np.isfinite(df["RHOB"])).to_numpy()
+        return (float(np.median(acoustic_impedance(df["VP"][good], df["RHOB"][good]))),
+                float(np.median(vpvs(df["VP"][good], df["VS"][good]))),
+                float(np.nanmedian(df["VSH"])))
+
+    def test_drawing_it_at_the_wells_own_vsh_moves_it_onto_the_data(self):
+        """The clean-sand template misses this well by a wide margin in Vp/Vs,
+        and drawing it at the well's median VSH closes most of that gap. If it
+        did not, the shale fraction would not be reaching the mineral mix."""
+        from avo_qi.core.petro import rock_physics_template
+
+        ai_med, vpvs_med, vsh_med = self._median()
+        assert 0.2 < vsh_med < 0.5, "this well should be middling shaly"
+
+        def gap(vsh):
+            template = rock_physics_template(self.PHI, [1.0], vsh=vsh)
+            k = int(np.nanargmin(np.abs(template["AI"][:, 0] - ai_med)))
+            return abs(template["vpvs"][k, 0] - vpvs_med)
+
+        clean = gap(0.0)
+        own = gap(vsh_med)
+        assert own < clean / 3.0, f"clean {clean:.3f} vs own {own:.3f}"
+        assert own < 0.05
+
+    def test_the_gas_line_sits_below_the_brine_line_throughout(self):
+        from avo_qi.core.petro import rock_physics_template
+
+        _, _, vsh_med = self._median()
+        template = rock_physics_template(self.PHI, [1.0, 0.0], vsh=vsh_med)
+        assert np.all(template["vpvs"][:, 1] < template["vpvs"][:, 0])
+        assert np.all(template["AI"][:, 1] < template["AI"][:, 0])
+
+
 class TestLithologyOnRealCurves:
     def test_pairs_come_from_the_wells_own_vsh(self, table):
         from avo_qi.core.lithology import LITHOLOGIES

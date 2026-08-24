@@ -1211,6 +1211,24 @@ class TestLithologyFilter:
         assert "shale over sand" in pairs
         assert "sand over shale" in pairs
 
+    def test_the_template_tab_is_on_the_rock_physics_page(self, rock_physics_page):
+        assert not rock_physics_page.exception
+        labels = {s.label for s in rock_physics_page.slider}
+        assert "VSH the template is drawn for" in labels
+        captions = " ".join(c.value for c in rock_physics_page.caption)
+        assert "rock physics template" in captions
+        # It must say which way to read the two families of curves.
+        assert "constant porosity" in captions
+
+    def test_the_template_reports_the_fluid_effect_it_predicts(self, rock_physics_page):
+        """The number an interpreter actually wants off an RPT: how much
+        impedance the hydrocarbon costs, and at what porosity it peaks."""
+        import re
+
+        captions = " ".join(c.value for c in rock_physics_page.caption)
+        assert re.search(r"drops the impedance by up to \d+%", captions)
+        assert re.search(r"most at porosity 0\.\d+", captions)
+
     def test_rock_physics_page_offers_lithology_colouring(self, rock_physics_page):
         colour = next(sb for sb in rock_physics_page.selectbox
                       if sb.label == "Colour the well data by")

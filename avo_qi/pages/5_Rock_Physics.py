@@ -61,6 +61,7 @@ from avo_qi.core.petro import (  # noqa: E402
     FRAME_MODELS,
     forward_model,
     porosity_provenance,
+    rock_physics_template,
 )
 from avo_qi.core.uncertainty import (  # noqa: E402
     DEFAULT_LOG_NOISE,
@@ -348,9 +349,10 @@ def finish(fig, xtitle, ytitle, height=560):
     return fig
 
 
-tab_vpvs, tab_gardner, tab_vphi, tab_moduli, tab_forward, tab_subs = st.tabs(
+(tab_vpvs, tab_gardner, tab_vphi, tab_moduli, tab_rpt, tab_forward,
+ tab_subs) = st.tabs(
     ["Vp – Vs trends", "Gardner", "Velocity – porosity", "Moduli & bounds",
-     "Forward model", "Fluid substitution"]
+     "Template (RPT)", "Forward model", "Fluid substitution"]
 )
 
 
@@ -578,6 +580,103 @@ with tab_moduli:
                               line=dict(color="#999", width=1, dash="dot")))
     st.plotly_chart(finish(fig2, "Bulk modulus K (GPa)", "Shear modulus μ (GPa)",
                            height=480), use_container_width=True)
+
+
+# ------------------------------------------------------- template (RPT) -----
+with tab_rpt:
+    st.caption(
+        "A bare AI vs Vp/Vs crossplot says one point is softer than another. A "
+        "**rock physics template** says *how porous* and *how wet* a point "
+        "would have to be to land where it does: the grid is the model run "
+        "over every combination of porosity and water saturation, so the axes "
+        "become quantitative. Read porosity along the dotted curves and "
+        "saturation across them — the leftward, downward jump off the brine "
+        "line is what hydrocarbon looks like."
+    )
+    st.caption(
+        "Built by running the **same forward model** as the Forward model tab, "
+        "with the mineral, fluid and frame settings chosen above. A well that "
+        "misses its own template is disagreeing with the physics, not with a "
+        "second implementation of it."
+    )
+
+    r1, r2, r3 = st.columns(3)
+    rpt_vsh = r1.slider(
+        "VSH the template is drawn for", 0.0, 1.0, 0.0, 0.05,
+        help="One lithology at a time. A shalier template sits at higher "
+             "Vp/Vs, so a shale plotted against a clean-sand template would "
+             "look wrongly like a wet sand.")
+    rpt_frame = r2.selectbox(
+        "Frame model", sorted(FRAME_MODELS),
+        index=sorted(FRAME_MODELS).index("soft sand"), key="rpt_frame")
+    _hc_names = [n for n in FLUIDS if n != "brine"]
+    rpt_hc = r3.selectbox(
+        "Hydrocarbon", _hc_names,
+        index=_hc_names.index("gas") if "gas" in _hc_names else 0, key="rpt_hc",
+        help="What fills the pore space that is not water.")
+
+    # The matrix is the Mineral matrix tab's blend minus the shale mineral,
+    # since VSH supplies that fraction here.
+    _rpt_matrix = {n: f for n, f in zip(chosen, raw_fractions)
+                   if n != "clay" and f > 0} or {"quartz": 1.0}
+
+    # Porosity starts above zero: Gassmann divides by it, so phi = 0 has no
+    # pore to saturate and the model reports it invalid rather than guessing.
+    rpt_phi = np.linspace(0.02, float(phi_c), 25)
+    rpt_sw = np.array([1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
+    template = rock_physics_template(
+        rpt_phi, rpt_sw, vsh=rpt_vsh, matrix=_rpt_matrix, shale="clay",
+        mineral_law=mineral_law, frame=rpt_frame, hydrocarbon=rpt_hc,
+        phi_c=float(phi_c), n_grains=n_grains, pressure=pressure,
+        shear_factor=shear_factor)
+
+    fig = go.Figure()
+    fig.add_traces(data_trace(df["AI"], df["VPVS"]))
+
+    # Iso-saturation: porosity runs along each of these.
+    for j, sw_value in enumerate(rpt_sw):
+        good = template["valid"][:, j]
+        fig.add_trace(go.Scatter(
+            x=template["AI"][good, j], y=template["vpvs"][good, j],
+            mode="lines", name=f"Sw {sw_value:.0%}",
+            line=dict(width=2.4 if sw_value in (0.0, 1.0) else 1.2,
+                      color="#1565c0" if sw_value == 1.0
+                      else ("#c62828" if sw_value == 0.0 else "#9e9e9e")),
+            hovertemplate=f"Sw {sw_value:.0%}<br>AI %{{x:,.0f}}"
+                          "<br>Vp/Vs %{y:.3f}<extra></extra>"))
+
+    # Iso-porosity: saturation runs along each of these.
+    for i in range(0, rpt_phi.size, 4):
+        good = template["valid"][i, :]
+        if not good.any():
+            continue
+        fig.add_trace(go.Scatter(
+            x=template["AI"][i, good], y=template["vpvs"][i, good],
+            mode="lines+markers", showlegend=False,
+            line=dict(width=1, color="#555", dash="dot"),
+            marker=dict(size=3, color="#555"),
+            hovertemplate=f"phi {rpt_phi[i]:.2f}<br>AI %{{x:,.0f}}"
+                          "<br>Vp/Vs %{y:.3f}<extra></extra>"))
+        fig.add_annotation(
+            x=template["AI"][i, 0], y=template["vpvs"][i, 0],
+            text=f"{rpt_phi[i]:.2f}", showarrow=False, xanchor="left",
+            font=dict(size=9, color="#555"), xshift=5)
+
+    st.plotly_chart(finish(fig, "AI (m/s · g/cc)", "Vp/Vs"),
+                    use_container_width=True)
+
+    _brine_ai = template["AI"][:, 0]
+    _hc_ai = template["AI"][:, -1]
+    _drop = (_brine_ai - _hc_ai) / _brine_ai
+    _peak_phi = float(rpt_phi[int(np.nanargmax(_drop))])
+    st.caption(
+        f"Solid blue is fully brine-filled, solid red fully {rpt_hc}; the "
+        "dotted curves are constant porosity, labelled at their brine end. "
+        f"Replacing brine with {rpt_hc} drops the impedance by up to "
+        f"{np.nanmax(_drop):.0%}, most at porosity {_peak_phi:.2f} — where "
+        "this rock is most worth chasing on impedance, and where a fluid "
+        "effect is easiest to mistake for a porosity one."
+    )
 
 
 # ------------------------------------------------------- forward model ------
