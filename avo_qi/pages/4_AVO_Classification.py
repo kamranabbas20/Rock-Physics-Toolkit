@@ -116,6 +116,7 @@ _, page_wavelet = build_wavelet(settings)
 window = half_cycle_samples(apparent_period(page_wavelet, settings.dt), settings.dt)
 tuning_twt = tuning_thickness_from_wavelet(page_wavelet, settings.dt)
 
+blocked_props = None
 table = reflector_avo(
     rc, vp, vs, rho, angles, method=settings.method, both=True,
     depth=depth, twt=twt, threshold=settings.threshold, a_tol=settings.a_tol,
@@ -135,6 +136,9 @@ if use_blocking and not table.empty:
 
     rc_for_fit = rc_blocked.copy()
     rc_for_fit[table["sample"].to_numpy(), :] = blocked["rc"]
+    # Kept for the reflector detail panel, which has to show the *same* layers
+    # the fit was made on.
+    blocked_props = blocked
     table = reflector_avo(
         rc_for_fit, vp, vs, rho, angles, method=settings.method, both=True,
         depth=depth, twt=twt, samples=table["sample"].to_numpy(),
@@ -604,9 +608,29 @@ with detail_col:
     fine = np.linspace(float(angles[0]), float(angles[-1]), 200)
     sin2_fine = np.sin(np.radians(fine)) ** 2
 
+    # The panel must show the layers the fit was actually made on.  With
+    # blocking switched on the A and B above come from a half cycle averaged
+    # either side of the boundary, and plotting them over the adjacent-sample
+    # coefficient compares two different interfaces: on a gradational boundary
+    # the adjacent pair carries a fraction of the contrast, so the curves can
+    # differ by more than 0.25 in Rpp and the fit looks badly wrong when it is
+    # not.
+    if blocked_props is not None:
+        layer = (blocked_props["vp_upper"][pick], blocked_props["vs_upper"][pick],
+                 blocked_props["rho_upper"][pick], blocked_props["vp_lower"][pick],
+                 blocked_props["vs_lower"][pick], blocked_props["rho_lower"][pick])
+        modelled = np.asarray(blocked_props["rc"])[pick, :]
+        layer_source = f"half-cycle blocked layers (±{window} samples)"
+    else:
+        layer = (vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1]) \
+            if i + 1 < vp.size else None
+        modelled = rc[i, :]
+        layer_source = "adjacent samples"
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=angles, y=rc[i, :], mode="markers", name=f"{settings.method.replace('_', '-')} (modelled)",
+        x=angles, y=modelled, mode="markers",
+        name=f"{settings.method.replace('_', '-')} (modelled)",
         marker=dict(size=9, color="#333"),
     ))
     fig.add_trace(go.Scatter(
@@ -620,14 +644,23 @@ with detail_col:
         line=dict(width=2, dash="dash", color="#ff7f0e"),
     ))
 
-    # The two exact interface models, for reference.
-    if i + 1 < vp.size:
-        layer = (vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1])
+    # The two exact interface models, on those same layers.
+    if layer is not None and all(np.isfinite(v) for v in layer):
         fig.add_trace(go.Scatter(x=fine, y=zoeppritz_rpp(*layer, fine), mode="lines",
                                  name="Zoeppritz", line=dict(width=1, color="#999")))
         fig.add_trace(go.Scatter(x=fine, y=aki_richards_rpp(*layer, fine), mode="lines",
                                  name="Aki-Richards (3-term)",
                                  line=dict(width=1, dash="dot", color="#999")))
+
+    # With blocking on, the adjacent-sample curve is worth seeing precisely
+    # because it differs — that gap is what blocking is for — but it is drawn
+    # faintly and named, never mixed in with the fitted layers.
+    if blocked_props is not None and i + 1 < vp.size:
+        adjacent_layer = (vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1])
+        fig.add_trace(go.Scatter(
+            x=fine, y=zoeppritz_rpp(*adjacent_layer, fine), mode="lines",
+            name="Zoeppritz (adjacent samples, not fitted)",
+            line=dict(width=1, dash="dash", color="#c9c9c9")))
 
     # Past the critical angle the exact solution is complex; its real
     # continuation spikes and is excluded from the fit, so mark that region.
@@ -644,6 +677,14 @@ with detail_col:
                       height=460, margin=dict(l=60, r=20, t=30, b=45),
                       legend=dict(orientation="h", yanchor="bottom", y=1.02))
     st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        f"Modelled on **{layer_source}** — the same layers the A and B above "
+        "were fitted to."
+        + (" The faint dashed curve is the adjacent-sample coefficient, which "
+           "is not what was fitted; where it sits well away from the others "
+           "the boundary is gradational and the adjacent pair carries only "
+           "part of the contrast." if blocked_props is not None else "")
+    )
 
     if np.isfinite(theta_c) and theta_c < angles[-1]:
         st.warning(
@@ -664,15 +705,19 @@ with detail_col:
     c4.metric("ΔA Shuey−AkiR", f"{row['dA']:+.1e}")
     c5.metric("ΔB Shuey−AkiR", f"{row['dB']:+.1e}")
 
-    if i + 1 < vp.size:
-        pair = row.get("litho_pair", "")
-        if pair and "undefined" not in str(pair):
-            st.caption(f"Lithology: **{pair}**.")
+    pair = row.get("litho_pair", "")
+    if pair and "undefined" not in str(pair):
+        st.caption(f"Lithology: **{pair}**.")
+    # The properties quoted are the ones behind A and B, so they follow the
+    # same blocking choice as the curve above rather than always naming the
+    # two samples either side of the boundary.
+    if layer is not None and all(np.isfinite(v) for v in layer):
+        up_vp, up_vs, up_rho, lo_vp, lo_vs, lo_rho = (float(v) for v in layer)
         st.caption(
-            f"Upper layer Vp {vp[i]:.0f} m/s, Vs {vs[i]:.0f} m/s, ρ {rho[i]:.3f} g/cc "
-            f"(Vp/Vs {vp[i] / vs[i]:.2f}) over lower layer Vp {vp[i + 1]:.0f} m/s, "
-            f"Vs {vs[i + 1]:.0f} m/s, ρ {rho[i + 1]:.3f} g/cc "
-            f"(Vp/Vs {vp[i + 1] / vs[i + 1]:.2f})."
+            f"Upper layer Vp {up_vp:.0f} m/s, Vs {up_vs:.0f} m/s, ρ {up_rho:.3f} g/cc "
+            f"(Vp/Vs {up_vp / up_vs:.2f}) over lower layer Vp {lo_vp:.0f} m/s, "
+            f"Vs {lo_vs:.0f} m/s, ρ {lo_rho:.3f} g/cc "
+            f"(Vp/Vs {lo_vp / lo_vs:.2f}) — from {layer_source}."
         )
 
 # ---------------------------------------------------------------- tuning ---

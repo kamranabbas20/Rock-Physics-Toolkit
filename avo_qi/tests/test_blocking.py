@@ -15,6 +15,7 @@ from avo_qi.core.blocking import (
     arithmetic_average,
     backus_average,
     block_properties,
+    blocked_reflectivity,
     half_cycle_samples,
 )
 from avo_qi.core.reflectivity import zoeppritz_rpp
@@ -218,3 +219,90 @@ class TestBlockPropertiesMechanics:
         mean = block_properties(vp, vs, rho, [INTERFACE], window=13, method="mean")
         assert backus["vp_lower"][0] < mean["vp_lower"][0]
         assert backus["rho_lower"][0] == pytest.approx(mean["rho_lower"][0])
+
+
+class TestBlockedAndAdjacentAreDifferentInterfaces:
+    """Why a detail panel must plot the layers its fit was made on.
+
+    A reflector fitted on half-cycle blocked layers cannot be shown over the
+    adjacent-sample coefficient: on a gradational boundary the adjacent pair
+    carries only part of the contrast, so the two describe different
+    interfaces and the fit looks badly wrong when it is not.
+    """
+
+    @staticmethod
+    def _demo_grid():
+        import os
+
+        from avo_qi.io.loader import (
+            depth_to_twt,
+            read_well,
+            resample_to_time,
+            standardise,
+        )
+
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        df, units = read_well(os.path.join(here, "sample_data", "demo_well.las"))
+        well = standardise(df, units=units, name="DEMO-1")
+        frame = well.complete().reset_index(drop=True)
+        twt = depth_to_twt(frame["DEPTH"].to_numpy(float),
+                           frame["VP"].to_numpy(float), t0=1.6)
+        grid = resample_to_time(frame, twt, dt=0.001)
+        return (grid["VP"].to_numpy(float), grid["VS"].to_numpy(float),
+                grid["RHOB"].to_numpy(float))
+
+    def test_the_fit_follows_the_blocked_layers_not_the_adjacent_pair(self):
+        from avo_qi.core.avo import reflector_avo
+        from avo_qi.core.reflectivity import reflectivity_series
+        from avo_qi.core.tuning import apparent_period
+        from avo_qi.core.wavelet import ricker
+
+        vp, vs, rho = self._demo_grid()
+        angles = np.arange(0.0, 41.0, 2.0)
+        _, wavelet = ricker(30.0, 0.001)
+        window = half_cycle_samples(apparent_period(wavelet, 0.001), 0.001)
+
+        rc = reflectivity_series(vp, vs, rho, angles, method="zoeppritz")
+        first = reflector_avo(rc, vp, vs, rho, angles, threshold=0.01)
+        samples = first["sample"].to_numpy()
+
+        blocked = blocked_reflectivity(vp, vs, rho, samples, angles,
+                                       window=window, guard=2)
+        rc_fit = np.zeros_like(rc)
+        rc_fit[samples] = blocked["rc"]
+        fitted = reflector_avo(rc_fit, vp, vs, rho, angles, samples=samples,
+                               mask_post_critical=False)
+        intercept = fitted["A_shuey"].to_numpy(float)
+
+        blocked_zero = np.asarray(blocked["rc"])[:, 0]
+        adjacent_zero = rc[samples, 0]
+
+        # The intercept is the blocked normal-incidence coefficient, to within
+        # the two-term Shuey approximation over 0-40 degrees.
+        assert np.nanmax(np.abs(blocked_zero - intercept)) < 0.01
+        # The adjacent-sample coefficient is a different number entirely — this
+        # well shows a quarter of a unit of Rpp between them.
+        assert np.nanmax(np.abs(adjacent_zero - intercept)) > 0.2
+
+    def test_blocking_recovers_contrast_the_adjacent_pair_misses(self):
+        """The gradational case, stated directly: a ramp spread over several
+        samples has no single interface carrying the full step."""
+        n = 400
+        vp = np.full(n, 2400.0)
+        vs = np.full(n, 1200.0)
+        rho = np.full(n, 2.35)
+        ramp = np.linspace(0.0, 1.0, 21)
+        vp[190:211] = 2400.0 + 600.0 * ramp
+        vs[190:211] = 1200.0 + 300.0 * ramp
+        rho[190:211] = 2.35 + 0.15 * ramp
+        vp[211:], vs[211:], rho[211:] = 3000.0, 1500.0, 2.50
+
+        angles = np.array([0.0])
+        blocked = blocked_reflectivity(vp, vs, rho, [200], angles, window=13,
+                                       guard=2)
+        from avo_qi.core.reflectivity import reflectivity_series
+
+        rc = reflectivity_series(vp, vs, rho, angles, method="zoeppritz")
+        adjacent = abs(float(rc[200, 0]))
+        blocked_r = abs(float(np.asarray(blocked["rc"])[0, 0]))
+        assert blocked_r > 5 * adjacent

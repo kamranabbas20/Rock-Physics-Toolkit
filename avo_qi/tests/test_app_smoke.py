@@ -328,6 +328,49 @@ class TestReflectorSelection:
         assert len(reflector_table(at)) > 0
 
 
+class TestTheDetailPanelShowsWhatItFitted:
+    """The panel plots A and B over a modelled curve; both must come from the
+    same layers, or the fit appears wrong when it is not."""
+
+    @staticmethod
+    def _page(mode):
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=90)
+        _inject_demo_well(at)
+        at.run()
+        radio = next(r for r in at.radio if "blocked layers" in " ".join(r.options))
+        radio.set_value(mode).run()
+        return at
+
+    def test_it_names_the_blocked_layers_when_blocking_is_on(self):
+        at = self._page("Half-cycle blocked layers")
+        assert not at.exception
+        captions = " ".join(c.value for c in at.caption)
+        assert "half-cycle blocked layers" in captions
+        assert "the same layers the A and B above were fitted to" in captions
+
+    def test_it_names_the_adjacent_samples_when_blocking_is_off(self):
+        at = self._page("Adjacent samples")
+        assert not at.exception
+        captions = " ".join(c.value for c in at.caption)
+        assert "Modelled on **adjacent samples**" in captions
+
+    def test_the_quoted_layer_properties_follow_the_same_choice(self):
+        """The numbers under the chart are the ones behind A and B."""
+        on = " ".join(c.value for c in self._page("Half-cycle blocked layers").caption)
+        off = " ".join(c.value for c in self._page("Adjacent samples").caption)
+        assert "from half-cycle blocked layers" in on
+        assert "from adjacent samples" in off
+
+    def test_the_unfitted_adjacent_curve_is_offered_only_when_blocking(self):
+        """Seeing the gap is useful; mistaking it for the fit is not, so it is
+        drawn only where it differs and is labelled as not fitted."""
+        on = " ".join(c.value for c in self._page("Half-cycle blocked layers").caption)
+        off = " ".join(c.value for c in self._page("Adjacent samples").caption)
+        assert "not what was fitted" in on
+        assert "not what was fitted" not in off
+
+
 class TestAWellWithNoZonation:
     """Not every well carries a ZONE curve, and one that does not must work.
 
