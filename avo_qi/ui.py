@@ -644,36 +644,69 @@ def fluid_vector_crossplot(comparison, reference, targets, a_tol=0.02, height=64
     return fig
 
 
-def classified_trace_figure(trace, twt, table, extrema, selected=None, height=720,
-                            gain=1.0):
-    """A single trace with each reflector's extremum marked and coloured by class.
+def classified_trace_figure(trace, twt, table, extrema, selected=None, height=900,
+                            gain=1.0, logs=None, trace_title="Trace"):
+    """Log tracks beside a trace, with each reflector marked and coloured by class.
 
     The trace is drawn variable-area, and every classified reflector gets a
     marker sitting on the amplitude extremum it produces, so the class reads
     off the wiggle itself rather than off a legend at the edge.  Markers carry
     their table row index as ``customdata`` so a click can be resolved back to
     a reflector.
+
+    ``logs`` is an ordered ``{title: values}`` mapping — typically Vp, Vs and
+    RHOB — drawn as tracks to the *left* of the trace on a shared two-way-time
+    axis.  Reading the wiggle against the logs that produced it is the whole
+    point of putting them side by side, and a shared axis is what makes the
+    comparison trustworthy: the tracks cannot drift out of register.
+
+    Note the layout deliberately does **not** set ``dragmode``.  With
+    ``dragmode="select"`` Plotly treats a click as the start of a box-selection
+    drag, and a zero-area box selects nothing — which silently breaks
+    click-to-inspect while leaving the chart looking perfectly normal.
     """
+    from plotly.subplots import make_subplots
+
     trace = np.asarray(trace, dtype=float)
     twt = np.asarray(twt, dtype=float)
     limit = float(np.nanmax(np.abs(trace))) or 1.0
 
-    fig = go.Figure()
+    logs = dict(logs or {})
+    titles = list(logs) + [trace_title]
+    n_cols = len(titles)
+    trace_col = n_cols
+    # The trace needs the room; the logs only have to be readable.
+    widths = [1.0] * len(logs) + [1.9 if logs else 1.0]
+    total = sum(widths)
+
+    fig = make_subplots(
+        rows=1, cols=n_cols, shared_yaxes=True, subplot_titles=titles,
+        column_widths=[w / total for w in widths], horizontal_spacing=0.025,
+    )
+
+    for col, (title, values) in enumerate(logs.items(), start=1):
+        values = np.asarray(values, dtype=float)
+        fig.add_trace(go.Scatter(
+            x=values, y=twt, mode="lines", name=title, showlegend=False,
+            line=dict(color="#444", width=1.1),
+            hovertemplate=f"{title} %{{x:.4g}}<br>TWT %{{y:.3f}} s<extra></extra>",
+        ), row=1, col=col)
+
     fig.add_trace(go.Scatter(
         x=np.zeros_like(twt), y=twt, mode="lines", line=dict(width=0),
         showlegend=False, hoverinfo="skip",
-    ))
+    ), row=1, col=trace_col)
     fig.add_trace(go.Scatter(
         x=np.maximum(trace, 0.0), y=twt, mode="lines", line=dict(width=0),
         fill="tonextx", fillcolor="rgba(20,20,20,0.75)",
         showlegend=False, hoverinfo="skip",
-    ))
+    ), row=1, col=trace_col)
     fig.add_trace(go.Scatter(
         x=trace, y=twt, mode="lines", line=dict(color="#222", width=1.2),
         name="trace", showlegend=False,
         hovertemplate="TWT %{y:.3f} s<br>amp %{x:.4f}<extra></extra>",
-    ))
-    fig.add_vline(x=0, line=dict(color="#999", width=1))
+    ), row=1, col=trace_col)
+    fig.add_vline(x=0, line=dict(color="#999", width=1), row=1, col=trace_col)
 
     index = np.asarray(extrema["index"], dtype=int)
     amplitude = np.asarray(extrema["amplitude"], dtype=float)
@@ -683,48 +716,80 @@ def classified_trace_figure(trace, twt, table, extrema, selected=None, height=72
     depths = table[depth_col].to_numpy()
 
     resolved = np.asarray(extrema.get("is_extremum", np.ones(index.size, bool)), dtype=bool)
+
+    # One marker trace, coloured per point, rather than a trace per class.
+    # Reflectors close together often snap to the *same* turning point, so
+    # their markers land on identical coordinates; when those duplicates are
+    # spread across several traces a click on the pile resolves to nothing at
+    # all and inspection silently stops working.  A single trace hit-tests
+    # cleanly and returns the topmost point, which is a real reflector.
+    fill = [CLASS_COLOURS.get(c, "#9e9e9e") if ok else "rgba(0,0,0,0)"
+            for c, ok in zip(classes, resolved)]
+    edge = ["#fff" if ok else CLASS_COLOURS.get(c, "#9e9e9e")
+            for c, ok in zip(classes, resolved)]
+    widths = [1.5 if ok else 2.5 for ok in resolved]
+    notes = ["" if ok else " (no extremum)" for ok in resolved]
+    fig.add_trace(go.Scatter(
+        x=amplitude, y=marker_twt, mode="markers", showlegend=False,
+        marker=dict(size=13, color=fill, symbol="circle",
+                    line=dict(width=widths, color=edge)),
+        customdata=np.arange(index.size),
+        text=[f"{depth_col} {d:.4g} — class {c}{n}"
+              for d, c, n in zip(depths, classes, notes)],
+        hovertemplate="%{text}<br>TWT %{y:.3f} s<br>amp %{x:.4f}"
+                      "<extra>click to inspect</extra>",
+    ), row=1, col=trace_col)
+
+    # Legend entries only: no points, so they cannot intercept a click.
     for label in [c for c in CLASS_COLOURS if c in set(classes)]:
-        for on_extremum in (True, False):
-            mask = (classes == label) & (resolved == on_extremum)
-            if not mask.any():
-                continue
-            note = "" if on_extremum else " (no extremum)"
-            fig.add_trace(go.Scatter(
-                x=amplitude[mask], y=marker_twt[mask], mode="markers",
-                name=(f"Class {label}" if label != "background/other" else "Background")
-                     + note,
-                marker=dict(
-                    size=13,
-                    color=CLASS_COLOURS[label] if on_extremum else "rgba(0,0,0,0)",
-                    symbol="circle",
-                    line=dict(width=1.5 if on_extremum else 2.5,
-                              color="#fff" if on_extremum else CLASS_COLOURS[label]),
-                ),
-                customdata=np.flatnonzero(mask),
-                text=[f"{depth_col} {d:.4g} — class {label}{note}"
-                      for d in depths[mask]],
-                hovertemplate="%{text}<br>TWT %{y:.3f} s<br>amp %{x:.4f}"
-                              "<extra>click to inspect</extra>",
-            ))
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers",
+            name=f"Class {label}" if label != "background/other" else "Background",
+            marker=dict(size=11, color=CLASS_COLOURS[label],
+                        line=dict(width=1.5, color="#fff")),
+            hoverinfo="skip",
+        ), row=1, col=trace_col)
+    if not resolved.all():
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers", name="No extremum",
+            marker=dict(size=11, color="rgba(0,0,0,0)",
+                        line=dict(width=2.5, color="#666")),
+            hoverinfo="skip",
+        ), row=1, col=trace_col)
 
     if selected is not None and 0 <= int(selected) < amplitude.size:
         i = int(selected)
-        fig.add_trace(go.Scatter(
-            x=[amplitude[i]], y=[marker_twt[i]], mode="markers",
-            marker=dict(size=24, color="rgba(0,0,0,0)", symbol="circle",
-                        line=dict(width=2.5, color="#111")),
-            name="selected", showlegend=False, hoverinfo="skip",
-        ))
+        # Drawn as *shapes*, never as an extra trace.  Plotly keys a selection
+        # by curve number, so adding or removing a trace between reruns — which
+        # is exactly what a moving highlight would do — invalidates the pending
+        # selection and the next click silently returns nothing.  Keeping the
+        # trace list identical on every rerun is what makes click-to-inspect
+        # repeatable rather than working only on the first click.
+        fig.add_hline(y=float(marker_twt[i]),
+                      line=dict(color="#111", width=1, dash="dot"))
+        span = 0.055 * (limit * 2.7 / gain)
+        fig.add_shape(
+            type="circle", xref="x%d" % trace_col if trace_col > 1 else "x",
+            yref="y%d" % trace_col if trace_col > 1 else "y",
+            x0=float(amplitude[i]) - span, x1=float(amplitude[i]) + span,
+            y0=float(marker_twt[i]) - 0.006, y1=float(marker_twt[i]) + 0.006,
+            line=dict(color="#111", width=2.5), fillcolor="rgba(0,0,0,0)",
+            layer="above",
+        )
 
-    fig.update_yaxes(autorange="reversed", title_text="TWT (s)")
-    fig.update_xaxes(title_text="Amplitude",
+    fig.update_yaxes(autorange="reversed")
+    fig.update_yaxes(title_text="TWT (s)", row=1, col=1)
+    fig.update_xaxes(title_text="Amplitude", row=1, col=trace_col,
                      range=[-limit * 1.35 / gain, limit * 1.35 / gain])
+    for col in range(1, trace_col):
+        fig.update_xaxes(nticks=4, row=1, col=col)
     fig.update_layout(
-        height=height, margin=dict(l=60, r=20, t=30, b=45),
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0,
+        height=height, margin=dict(l=60, r=20, t=60, b=45),
+        legend=dict(orientation="h", yanchor="bottom", y=1.03, x=0,
                     font=dict(size=11)),
-        clickmode="event+select", dragmode="select",
+        clickmode="event+select",
     )
+    fig.update_annotations(font_size=12)
     return fig
 
 

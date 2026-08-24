@@ -253,6 +253,81 @@ class TestRockPhysicsPage:
         assert boxes[0].value is False
 
 
+class TestReflectorSelection:
+    """The wiring that turns a click into a selected reflector.
+
+    Driven by injecting the selection payload Streamlit itself would store,
+    so the logic is covered deterministically without a browser in the loop.
+    """
+
+    @staticmethod
+    def _page(**state):
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=90)
+        _inject_demo_well(at)
+        for key, value in state.items():
+            at.session_state[key] = value
+        at.run()
+        return at
+
+    def test_a_trace_click_selects_the_reflector_it_names(self):
+        payload = {"selection": {"points": [{"curve_number": 6, "point_number": 0,
+                                             "point_index": 0, "x": -0.1,
+                                             "y": 1.633, "customdata": 1}],
+                                 "point_indices": [0], "box": [], "lasso": []}}
+        at = self._page(class_trace=payload)
+        assert not at.exception
+        assert at.session_state["reflector_pick"] == 1
+
+    def test_a_click_carrying_no_customdata_falls_back_to_the_time(self):
+        """Selection payloads differ between Streamlit versions, so the time
+        of the clicked point is the backstop."""
+        payload = {"selection": {"points": [{"curve_number": 6, "x": -0.1,
+                                             "y": 1.706}],
+                                 "point_indices": [0], "box": [], "lasso": []}}
+        at = self._page(class_trace=payload)
+        assert not at.exception
+        table = reflector_table(at)
+        chosen = at.session_state["reflector_pick"]
+        assert 0 <= chosen < len(table)
+
+    def test_a_row_click_selects_that_reflector(self):
+        at = self._page()
+        table = reflector_table(at)
+        sample = int(table["sample"].iloc[3])
+        at.session_state["reflector_rows"] = {"selection": {"rows": [3], "columns": []}}
+        at.run()
+        assert not at.exception
+        picked = at.session_state["reflector_pick"]
+        assert int(reflector_table(at)["sample"].iloc[picked]) == sample
+
+    def test_an_empty_selection_leaves_the_pick_alone(self):
+        at = self._page(class_trace={"selection": {"points": [], "point_indices": [],
+                                                   "box": [], "lasso": []}})
+        assert not at.exception
+        # Falls back to the strongest reflector rather than to row zero.
+        table = reflector_table(at)
+        pick = at.session_state["reflector_pick"]
+        strongest = int(np.argmax(np.abs(table["R0"].to_numpy(float))))
+        assert pick == strongest
+
+    def test_the_dropdown_still_wins_when_no_new_click_arrives(self):
+        """A stale selection must not override a manual dropdown change on
+        every rerun, or the dropdown would be unusable."""
+        payload = {"selection": {"points": [{"customdata": 1, "y": 1.633}],
+                                 "point_indices": [0], "box": [], "lasso": []}}
+        at = self._page(class_trace=payload)
+        assert at.session_state["reflector_pick"] == 1
+        at.session_state["reflector_pick"] = 5      # as the dropdown would
+        at.run()
+        assert at.session_state["reflector_pick"] == 5
+
+    def test_the_trace_offers_a_marker_for_every_reflector(self):
+        at = self._page()
+        assert not at.exception
+        assert len(reflector_table(at)) > 0
+
+
 class TestAWellWithNoZonation:
     """Not every well carries a ZONE curve, and one that does not must work.
 

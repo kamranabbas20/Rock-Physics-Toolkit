@@ -446,8 +446,29 @@ if "critical_angle" in show.columns:
 
 class_filter = st.multiselect("Filter by class", list(CLASS_COLOURS),
                               default=list(CLASS_COLOURS))
-filtered = show[show["avo_class"].isin(class_filter)]
-st.dataframe(filtered, use_container_width=True, height=340)
+filtered = show[show["avo_class"].isin(class_filter)].reset_index(drop=True)
+st.caption("Click a row to inspect that reflector in the detail section below.")
+row_event = st.dataframe(
+    filtered, use_container_width=True, height=340,
+    on_select="rerun", selection_mode="single-row", key="reflector_rows",
+)
+
+# Row selection is Streamlit's own, rather than Plotly's, so it is the
+# dependable way in: a click on the trace is a nicety, a click on the row
+# always works.
+_rows = []
+if row_event is not None:
+    _selection = getattr(row_event, "selection", None)
+    if _selection is None and isinstance(row_event, dict):
+        _selection = row_event.get("selection")
+    _rows = list(getattr(_selection, "rows", None)
+                 or (_selection or {}).get("rows", []) or [])
+if _rows and 0 <= _rows[0] < len(filtered):
+    _sample = int(filtered.iloc[_rows[0]]["sample"])
+    _match = np.flatnonzero(table["sample"].to_numpy() == _sample)
+    if _match.size and _sample != st.session_state.get("_last_row_click"):
+        st.session_state["_last_row_click"] = _sample
+        st.session_state["reflector_pick"] = int(_match[0])
 
 max_delta = float(np.nanmax(np.abs(table[["dA", "dB"]].to_numpy(float)))) if len(table) else 0.0
 st.caption(
@@ -461,8 +482,12 @@ st.download_button("Download reflector table (CSV)", show.to_csv(index=False).en
 st.divider()
 st.subheader("Reflector detail")
 st.caption(
-    "Click a marker on the trace to inspect that reflector. Each marker sits on "
-    "the amplitude extremum the reflector produces, coloured by its AVO class."
+    "Pick a reflector with the dropdown, by clicking a row in the table above, "
+    "or by clicking a marker on the trace — the dropdown and "
+    "the panel below follow it. Each marker sits on the amplitude extremum the "
+    "reflector produces, coloured by its AVO class, and the Vp, Vs and RHOB "
+    "tracks share the trace's two-way-time axis so a reflector lines up with "
+    "the contrast that made it."
 )
 
 # The gather this page's trace is drawn from.
@@ -524,14 +549,27 @@ if clicked is not None and clicked != st.session_state.get("_last_trace_click"):
 if st.session_state["reflector_pick"] >= len(labels):
     st.session_state["reflector_pick"] = strongest
 
-trace_col, detail_col = st.columns([1, 2])
+d1, d2 = st.columns([2, 1])
+detail_height = d1.slider(
+    "Panel height (px)", 500, 2200, 1100, 50,
+    help="The trace spans the whole analysis window; raise this to read a "
+         "long well without squinting.")
+show_logs = d2.checkbox("Show Vp, Vs and RHOB tracks", value=True,
+                        help="Drawn to the left of the trace on the same "
+                             "two-way-time axis, so a reflector lines up with "
+                             "the contrast that produced it.")
+
+trace_col, detail_col = st.columns([3, 2])
 
 with trace_col:
     st.markdown(f"**{trace_choice}** — reflectors by class")
+    detail_logs = {"Vp (m/s)": vp, "Vs (m/s)": vs, "RHOB (g/cc)": rho} if show_logs else None
     st.plotly_chart(
         classified_trace_figure(
             detail_trace, twt, table, extrema,
             selected=st.session_state["reflector_pick"],
+            height=int(detail_height), logs=detail_logs,
+            trace_title=trace_choice,
         ),
         use_container_width=True, key="class_trace",
         on_select="rerun", selection_mode="points",
