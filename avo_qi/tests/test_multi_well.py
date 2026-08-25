@@ -233,3 +233,85 @@ class TestClassAgainstProperty:
     def test_the_pooled_table_carries_the_lobe_properties(self, compared):
         for table in compared.session_state["multiwell_results"]["results"].values():
             assert {"phi_res", "ntg_res", "d_phi", "reservoir_side"} <= set(table["table"].columns)
+
+
+class TestAnomaliesAcrossWells:
+    """Ranked together, scored apart.
+
+    The property that makes this worth having: a well with a tight A–B cloud
+    and a well with a wide one cannot share a yardstick. Scale them together
+    and the noisy well fills the top of the list while the quiet well's one
+    genuine standout disappears into everyone else's scatter.
+    """
+
+    @staticmethod
+    def listing(at):
+        for element in at.dataframe:
+            frame = element.value
+            if hasattr(frame, "columns") and "rank" in frame.columns:
+                return frame
+        raise AssertionError("no anomaly listing on the page")
+
+    def test_each_well_is_measured_against_its_own_trend(self, compared):
+        """Not the shared one: a trend is what the ordinary rock in *that*
+        hole does, and measuring well B against well A's background would
+        report the difference between the wells as an anomaly in every
+        reflector of one of them."""
+        from avo_qi.core.avo import background_trend
+
+        results = compared.session_state["multiwell_results"]["results"]
+        rows = self.listing(compared)
+        assert len(rows)
+
+        checked = 0
+        for name, found in results.items():
+            table = found["table"]
+            own = background_trend(table["A_shuey"], table["B_shuey"])
+            shared = background_trend(
+                pd.concat([r["table"]["A_shuey"] for r in results.values()]),
+                pd.concat([r["table"]["B_shuey"] for r in results.values()]))
+            expected = np.asarray(
+                own.deviation(table["A_shuey"], table["B_shuey"]), dtype=float)
+            wrong = np.asarray(
+                shared.deviation(table["A_shuey"], table["B_shuey"]),
+                dtype=float)
+
+            for _, row in rows[rows["well"] == name].iterrows():
+                at = np.isclose(table["depth"].to_numpy(float), row["depth"],
+                                atol=1e-3)
+                assert at.sum() == 1, row["depth"]
+                mine = float(expected[at][0])
+                assert row["background_deviation"] == pytest.approx(mine,
+                                                                    abs=5e-4)
+                checked += 1
+
+            # And the two trends must actually differ, or the test above would
+            # pass with the shared trend used everywhere.
+            assert not np.allclose(expected, wrong, atol=5e-4)
+        assert checked >= 4
+
+    def test_both_wells_can_reach_the_top_of_the_list(self, compared):
+        """The whole point of scoring apart. With one shared scale the wider
+        well would own the ranking outright."""
+        rows = self.listing(compared)
+        assert set(rows["well"]) == {"DEMO-1", "15/9-19-A"}
+
+    def test_the_rank_is_dense_and_starts_at_one(self, compared):
+        rows = self.listing(compared).sort_values("rank")
+        assert list(rows["rank"]) == list(range(1, len(rows) + 1))
+
+    def test_the_score_is_signed(self, compared):
+        """A bright trough and a dim one are both anomalies and are not the
+        same finding, so the sign has to survive to the table."""
+        rows = self.listing(compared)
+        column = next(c for c in rows.columns if c.endswith("_z"))
+        assert (rows[column] < 0).any() and (rows[column] > 0).any()
+
+    def test_the_wells_are_scaled_separately(self, compared):
+        """Read off the caption, which is what a user would check."""
+        text = " ".join(c.value for c in compared.caption)
+        assert "own" in text and "median absolute deviation" in text
+
+    def test_the_attributes_reach_the_pooled_table(self, compared):
+        for found in compared.session_state["multiwell_results"]["results"].values():
+            assert {"rs", "fluid_factor", "ab_product"} <= set(found["table"].columns)

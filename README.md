@@ -32,9 +32,9 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 | **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, **fluid cases** assigned where the file carries them and modelled from industry-default fluids where it does not, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
-| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Then **class against property** — every reflector's φ, VSH, SW and net-to-gross averaged over the same two half-lobes its intercept and gradient were fitted from, every available property ranked by how well it separates the classes, and the one you pick drawn as a box and its own events. Ends with a one-click **self-contained HTML report**. |
+| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Then **AVO attributes** — pseudo-shear reflectivity and the Smith-Gidlow fluid factor at each reflector's own background Vp/Vs, an anomaly ranking scored in the well's own scatter, and a χ sweep that finds the rotation of the A–B plane best correlated with a rock property. Then **class against property** — every reflector's φ, VSH, SW and net-to-gross averaged over the same two half-lobes its intercept and gradient were fitted from, every available property ranked by how well it separates the classes, and the one you pick drawn as a box and its own events. Ends with a one-click **self-contained HTML report**. |
 | **Rock Physics** | A **rock physics template** — constant-porosity and constant-Sw curves on the AI vs Vp/Vs crossplot, so the axes read as porosity and saturation rather than merely "softer", built by running the per-sample forward model over the grid so the template and the prediction cannot drift apart. Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus Hertz-Mindlin soft-sand, stiff-sand and critical-porosity frames — raised dry-to-saturated through Gassmann on request. Then a **forward model** driven per-sample from VSH, PHIT and SW with a misfit readout, an optional **Monte Carlo** P10–P90 band, and **fluid substitution** at Batzle-Wang reservoir conditions. |
-| **Multi-well** | Every well in the library run through the *same* reflector pipeline and set side by side: an overview of what each well contributed, the intercept–gradient crossplot with all wells on it and a background trend fitted through the lot — a trend fitted in one hole is that hole's rock, fitted across several it is the field's — a curve of your choice against TVDSS or TVDBML, every picked event at its true vertical depth coloured by class and shaped by well, the class mix per well, and events by zone using **each well's own** tops — then the same class-against-property panel over every well at once, which is where a class-porosity relationship stops being one hole's coincidence. |
+| **Multi-well** | Every well in the library run through the *same* reflector pipeline and set side by side: an overview of what each well contributed, the intercept–gradient crossplot with all wells on it and a background trend fitted through the lot — a trend fitted in one hole is that hole's rock, fitted across several it is the field's — a curve of your choice against TVDSS or TVDBML, every picked event at its true vertical depth coloured by class and shaped by well, the class mix per well, and events by zone using **each well's own** tops — then the anomaly ranking and the class-against-property panel over every well at once — each well measured against its own trend and scored in its own scatter, which is where a relationship stops being one hole's coincidence and a quiet well's best event stays visible beside a noisy one's. |
 
 ## Layout
 
@@ -51,6 +51,7 @@ avo_qi/
 │   ├── wavelet.py              # Ricker, Ormsby, user wavelet ingest, spectrum
 │   ├── synthetic.py            # RC series + gather assembly
 │   ├── avo.py                  # A/B fits + classifier + background trend
+│   ├── avo_attributes.py       # pseudo-Rs, fluid factor, chi rotation, anomaly ranking
 │   ├── attributes.py           # AI, SI, Vp/Vs, Poisson, LMR, EEI
 │   ├── rockphysics.py          # bounds, trends, dry-frame granular models
 │   ├── blocking.py             # lobe windows, Backus upscaling to seismic resolution
@@ -230,6 +231,99 @@ Three things keep it honest:
   petrophysics in it. Those five reflectors now report `undefined over
   undefined`, and the interface-pair filter leaves them out by default and
   says on screen that it has.
+
+## AVO attributes
+
+A and B are a coordinate system, not an answer. Everything on the **AVO
+attributes** section is a way of reading a point in that plane against
+something — a background trend, the mudrock line, or a rock property the well
+actually measured.
+
+### Derived per reflector
+
+| Attribute | What it is |
+|---|---|
+| `rp` | P-impedance reflectivity — the intercept outright |
+| `rs` | S-impedance reflectivity implied by A and B |
+| `fluid_factor` | the P reflectivity the mudrock line does not explain |
+| `ab_product` | A·B, the crude quick indicator |
+| `vp_vs_background` | the ratio each of the above was computed at |
+
+That last column is the one worth arguing about. `rs` comes out of the
+two-term Aki-Richards form once a background Vp/Vs is assumed, and **at
+Vp/Vs = 2 the density terms cancel identically** — which is exactly why every
+textbook writes the relation as `Rs = (A − B)/2` there and nowhere else. Away
+from 2 they do not cancel, and a fixed ratio quietly converts a density
+contrast into shear reflectivity. So the ratio is read per reflector from its
+own **upper blocked layer** — the incident medium, which is what the incidence
+angle and therefore the gradient are measured in. On the demo well that ranges
+from 1.61 in the sand to 2.00 in the shale, and using a constant 2.0 instead
+moves `rs` by more than 0.005 on some reflectors, which `test_avo_attributes.py`
+pins.
+
+The **fluid factor** (Smith & Gidlow) is zero for a brine clastic on
+Castagna's mudrock line — that is what it is for. But the honest version of
+that sentence is longer, and the toolkit says the longer one: the
+*reflectivity* form leaves a residual wherever the density steps,
+
+```
+dF = ½ (Δρ/ρ) (1 − 1.16 · Vs/Vp)
+```
+
+which at Vp/Vs = 2 is about 0.42 times the density contrast. **A fluid factor
+is therefore not read against zero.** A compaction boundary has one. That is
+why the panel ranks it against its own background rather than against an
+absolute level, and why the tests pin the residual as a prediction rather than
+asserting it away.
+
+### Which reflectors are unusual?
+
+Ranked, not thresholded, and scored in units of **this well's own scatter** —
+a median absolute deviation of the deviations themselves. The raw distance
+from a background trend is not comparable between wells: a hole with a wide
+A–B cloud has every event looking anomalous, and 0.02 off the trend means
+different things in different wells.
+
+Two choices inside that:
+
+- **The MAD, not a standard deviation.** A standard deviation is inflated by
+  the very anomalies being looked for, so the strongest events would quietly
+  raise the yardstick they are measured with.
+- **About the trend, not about the median deviation.** The trend already *is*
+  the reference — a reflector on it is by definition ordinary — and
+  re-centring would move the zero somewhere the trend never put it. A cloud
+  sitting entirely to one side of its trend is a cloud of somewhat unusual
+  reflectors, and a centred score would call every one of them normal.
+
+You can rank on the distance from the trend, on the fluid factor, or on A·B;
+each is scored the same way, against its own spread.
+
+On the **Multi-well** page the same ranking runs across every compared well,
+with each well **measured against its own trend and scored in its own
+scatter** — pooling the scaling would let the noisiest hole set the yardstick
+and bury a quiet well's one genuine standout. The rank still spans the wells,
+because *what should I look at first* is one question across a field.
+
+### Which direction in the A–B plane is the fluid?
+
+Any direction is an attribute: `A cos χ + B sin χ`. Some angles have names —
+0° is the intercept, 90° the gradient, 45° the scaled Poisson reflectivity —
+but the useful one is found rather than named. The **χ sweep** correlates every
+rotation with a rock property measured on the same reflectors (the lobe-averaged
+φ, VSH, SW or net-to-gross from the section above) and reports the angle that
+wins, its sign, and how strongly.
+
+This is the intercept–gradient counterpart of the EEI χ sweep on the crossplots
+page, and the two ask the same question in different domains. Correlation is
+**Spearman** by default: the relationship between a reflection attribute and a
+rock property is monotonic far more often than it is linear, and a few dozen
+reflectors is exactly the sample size where one outlier decides a Pearson
+coefficient. The plot marks the trend's own perpendicular alongside the winner,
+because where those two coincide the fluid direction and the anomaly direction
+are the same thing — and where they do not, that is worth knowing.
+
+With a few dozen reflectors the angle is soft. A broad flat peak is a *range*
+of directions, and the caption says so rather than quoting a degree.
 
 ## What does the class depend on?
 
@@ -866,13 +960,26 @@ each curve's first valid reading — and the measured ranking of what the class
 depends on in that well, so a change to the blocking or the classifier that
 overturns it fails a test rather than leaving a confident sentence on screen.
 
+`test_avo_attributes.py` tests the derived attributes the strong way rather
+than against their own formulae: it builds an interface from Vp, Vs and rho,
+fits A and B off its **exact Zoeppritz** response, and asks whether the
+pseudo-shear reflectivity comes back to the S-impedance reflectivity the logs
+say it should be — it does, to 0.004. The fluid factor gets the same treatment
+on two lower layers under one shale, one on the mudrock line and one softened
+by gas: 0.003 against −0.107, a factor of thirty. Asserting the algebra
+against itself would have passed with the coefficients transposed.
+
 ## References
 
 - Aki & Richards (2002), *Quantitative Seismology*, 2nd ed. — reflectivity.
 - Rutherford & Williams (1989); Castagna & Swan (1997) — AVO classes, Class IV
   and the A–B background trend.
 - Shuey (1985) — the two-term `R(θ) = A + B sin²θ` intercept–gradient form.
-- Whitcombe (2002) — extended elastic impedance.
+- Whitcombe (2002) — extended elastic impedance, and the χ rotation the
+  intercept–gradient sweep mirrors.
+- Smith & Gidlow (1987), *Geophysical Prospecting* 35, 993–1014 — weighted
+  stacking and the fluid factor. Fatti et al. (1994) — the reflectivity form
+  it is computed in here.
 - Hashin & Shtrikman (1963); Mavko, Mukerji & Dvorkin, *The Rock Physics
   Handbook* — mixture bounds and the granular frame models.
 - Castagna, Batzle & Eastwood (1985); Greenberg & Castagna (1992) — Vp–Vs

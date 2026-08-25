@@ -31,6 +31,7 @@ from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     DEPTH_REFERENCES,
     active_well_name,
+    avo_attribute_panel,
     class_property_panel,
     page_setup,
     sidebar,
@@ -136,9 +137,20 @@ st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 st.divider()
 st.subheader("Intercept–gradient, all wells")
 
+# Each well's events carry their distance from **that well's own** trend, not
+# from the shared one. A trend is what the ordinary rock in a hole does, and
+# measuring well B's anomalies against well A's background would report the
+# difference between the two wells as an anomaly in every reflector of one.
+def _with_own_deviation(table, name):
+    own = background_trend(table["A_shuey"], table["B_shuey"])
+    deviation = (own.deviation(table["A_shuey"], table["B_shuey"])
+                 if np.isfinite(own.slope) else np.nan)
+    return table.assign(well=name, background_deviation=deviation)
+
+
 everything = pd.concat(
-    [found["table"].assign(well=name) for name, found in results.items()],
-    ignore_index=True)
+    [_with_own_deviation(found["table"], name)
+     for name, found in results.items()], ignore_index=True)
 shared = background_trend(everything["A_shuey"], everything["B_shuey"])
 
 fig = go.Figure()
@@ -293,6 +305,20 @@ if zoned:
     by_zone = pd.concat(zoned, ignore_index=True)
     st.dataframe(by_zone[["well"] + [c for c in by_zone.columns if c != "well"]],
                  use_container_width=True, hide_index=True)
+
+# -------------------------------------------------------- AVO attributes ----
+st.divider()
+st.subheader("AVO attributes, all wells")
+st.caption(
+    "Every well's reflectors ranked together, each scored against **its own** "
+    "background — the trend fitted through that hole and the scatter of that "
+    "hole's own deviations. Pooling the scaling instead would let the noisiest "
+    "well set the yardstick for all of them and bury a quiet well's best "
+    "event. The rank still spans the wells, because *what should I look at "
+    "first* is one question across a field."
+)
+avo_attribute_panel(everything, shared, key="multiwell_attributes",
+                    split_column="well")
 
 # ------------------------------------------------- class against property ---
 # The same panel page 4 carries, over every well at once. This is where it

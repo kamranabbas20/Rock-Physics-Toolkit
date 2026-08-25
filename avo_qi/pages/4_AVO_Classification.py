@@ -59,6 +59,7 @@ from avo_qi.core.uncertainty import (  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     ab_crossplot,
+    avo_attribute_panel,
     class_property_panel,
     vsh_series,
     detail_log_tracks,
@@ -496,6 +497,23 @@ if zone_intervals is not None and len(zone_intervals):
             st.caption(f"{_outside} of {len(table)} events sit above the "
                        "shallowest top or below the deepest, so they are in no "
                        "named zone and are not counted above.")
+
+# -------------------------------------------------------- AVO attributes ----
+# A and B are a coordinate system, not an answer. This reads a point in that
+# plane against something: the background trend, the mudrock line, or a rock
+# property the well actually measured.
+st.divider()
+st.subheader("AVO attributes")
+st.caption(
+    "Derived from the intercept and the gradient, with each reflector's "
+    "**own** background Vp/Vs taken from its upper blocked layer rather than "
+    "a textbook 2.0 — away from 2 the density terms stop cancelling, and a "
+    "fixed ratio turns a density contrast into shear reflectivity. "
+    "The **pseudo-shear reflectivity** and the **fluid factor** are in the "
+    "reflector table and the CSV alongside A and B."
+)
+avo_attribute_panel(table, trend if trend.n_points >= 2 else None,
+                    key="avo_attributes")
 
 # ------------------------------------------------- class against property ---
 # The classification so far says what the seismic does. This asks whether it

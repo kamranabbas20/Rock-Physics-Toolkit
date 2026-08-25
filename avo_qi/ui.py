@@ -1509,6 +1509,273 @@ def class_property_figure(table, column, label=None, classes=None, height=520,
     return fig
 
 
+#: Attributes an anomaly can be ranked on, with what each one is measuring.
+ANOMALY_ATTRIBUTES = {
+    "background_deviation": (
+        "Distance from the background trend",
+        "How far a reflector sits off the line the ordinary rock in its own "
+        "well runs along. The general-purpose anomaly measure: it makes no "
+        "assumption about lithology, only that most of a well is background."),
+    "fluid_factor": (
+        "Fluid factor",
+        "The part of the P reflectivity the mudrock line does not explain "
+        "(Smith & Gidlow). Read against its own background, not against zero — "
+        "the reflectivity form leaves a residual wherever the density steps, "
+        "so a compaction boundary has one too."),
+    "ab_product": (
+        "A·B product",
+        "Positive where intercept and gradient agree in sign — a bright trough "
+        "getting brighter, or a bright peak getting brighter. The classic "
+        "quick hydrocarbon indicator, and the crudest thing here."),
+}
+
+
+def avo_attribute_panel(table, trend, key, split_column=None):
+    """Anomaly ranking and a chi sweep, for any reflector table.
+
+    Two questions, in the order they get asked. *Which reflectors should I
+    look at?* — ranked against the well's own background rather than against
+    an absolute level, so the answer survives being carried to a noisier hole.
+    And *which direction in the A-B plane is my fluid?* — found by asking the
+    well, not by naming an angle in advance.
+
+    ``trend`` is whatever background the caller fitted, so the ranking is
+    against the same line the crossplot above it drew.
+    """
+    from avo_qi.core.avo_attributes import anomaly_ranking
+
+    available = {c: v for c, v in ANOMALY_ATTRIBUTES.items()
+                 if c in table.columns and table[c].notna().any()}
+    if not available:
+        st.info("No attribute to rank on yet.", icon=":material/info:")
+        return
+
+    st.markdown("**Which reflectors are unusual?**")
+    left, right = st.columns([3, 1])
+    column = left.selectbox("Rank on", list(available),
+                            format_func=lambda c: available[c][0],
+                            key=f"{key}_anomaly_on")
+    top_n = int(right.number_input("Show top", 3, 50, 10, 1,
+                                   key=f"{key}_anomaly_n"))
+    st.caption(available[column][1])
+
+    values = table[column].to_numpy(float)
+    # Split by well where there is one, so each hole is scored in its own
+    # scatter rather than in the noisiest one's.
+    ranked = anomaly_ranking(
+        values,
+        groups=(table[split_column].to_numpy(dtype=object)
+                if split_column and split_column in table.columns else None))
+    scored = table.assign(**{f"{column}_z": ranked["z"], "rank": ranked["rank"]})
+
+    if not np.isfinite(ranked["z"]).any():
+        st.info(
+            "Every reflector sits the same distance from the reference, so "
+            "none is unusual relative to the others — there is no scatter to "
+            "measure against.", icon=":material/info:")
+    else:
+        st.plotly_chart(_anomaly_figure(scored, column, ranked, top_n,
+                                        split_column=split_column),
+                        use_container_width=True)
+        show = [c for c in ("well", "depth", "tvdss", "avo_class", "litho_pair",
+                            "zone", column, f"{column}_z", "rank")
+                if c in scored.columns]
+        listing = scored.loc[scored["rank"].between(1, top_n), show]
+        listing = listing.sort_values("rank")
+        numeric = listing.select_dtypes("number").columns
+        st.dataframe(listing.assign(**{c: listing[c].round(4) for c in numeric}),
+                     use_container_width=True, hide_index=True)
+        whose = ("each well's" if isinstance(ranked["scale"], dict)
+                 else "this well's")
+        st.caption(
+            f"Scored in units of {whose} **own** scatter — "
+            + _scale_phrase(ranked["scale"]) + " over "
+            + f"{int(np.isfinite(ranked['z']).sum())} reflectors, taken about "
+            "the reference rather than about the median so a cloud sitting "
+            "entirely to one side still reads as unusual. Scaling several "
+            "wells together would let the noisiest one set the yardstick and "
+            "bury a quiet well's best event; the rank still spans them, "
+            "because *what should I look at first* is one question. The scale "
+            "is only as good as the events behind it: on a few dozen "
+            "reflectors read a z of 3 as *the strongest thing here*, not as a "
+            "probability."
+        )
+
+    st.divider()
+    st.markdown("**Which direction in the A–B plane is the fluid?**")
+    _chi_sweep_block(table, trend, key)
+
+
+def _scale_phrase(scale):
+    """The MAD used, named per well where the wells were scored apart."""
+    if isinstance(scale, dict):
+        parts = [f"**{value:.4f}** ({name})" for name, value in scale.items()
+                 if np.isfinite(value)]
+        if not parts:
+            return "no usable scatter"
+        if len(parts) == 1:
+            return "a median absolute deviation of " + parts[0]
+        return ("median absolute deviations of "
+                + ", ".join(parts[:-1]) + " and " + parts[-1])
+    return f"a median absolute deviation of **{scale:.4f}**"
+
+
+def _anomaly_figure(scored, column, ranked, top_n, split_column=None,
+                    height=560):
+    """The ranked attribute against depth, with the top events called out."""
+    depth_column = next((c for c in ("tvdss", "tvdbml", "depth", "twt")
+                         if c in scored.columns), None)
+    values = scored[column].to_numpy(float)
+    if depth_column is None:
+        depth = np.arange(len(scored), dtype=float)
+        depth_label = "reflector"
+    else:
+        depth = scored[depth_column].to_numpy(float)
+        depth_label = {"tvdss": "TVDSS (m)", "tvdbml": "TVDBML (m)",
+                       "depth": "Depth (m MD)", "twt": "TWT (s)"}[depth_column]
+
+    groups = (scored[split_column].to_numpy(dtype=object)
+              if split_column and split_column in scored.columns else None)
+    names = list(dict.fromkeys(groups.tolist())) if groups is not None else []
+    shapes = ["circle", "square", "diamond", "triangle-up", "x"]
+
+    fig = go.Figure()
+    fig.add_vline(x=0, line=dict(color="#666", width=1))
+    for avo_class in CLASS_COLOURS:
+        here = (scored["avo_class"].to_numpy(dtype=object) == avo_class) \
+            & np.isfinite(values)
+        if not here.any():
+            continue
+        for name in (names or [None]):
+            picked = here & (groups == name) if name is not None else here
+            if not picked.any():
+                continue
+            label = avo_class if name is None else f"{name} · {avo_class}"
+            fig.add_trace(go.Scatter(
+                x=values[picked], y=depth[picked], mode="markers", name=label,
+                showlegend=name is None, legendgroup=avo_class,
+                marker=dict(size=9, color=CLASS_COLOURS[avo_class],
+                            symbol=(shapes[names.index(name) % len(shapes)]
+                                    if name is not None else "circle"),
+                            line=dict(width=0.8, color="#FFFFFF")),
+                text=[f"{label} · z {v:+.2f}" for v in ranked["z"][picked]],
+                hovertemplate="%{x:.4f}<br>%{y:,.1f}<br>%{text}<extra></extra>"))
+
+    # One legend entry per well; the points are coloured by class, so a
+    # per-well colour in the legend would be a lie.
+    for k, name in enumerate(names):
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers", name=str(name),
+            marker=dict(size=9, color="#555555",
+                        symbol=shapes[k % len(shapes)])))
+
+    called = scored["rank"].between(1, top_n).to_numpy() & np.isfinite(values)
+    if called.any():
+        fig.add_trace(go.Scatter(
+            x=values[called], y=depth[called], mode="markers",
+            name=f"top {top_n}", showlegend=True,
+            marker=dict(size=17, color="rgba(0,0,0,0)", symbol="circle",
+                        line=dict(width=1.6, color="#20242A"))))
+
+    if depth_column is not None:
+        fig.update_yaxes(autorange="reversed")
+    fig.update_layout(xaxis_title=ANOMALY_ATTRIBUTES[column][0],
+                      yaxis_title=depth_label, height=height,
+                      margin=dict(l=70, r=20, t=30, b=50),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    return fig
+
+
+def _chi_sweep_block(table, trend, key):
+    """Rotate the A-B plane to the angle best correlated with a property."""
+    from avo_qi.core.avo_attributes import chi_rotation, chi_sweep, trend_chi
+
+    options = {c: label for c, label in property_options(table).items()
+               if not c.startswith(("depth", "tvd"))}
+    if not options:
+        st.info(
+            "A sweep needs a rock property to correlate against. The "
+            "petrophysical curves are averaged over each reflector's own "
+            "lobe, so this needs VSH, PHI or SW on the well.",
+            icon=":material/info:")
+        return
+
+    columns = list(options)
+    start = next((columns.index(c) for c in ("sw_res", "phi_res", "vsh_res")
+                  if c in columns), 0)
+    target = st.selectbox("Correlate the rotation with", columns, index=start,
+                          format_func=lambda c: options[c],
+                          key=f"{key}_chi_target")
+
+    found = chi_sweep(table["A_shuey"].to_numpy(float),
+                      table["B_shuey"].to_numpy(float),
+                      table[target].to_numpy(float))
+    if found.get("reason"):
+        st.info(f"No sweep: {found['reason']}.", icon=":material/info:")
+        return
+
+    angles = trend_chi(trend.slope if trend is not None else np.nan)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=found["chi"], y=found["correlation"], mode="lines",
+        line=dict(color=BRAND_PETROL, width=2.5), name="correlation"))
+    fig.add_hline(y=0, line=dict(color="#666", width=1))
+    fig.add_vline(x=found["best_chi"],
+                  line=dict(color="#20242A", width=1.6, dash="dash"),
+                  annotation_text=f"best χ = {found['best_chi']:.0f}°",
+                  annotation_position="top")
+    for angle, name, colour in ((0.0, "A", "#8899a6"), (90.0, "B", "#8899a6"),
+                                (angles["across"], "across the trend",
+                                 "#B4622D")):
+        if not np.isfinite(angle):
+            continue
+        wrapped = ((float(angle) + 90.0) % 180.0) - 90.0
+        fig.add_vline(x=wrapped, line=dict(color=colour, width=1, dash="dot"),
+                      annotation_text=name, annotation_position="bottom")
+    fig.update_layout(xaxis_title="χ (degrees from A towards B)",
+                      yaxis_title=f"Spearman ρ with {options[target]}",
+                      height=420, margin=dict(l=70, r=20, t=40, b=50),
+                      showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+    rotated = chi_rotation(table["A_shuey"].to_numpy(float),
+                           table["B_shuey"].to_numpy(float), found["best_chi"])
+    axis = (f"A·cos({found['best_chi']:.0f}°) + "
+            f"B·sin({found['best_chi']:.0f}°)")
+    st.plotly_chart(
+        crossplot(pd.DataFrame({axis: rotated,
+                                options[target]: table[target].to_numpy(float)}),
+                  x=axis, y=options[target], size=9,
+                  title="The winning rotation against the property it was "
+                        "chosen for", height=460),
+        use_container_width=True)
+
+    named = _nearest_named_chi(found["best_chi"])
+    st.caption(
+        f"Strongest at **χ = {found['best_chi']:.0f}°** "
+        f"(Spearman ρ = {found['best_correlation']:+.2f} over {found['n']} "
+        f"reflectors){named}. This is the intercept–gradient counterpart of "
+        "the EEI χ sweep on the crossplots page: rather than naming a "
+        "direction — 0° is the intercept, 90° the gradient, 45° the scaled "
+        "Poisson reflectivity — it asks the well which direction its own "
+        "property actually points in. The sign says which way: a negative ρ "
+        "means the property falls as the rotated attribute rises. With a few "
+        "dozen reflectors the angle is soft; treat a broad, flat peak as a "
+        "range of directions rather than one."
+    )
+
+
+def _nearest_named_chi(chi, tolerance=8.0):
+    """Name the rotation where it lands near one that has a name."""
+    from avo_qi.core.avo_attributes import NAMED_CHI
+
+    for angle, name in NAMED_CHI.items():
+        for candidate in (angle, angle - 180.0):
+            if abs(chi - candidate) <= tolerance:
+                return f", which is essentially the {name}"
+    return ""
+
+
 def class_dependence_ranking(table, options, min_per_group=3):
     """Every available property, ranked by how well it separates the classes.
 

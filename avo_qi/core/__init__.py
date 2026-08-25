@@ -3,6 +3,7 @@
 from . import (
     attributes,
     avo,
+    avo_attributes,
     blocking,
     lithology,
     mixing,
@@ -19,6 +20,7 @@ from . import (
 __all__ = [
     "attributes",
     "avo",
+    "avo_attributes",
     "blocking",
     "lithology",
     "mixing",

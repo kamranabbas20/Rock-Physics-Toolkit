@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 
 from avo_qi.core.avo import reflector_avo
+from avo_qi.core.avo_attributes import (MUDROCK_SLOPE, fluid_factor,
+                                        pseudo_shear_reflectivity)
 from avo_qi.core.blocking import (blocked_reflectivity, half_cycle_samples,
                                   lobe_windows)
 from avo_qi.core.lithology import interface_lithology, lobe_lithology
@@ -52,7 +54,8 @@ LOBE_CURVES = ("VSH", "PHI", "SW")
 
 
 def reflector_analysis(well, settings, case=None, block_method="backus",
-                       guard=2, lithology=True, zones=True, properties=True):
+                       guard=2, lithology=True, zones=True, properties=True,
+                       attributes=True):
     """Pick every reflector on one well's full stack and classify it.
 
     Parameters
@@ -70,6 +73,12 @@ def reflector_analysis(well, settings, case=None, block_method="backus",
     block_method, guard : str, int
         How the layers either side of an event are averaged, and the fallback
         window's guard where a lobe cannot be found.
+    attributes : bool
+        Add the derived AVO attributes — pseudo-shear reflectivity, the fluid
+        factor and the A·B product — to every event.  They are algebra on A
+        and B and cost nothing; what they need that a caller cannot easily
+        supply is each reflector's own background Vp/Vs, which comes from the
+        blocked layers here.
     lithology, zones, properties : bool
         Add the lithology, the zone and the petrophysics either side of each
         event, all three read over the same half-lobes the elastic properties
@@ -217,6 +226,9 @@ def reflector_analysis(well, settings, case=None, block_method="backus",
     if properties:
         table = table.assign(**_lobe_properties(tw, settings, bounds, samples))
 
+    if attributes:
+        table = table.assign(**_avo_attributes(table, blocked, settings))
+
     out.update({"table": table, "blocked": blocked, "lobe_bounds": bounds,
                 "fixed_table": fixed_table})
     return out
@@ -273,3 +285,36 @@ def _lobe_properties(tw, settings, bounds, samples):
             columns[f"{base}_res"] = pick_side(sides, columns[f"{base}_above"],
                                                columns[f"{base}_below"])
     return columns
+
+
+def _avo_attributes(table, blocked, settings):
+    """Pseudo-Rs, the fluid factor and the A·B product, per reflector.
+
+    The background Vp/Vs is each reflector's **own upper blocked layer**, not
+    a constant 2.0.  It matters: away from 2 the density terms in the
+    Aki-Richards form stop cancelling, so a fixed ratio quietly turns a
+    density contrast into shear reflectivity.  The upper layer is the right
+    side to take it from — the incident medium is what the incidence angle,
+    and so the gradient, is measured in.
+
+    Where a lobe gave no usable velocities the ratio falls back to the
+    well-wide median rather than to a textbook constant, so the number still
+    comes from this well.
+    """
+    A = table["A_shuey"].to_numpy(float)
+    B = table["B_shuey"].to_numpy(float)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.asarray(blocked["vp_upper"], float) / np.asarray(
+            blocked["vs_upper"], float)
+    ratio = np.where(np.isfinite(ratio) & (ratio > 0), ratio, np.nan)
+    fallback = float(np.nanmedian(ratio)) if np.isfinite(ratio).any() else 2.0
+    ratio = np.where(np.isfinite(ratio), ratio, fallback)
+
+    slope = float(getattr(settings, "mudrock_slope", MUDROCK_SLOPE))
+    rs = np.array([pseudo_shear_reflectivity(a, b, vp_vs=r)
+                   for a, b, r in zip(A, B, ratio)], dtype=float)
+    factor = np.array([fluid_factor(a, s_, vp_vs=r, slope=slope)
+                       for a, s_, r in zip(A, rs, ratio)], dtype=float)
+    return {"rp": A, "rs": rs, "fluid_factor": factor, "ab_product": A * B,
+            "vp_vs_background": ratio}
