@@ -13,8 +13,15 @@ import numpy as np
 import pytest
 
 from avo_qi.core.fluids import (
+    BRINE_PRESETS,
+    CONDITION_DEFAULTS,
     FITTED_RANGE,
+    FLUID_DEFAULTS,
+    GAS_PRESETS,
+    OIL_PRESETS,
     brine_properties,
+    fluid_suite,
+    mix_two_fluids,
     fluid_properties,
     gas_properties,
     geothermal_temperature,
@@ -185,3 +192,142 @@ class TestFacade:
                                      geothermal_temperature(depth))
         assert k.shape == depth.shape == rho.shape
         assert np.all(np.isfinite(k)) and np.all(k > 0)
+
+
+class TestIndustryDefaults:
+    """A well with no fluid cases still has to be substitutable, which means
+    starting values for fluids nobody has measured here."""
+
+    def test_the_defaults_are_ordinary_industry_values(self):
+        assert FLUID_DEFAULTS["salinity"] == pytest.approx(0.035)   # seawater
+        assert 20.0 < FLUID_DEFAULTS["api"] < 45.0
+        assert 0.5 < FLUID_DEFAULTS["gas_gravity"] < 1.0
+        assert CONDITION_DEFAULTS["pressure_gradient"] == pytest.approx(10.0)
+
+    def test_every_preset_is_a_usable_argument(self):
+        """A preset that does not evaluate is a trap, not a convenience."""
+        for salinity in BRINE_PRESETS.values():
+            k, rho = brine_properties(30.0, 90.0, salinity)
+            assert 1.0 < k < 5.0 and 0.9 < rho < 1.25
+        for api, gor in OIL_PRESETS.values():
+            k, rho = oil_properties(30.0, 90.0, api, gor)
+            assert 0.05 < k < 2.5 and 0.4 < rho < 1.05
+        for gravity in GAS_PRESETS.values():
+            k, rho = gas_properties(30.0, 90.0, gravity)
+            assert 0.0 < k < 0.5 and 0.05 < rho < 0.5
+
+    def test_the_presets_are_ordered_the_way_they_are_named(self):
+        saltier = list(BRINE_PRESETS.values())
+        assert saltier == sorted(saltier)
+        heavier = [k for k, _ in OIL_PRESETS.values()]
+        assert heavier == sorted(heavier, reverse=True)   # API falls as oil thickens
+
+
+class TestFluidSuite:
+    DEPTH = np.array([1000.0, 2000.0, 3000.0, 4000.0])
+
+    def test_it_puts_every_fluid_on_the_wells_own_conditions(self):
+        suite = fluid_suite(self.DEPTH)
+        assert suite["pressure"] == pytest.approx([10.0, 20.0, 30.0, 40.0])
+        assert suite["temperature"] == pytest.approx([45.0, 75.0, 105.0, 135.0])
+        for case in ("brine", "oil", "gas"):
+            k, rho = suite[case]
+            assert k.shape == self.DEPTH.shape
+            assert np.isfinite(k).all() and np.isfinite(rho).all()
+
+    def test_the_fluids_stay_in_their_physical_order(self):
+        """Brine is the stiffest and densest, gas the softest and lightest —
+        at every depth, or a substitution would move the rock the wrong way."""
+        suite = fluid_suite(self.DEPTH)
+        k_brine, rho_brine = suite["brine"]
+        k_oil, rho_oil = suite["oil"]
+        k_gas, rho_gas = suite["gas"]
+        assert (k_brine > k_oil).all() and (k_oil > k_gas).all()
+        assert (rho_brine > rho_oil).all() and (rho_oil > rho_gas).all()
+
+    def test_gas_stiffens_with_depth(self):
+        """The reason the table constants are not good enough: gas at 40 MPa is
+        several times the modulus of gas at 10."""
+        k_gas = fluid_suite(self.DEPTH)["gas"][0]
+        assert (np.diff(k_gas) > 0).all()
+        assert k_gas[-1] > 2.0 * k_gas[0]
+
+    def test_the_parameters_can_be_overridden_and_are_reported_back(self):
+        suite = fluid_suite(self.DEPTH, parameters={"salinity": 0.20})
+        assert suite["parameters"]["salinity"] == pytest.approx(0.20)
+        assert suite["parameters"]["api"] == FLUID_DEFAULTS["api"]   # the rest stand
+        saltier = suite["brine"][1]
+        assert (saltier > fluid_suite(self.DEPTH)["brine"][1]).all()
+
+    def test_a_datum_shifts_the_whole_profile(self):
+        """An offshore well's MD starts at a rig floor, not at the sea bed, so
+        the gradients cannot start at zero depth."""
+        shifted = fluid_suite(self.DEPTH, datum=100.0)
+        assert shifted["pressure"] == pytest.approx([9.0, 19.0, 29.0, 39.0])
+
+    def test_conditions_outside_the_fitted_range_are_reported(self):
+        shallow = fluid_suite(np.array([100.0, 200.0]))
+        assert shallow["warnings"], "an extrapolation must not pass silently"
+        assert "outside the range" in next(iter(shallow["warnings"].values()))
+
+
+class TestMixingTwoFluids:
+    K_BRINE, RHO_BRINE = 2.7, 1.02
+    K_GAS, RHO_GAS = 0.06, 0.20
+
+    def _mix(self, sw, law="wood"):
+        return mix_two_fluids(self.K_BRINE, self.RHO_BRINE, self.K_GAS,
+                              self.RHO_GAS, sw, law=law)
+
+    def test_the_end_members_are_the_fluids_themselves(self):
+        k, rho = self._mix(np.array([1.0, 0.0]))
+        assert k[0] == pytest.approx(self.K_BRINE)
+        assert k[1] == pytest.approx(self.K_GAS)
+        assert rho == pytest.approx([self.RHO_BRINE, self.RHO_GAS])
+
+    def test_a_little_gas_dominates_under_wood(self):
+        """The classic result: 10% gas takes a brine-filled pore most of the
+        way to a gas-filled one."""
+        k = self._mix(np.array([0.9]))[0][0]
+        assert k < 0.2 * self.K_BRINE
+
+    def test_patchy_is_the_stiff_limit_and_wood_the_soft_one(self):
+        sw = np.linspace(0.05, 0.95, 10)
+        soft = self._mix(sw, "wood")[0]
+        stiff = self._mix(sw, "patchy")[0]
+        assert (soft < stiff).all()
+
+    def test_brie_sits_between_them_except_where_it_is_known_not_to(self):
+        """`core.mixing.brie` says it: above roughly 90% gas the e = 3 curve
+        crosses marginally below Wood's. It is an empirical fit, not a bound,
+        and the vectorised form here must behave the same way."""
+        sw = np.linspace(0.2, 0.95, 10)
+        between = self._mix(sw, "brie")[0]
+        assert (between >= self._mix(sw, "wood")[0] - 1e-9).all()
+        assert (between <= self._mix(sw, "patchy")[0] + 1e-9).all()
+
+        very_gassy = np.array([0.05])
+        assert self._mix(very_gassy, "brie")[0][0] < self._mix(very_gassy, "wood")[0][0]
+
+    def test_density_is_the_volume_average_under_every_law(self):
+        for law in ("wood", "patchy", "brie"):
+            rho = mix_two_fluids(self.K_BRINE, self.RHO_BRINE, self.K_GAS,
+                                 self.RHO_GAS, [0.3], law=law)[1]
+            assert rho[0] == pytest.approx(0.3 * self.RHO_BRINE + 0.7 * self.RHO_GAS)
+
+    def test_it_follows_a_depth_varying_fluid(self):
+        suite = fluid_suite(np.array([2000.0, 3000.0, 4000.0]))
+        k_brine, rho_brine = suite["brine"]
+        k_gas, rho_gas = suite["gas"]
+        k, rho = mix_two_fluids(k_brine, rho_brine, k_gas, rho_gas, 0.2)
+        assert k.shape == (3,)
+        assert (k < k_brine).all()
+
+    def test_saturations_outside_zero_to_one_are_clipped(self):
+        k, _ = self._mix(np.array([-0.5, 1.5]))
+        assert k[0] == pytest.approx(self.K_GAS)
+        assert k[1] == pytest.approx(self.K_BRINE)
+
+    def test_an_unknown_law_is_rejected(self):
+        with pytest.raises(ValueError, match="unknown mixing law"):
+            self._mix([0.5], law="magic")

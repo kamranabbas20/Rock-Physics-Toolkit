@@ -612,3 +612,69 @@ class TestThePetrophysicsQuestionOnARealWell:
             assert np.allclose(at.session_state["well"].df[curve].to_numpy(float),
                                values, equal_nan=True), curve
         assert set(at.session_state["petro_source"].values()) == {"file"}
+
+
+class TestModellingFluidCasesOnARealWell:
+    """15/9-19-A carries one set of logs and no fluid cases at all, which is
+    the ordinary case and the reason the toolkit models them."""
+
+    def test_it_arrives_with_nothing_to_compare(self):
+        well = load()[0]
+        assert well.cases == ["in situ"]
+        assert not well.has_fluid_cases
+
+    @staticmethod
+    def _modelled():
+        at = run_page(os.path.join(PAGES, "1_Load_and_QC.py"))
+        next(b for b in at.button
+             if b.label == "Model the fluid cases").click().run()
+        assert not at.exception
+        return at
+
+    def test_the_three_cases_appear_and_are_labelled_computed(self):
+        well = self._modelled().session_state["well"]
+        assert well.cases == ["in situ", "brine", "oil", "gas"]
+        assert well.computed_cases == ["brine", "oil", "gas"]
+
+    def test_the_reservoir_moves_and_the_rest_of_the_well_does_not(self):
+        well = self._modelled().session_state["well"]
+        # The page's own criterion, not a variant of it: VSH at or below the
+        # silty-sand cutoff, wherever VSH exists.
+        vsh = well.df["VSH"].to_numpy(float)
+        reservoir = np.isfinite(vsh) & (vsh <= 0.35)
+        assert reservoir.sum() > 300
+
+        in_situ = well.frame("in situ")["VP"].to_numpy(float)
+        gas = well.frame("gas")["VP"].to_numpy(float)
+        assert not np.allclose(gas[reservoir], in_situ[reservoir])
+        assert np.allclose(gas[~reservoir], in_situ[~reservoir], equal_nan=True)
+
+    def test_the_fluids_come_out_in_their_physical_order(self):
+        well = self._modelled().session_state["well"]
+        moved = ~np.isclose(well.frame("gas")["VP"].to_numpy(float),
+                            well.frame("in situ")["VP"].to_numpy(float))
+        assert moved.sum() > 300
+        rho = {c: well.frame(c)["RHOB"].to_numpy(float)[moved]
+               for c in ("brine", "oil", "gas")}
+        assert (rho["brine"] > rho["oil"]).all() and (rho["oil"] > rho["gas"]).all()
+        vp = {c: well.frame(c)["VP"].to_numpy(float)[moved]
+              for c in ("brine", "oil", "gas")}
+        assert np.median(vp["brine"]) > np.median(vp["oil"]) > np.median(vp["gas"])
+
+    def test_a_modelled_case_carries_through_to_the_avo_page(self):
+        """The point of writing them as ordinary cases: every other page picks
+        them up through machinery that already existed."""
+        at = self._modelled()
+        well = at.session_state["well"]
+        settings = at.session_state["settings"]
+        settings.case = "gas"
+
+        page = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                                 default_timeout=300)
+        page.session_state["well"] = well
+        page.session_state["raw_df"] = at.session_state["raw_df"]
+        page.session_state["raw_units"] = at.session_state["raw_units"]
+        page.session_state["settings"] = settings
+        page.run()
+        assert not page.exception
+        assert len(reflector_table(page)) > 0

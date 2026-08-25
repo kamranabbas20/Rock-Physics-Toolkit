@@ -29,7 +29,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 
 | Page | What it does |
 |------|--------------|
-| **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
+| **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, **fluid cases** assigned where the file carries them and modelled from industry-default fluids where it does not, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
 | **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Ends with a one-click **self-contained HTML report**. |
@@ -344,6 +344,50 @@ cover brine (`_BR`, `_BRINE`,
 only kept when all three of Vp, Vs and RHOB are present for it. Curves like
 `VSH` are never mistaken for a shear log, because a suffix has to be a known
 fluid token.
+
+**Where the naming does not follow the convention** — cases called `VP_1` and
+`VP_2`, or an *oil* set that is really the in-situ one — the detector cannot
+read it and has to be told. *5 · Fluid cases* on the Load & QC page shows each
+case's three curves as dropdowns over the file's columns and applies the
+assignment by hand.
+
+### Modelling the cases a well does not have
+
+Many wells arrive with one set of logs and nothing to compare it against. The
+same section models the standard suite in one pass, and writes ordinary fluid
+cases: brine, oil and gas, each labelled *(computed)*, flowing through every
+page exactly as loaded ones do.
+
+The fluids are **industry defaults you can overwrite** — seawater-salinity
+brine, a medium live oil at 32° API and GOR 100, a slightly wet 0.65 gas — with
+named presets for fresher and saltier brines, lighter and heavier oils, and
+drier and richer gases. They are ordinary starting values, not this field's
+fluids: a real salinity, API and GOR come from a PVT report. Pressure and
+temperature are taken **from the depth log** through a hydrostatic gradient and
+a geothermal one, so a substitution follows the conditions down the well rather
+than holding one number over 600 m. Gas at 40 MPa is several times the modulus
+of gas at 10, which is exactly what a fixed table gets wrong.
+
+Three modelling choices are explicit rather than buried:
+
+- **What is in the pores now.** A well logged in a gas leg is not brine-filled.
+  Tell Gassmann it is and you are telling it the rock is stiffer than the logs
+  say: on the demo well's gas sand every sample is refused with a negative dry
+  frame. It does not quietly put the gas effect in twice, which is the failure
+  mode worth having.
+- **Water left in the hydrocarbon cases**, default 20%. A reservoir at residual
+  water, not a pore of pure gas — which is not a rock that exists.
+- **Reservoir only.** Gassmann assumes a connected, isotropic frame, and a
+  shale is neither. Outside the VSH cutoff each case keeps the well's own
+  curves rather than going blank, which is what an interpreter does and also
+  what keeps the gather computable: a blank seal above a substituted sand
+  deletes the very interface the case was built to show.
+
+One result worth keeping in mind: **"brine, then oil, then gas" is a soft-rock
+ordering, not a law.** Vp = √((K + 4µ/3)/ρ), so in a tight, stiff frame the
+pore fluid barely moves K but still moves ρ, and gas can come out marginally
+*faster* than oil. The demo well's cemented streak does exactly that, and the
+tests pin it.
 
 What the cases unlock:
 

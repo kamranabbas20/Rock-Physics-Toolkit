@@ -34,7 +34,62 @@ __all__ = [
     "hydrostatic_pressure",
     "geothermal_temperature",
     "in_range",
+    "FLUID_DEFAULTS",
+    "CONDITION_DEFAULTS",
+    "BRINE_PRESETS",
+    "OIL_PRESETS",
+    "GAS_PRESETS",
+    "mix_two_fluids",
+    "fluid_suite",
 ]
+
+#: Industry-default pore fluids, for a well that arrives with no substituted
+#: cases at all.  They are ordinary starting values — seawater-salinity brine,
+#: a medium live oil, a fairly dry gas — chosen so a first pass is *defensible*
+#: rather than *right*: the fluid a reservoir actually holds is a PVT report's
+#: answer, not a default's, and every one of these is exposed in the UI.
+FLUID_DEFAULTS = {
+    "salinity": 0.035,       # seawater, ~35 000 ppm NaCl equivalent
+    "api": 32.0,             # a medium crude
+    "gor": 100.0,            # live oil, litres of gas per litre of oil
+    "gas_gravity": 0.65,     # slightly wet gas, air = 1
+}
+
+#: Default pressure and temperature profile.  Normal hydrostatic pressure and
+#: an average geothermal gradient — the two things that turn a depth into the
+#: reservoir conditions Batzle-Wang needs.
+CONDITION_DEFAULTS = {
+    "pressure_gradient": 10.0,        # MPa/km, a normally pressured column
+    "temperature_surface": 15.0,      # degrees C at the datum
+    "temperature_gradient": 30.0,     # degrees C/km
+}
+
+#: Named starting points, all generic industry values rather than field data.
+BRINE_PRESETS = {
+    "fresh water (5 000 ppm)": 0.005,
+    "brackish (15 000 ppm)": 0.015,
+    "seawater (35 000 ppm)": 0.035,
+    "saline formation brine (100 000 ppm)": 0.100,
+    "near-saturated brine (200 000 ppm)": 0.200,
+}
+
+#: ``{name: (API gravity, GOR in L/L)}``.  A dead oil is a different rock
+#: response from a live one — a GOR of 100 can halve the modulus — so the two
+#: travel together.
+OIL_PRESETS = {
+    "light live oil (40° API, GOR 200)": (40.0, 200.0),
+    "medium live oil (32° API, GOR 100)": (32.0, 100.0),
+    "heavy dead oil (20° API, GOR 0)": (20.0, 0.0),
+}
+
+#: ``{name: specific gravity relative to air}``.
+GAS_PRESETS = {
+    "dry methane (0.56)": 0.56,
+    "dry gas (0.60)": 0.60,
+    "slightly wet gas (0.65)": 0.65,
+    "wet gas (0.80)": 0.80,
+    "rich/condensate gas (1.00)": 1.00,
+}
 
 #: Batzle & Wang's coefficient matrix for the velocity of pure water, w[i][j]
 #: multiplying ``T**i * P**j``.
@@ -242,3 +297,81 @@ def fluid_properties(fluid, pressure, temperature, salinity=0.035, api=30.0,
         )
     return float(k) if np.ndim(k) == 0 else k, \
         float(rho) if np.ndim(rho) == 0 else rho, warning
+
+
+# ----------------------------------------------------------- a whole suite ---
+def mix_two_fluids(k_brine, rho_brine, k_hc, rho_hc, sw, law="wood",
+                   brie_exponent=3.0):
+    """Effective pore fluid of a brine and a hydrocarbon, sample by sample.
+
+    :func:`avo_qi.core.mixing.fluid_mix` does the same for one sample with any
+    number of phases; this is the two-phase case done down a whole log, where
+    the moduli vary with depth and the saturation varies with the rock.
+
+    ``law`` is ``'wood'`` (finely mixed — a little gas dominates), ``'patchy'``
+    (segregated, so the phases stiffen independently) or ``'brie'``.  Density
+    is the volume-weighted average under every law: mass adds however the
+    phases are arranged.
+    """
+    k_brine, rho_brine, k_hc, rho_hc, sw = (
+        np.asarray(x, dtype=float) for x in (k_brine, rho_brine, k_hc, rho_hc, sw))
+    sw = np.clip(sw, 0.0, 1.0)
+    key = str(law).strip().lower()
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if key == "wood":
+            k = 1.0 / (sw / k_brine + (1.0 - sw) / k_hc)
+        elif key == "patchy":
+            k = sw * k_brine + (1.0 - sw) * k_hc
+        elif key == "brie":
+            k = (k_brine - k_hc) * np.power(sw, float(brie_exponent)) + k_hc
+        else:
+            raise ValueError(
+                f"unknown mixing law {law!r}; expected 'wood', 'patchy' or 'brie'")
+    rho = sw * rho_brine + (1.0 - sw) * rho_hc
+    return np.where(np.isfinite(k), k, np.nan), rho
+
+
+def fluid_suite(depth, cases=("brine", "oil", "gas"), parameters=None,
+                conditions=None, datum=0.0):
+    """``(K, rho)`` down the well for each of the standard pore fluids.
+
+    The one call a "this well has no fluid cases, model them" flow needs: it
+    turns a depth log into reservoir pressure and temperature, then evaluates
+    Batzle-Wang for each fluid at every sample, so a substitution follows the
+    conditions down the well instead of holding one number over 600 m.
+
+    ``parameters`` overrides :data:`FLUID_DEFAULTS`, ``conditions``
+    overrides :data:`CONDITION_DEFAULTS`.  ``datum`` is the depth the gradients
+    start from — sea level for an offshore well quoted in MD from a rig floor,
+    which is why it is a parameter and not a zero.
+
+    Returns
+    -------
+    dict
+        ``{case: (K, rho)}`` plus ``pressure``, ``temperature``, ``parameters``,
+        ``conditions`` and ``warnings`` — the last a ``{case: sentence}`` for
+        any fluid evaluated outside the range the correlations were fitted
+        over, so an extrapolation cannot be presented as a measurement.
+    """
+    depth = np.asarray(depth, dtype=float)
+    values = dict(FLUID_DEFAULTS)
+    values.update(parameters or {})
+    setting = dict(CONDITION_DEFAULTS)
+    setting.update(conditions or {})
+
+    pressure = hydrostatic_pressure(depth, setting["pressure_gradient"], datum)
+    temperature = geothermal_temperature(depth, setting["temperature_surface"],
+                                         setting["temperature_gradient"], datum)
+
+    out = {"pressure": pressure, "temperature": temperature,
+           "parameters": values, "conditions": setting, "warnings": {}}
+    for case in cases:
+        k, rho, warning = fluid_properties(
+            case, pressure, temperature, salinity=values["salinity"],
+            api=values["api"], gor=values["gor"],
+            gas_gravity=values["gas_gravity"])
+        out[case] = (k, rho)
+        if warning:
+            out["warnings"][case] = warning
+    return out

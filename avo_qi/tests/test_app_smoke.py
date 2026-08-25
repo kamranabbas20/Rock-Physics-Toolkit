@@ -1842,3 +1842,140 @@ class TestThePetrophysicsQuestion:
              if b.label == "Apply interpretation").click().run()
         dolomite = at.session_state["well"].df["PHI"].to_numpy(float)
         assert np.nanmedian(dolomite - quartz) > 0.05
+
+
+class TestFluidCasesOnAWellThatHasThem:
+    """The demo well arrives with brine, oil and gas already computed. Those
+    are read as they are — and can be re-assigned when the naming does not
+    follow the convention the detector reads."""
+
+    @staticmethod
+    def _page():
+        return run_page(os.path.join(PAGES, "1_Load_and_QC.py"), timeout=180)
+
+    def test_the_page_lists_them_and_says_where_they_came_from(self, qc_page):
+        assert "5 · Fluid cases" in {s.value for s in qc_page.subheader}
+        listed = None
+        for element in qc_page.dataframe:
+            frame = element.value
+            if hasattr(frame, "columns") and {"case", "source"} <= set(frame.columns):
+                listed = frame
+        assert listed is not None
+        assert set(listed["case"]) == {"in situ", "brine", "oil", "gas"}
+        assert set(listed["source"]) == {"read from the file"}
+
+    def test_every_case_curve_can_be_assigned_by_hand(self, qc_page):
+        labels = {s.label for s in qc_page.selectbox}
+        for case in ("in situ", "brine", "oil", "gas"):
+            for curve in ("VP", "VS", "RHOB"):
+                assert f"{curve} ({case})" in labels
+
+    def test_a_hand_assignment_overrides_the_detector(self):
+        """A file naming its cases VP_1 and VP_2, or labelling the in-situ
+        curves 'oil', cannot be read off the mnemonic and has to be told."""
+        at = self._page()
+        for curve in ("VP", "VS", "RHOB"):
+            next(s for s in at.selectbox
+                 if s.label == f"{curve} (gas)").set_value(f"{curve}_OIL")
+        at.run()
+        next(b for b in at.button if b.label == "Apply fluid cases").click().run()
+        assert not at.exception
+
+        well = at.session_state["well"]
+        assert np.allclose(well.frame("gas")["VP"].to_numpy(float),
+                           well.frame("oil")["VP"].to_numpy(float))
+        assert any("assigned by hand" in note for note in well.notes)
+
+    def test_an_incomplete_assignment_is_refused(self):
+        at = self._page()
+        for case in ("in situ", "brine", "oil", "gas"):
+            for curve in ("VP", "VS", "RHOB"):
+                next(s for s in at.selectbox
+                     if s.label == f"{curve} ({case})").set_value("— none —")
+        at.run()
+        next(b for b in at.button if b.label == "Apply fluid cases").click().run()
+        assert any("No case has all three" in e.value for e in at.error)
+        # ...and the well is left exactly as it was.
+        assert at.session_state["well"].cases == ["in situ", "brine", "oil", "gas"]
+
+
+class TestModellingTheFluidCases:
+    """A well with one set of logs still has to be comparable across fluids."""
+
+    @staticmethod
+    def _unsubstituted():
+        """The demo well with its own cases stripped off."""
+        from avo_qi.io.loader import detect_fluid_cases, standardise
+
+        _well, raw, units = demo_well()
+        substituted = {column
+                       for case, curves in detect_fluid_cases(raw.columns).items()
+                       if case != "in situ" for column in curves.values()}
+        thin = raw[[c for c in raw.columns if c not in substituted]]
+        return standardise(thin, units=units, name="DEMO-1"), thin, units
+
+    def _page(self):
+        well, raw, units = self._unsubstituted()
+        at = AppTest.from_file(os.path.join(PAGES, "1_Load_and_QC.py"),
+                               default_timeout=180)
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = raw
+        at.session_state["raw_units"] = units
+        at.run()
+        assert not at.exception
+        return at
+
+    def test_the_page_offers_to_model_what_is_missing(self):
+        at = self._page()
+        assert at.session_state["well"].cases == ["in situ"]
+        offered = next(m for m in at.multiselect if m.label == "Cases to model")
+        assert set(offered.value) == {"brine", "oil", "gas"}
+        assert "Model the fluid cases" in {b.label for b in at.button}
+
+    def test_modelling_writes_three_cases_marked_as_computed(self):
+        at = self._page()
+        next(b for b in at.button if b.label == "Model the fluid cases").click().run()
+        assert not at.exception
+        well = at.session_state["well"]
+        assert well.cases == ["in situ", "brine", "oil", "gas"]
+        assert well.computed_cases == ["brine", "oil", "gas"]
+        assert not well.is_computed("in situ")
+
+    def test_the_modelled_cases_are_complete_curves(self):
+        """Outside the reservoir cutoff each case keeps the well's own logs, so
+        the seal above a substituted sand is still there — without which the
+        gather would have a hole at the interface the case was built to show."""
+        at = self._page()
+        next(b for b in at.button if b.label == "Model the fluid cases").click().run()
+        well = at.session_state["well"]
+        for case in ("brine", "oil", "gas"):
+            assert well.frame(case)["VP"].notna().all(), case
+
+    def test_it_reports_what_was_substituted_and_what_was_left(self):
+        at = self._page()
+        next(b for b in at.button if b.label == "Model the fluid cases").click().run()
+        said = " ".join(s.value for s in at.success)
+        assert "substituted" in said
+        assert "outside the reservoir cutoff" in said
+        assert "keeping the well's own curves" in said
+
+    def test_the_defaults_are_the_industry_ones(self):
+        at = self._page()
+        chosen = {s.label: s.value for s in at.selectbox}
+        assert "seawater" in chosen["Brine"]
+        assert "32° API" in chosen["Oil"]
+        values = {n.label: n.value for n in at.number_input}
+        assert values["Pressure gradient (MPa/km)"] == pytest.approx(10.0)
+        assert values["Geothermal gradient (°C/km)"] == pytest.approx(30.0)
+
+    def test_a_well_with_no_porosity_is_told_why_it_cannot(self):
+        well, raw, units = self._unsubstituted()
+        well.df = well.df.drop(columns=["PHI"])
+        at = AppTest.from_file(os.path.join(PAGES, "1_Load_and_QC.py"),
+                               default_timeout=180)
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = raw
+        at.session_state["raw_units"] = units
+        at.run()
+        assert not at.exception
+        assert any("needs a porosity curve" in i.value for i in at.info)

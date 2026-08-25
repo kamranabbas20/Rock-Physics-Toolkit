@@ -36,6 +36,7 @@ __all__ = [
     "detect_fluid_cases",
     "case_column",
     "add_substituted_case",
+    "add_standard_cases",
 ]
 
 #: The curves ``core/`` needs, plus the optional ones the crossplots colour by.
@@ -450,6 +451,17 @@ class WellData:
         if case not in FLUID_CASES:
             raise ValueError(f"case {case!r} is not one of {FLUID_CASES}")
         length = len(self.df)
+
+        # A well with no registered case still *has* one: the logs in the plain
+        # VP/VS/RHOB columns. Adding a modelled case without first putting those
+        # somewhere of their own would leave the well's own measurements
+        # unreachable by name the moment a model arrived.
+        if not self.cases and case != self.active_case and \
+                all(c in self.df.columns for c in _CASE_CURVES):
+            for name in _CASE_CURVES:
+                self.df[case_column(name, self.active_case)] = self.df[name]
+            self.cases = [self.active_case]
+
         for name, values in (("VP", vp), ("VS", vs), ("RHOB", rho)):
             values = np.asarray(values, dtype=float).ravel()
             if values.size != length:
@@ -470,7 +482,7 @@ class WellData:
 
 
 def add_substituted_case(well, target, fluid_in, fluid_out, porosity, k_mineral,
-                         source_case=None):
+                         source_case=None, where=None, fill_invalid=False):
     """Gassmann-substitute one of a well's cases and attach the result.
 
     Parameters
@@ -489,6 +501,17 @@ def add_substituted_case(well, target, fluid_in, fluid_out, porosity, k_mineral,
         Mineral bulk modulus in GPa, scalar or per sample.
     source_case : str, optional
         Which case to substitute *from*; the active case by default.
+    where : array_like of bool, optional
+        Substitute only these samples — the reservoir, usually.  Gassmann
+        assumes a connected, isotropic frame, which a shale is not, and running
+        it on one produces a negative dry frame rather than an answer.
+    fill_invalid : bool
+        Keep the source case's own curves wherever the substitution did not
+        run, instead of leaving the case blank there.  This is what an
+        interpreter does — substitute the reservoir, leave the seal alone — and
+        it is also what keeps a synthetic gather computable: a blank shale
+        above a substituted sand removes the very interface the case was built
+        to show.
 
     Returns
     -------
@@ -503,15 +526,90 @@ def add_substituted_case(well, target, fluid_in, fluid_out, porosity, k_mineral,
     vp, vs, rho = well.logs(source_case)
     result = substitute(vp, vs, rho, porosity, k_mineral, fluid_in, fluid_out)
 
-    n_bad = int((~result["valid"]).sum())
+    applied = result["valid"].copy()
+    if where is not None:
+        applied &= np.asarray(where, dtype=bool)
+        result["valid"] = applied
+    out = {"VP": result["VP"], "VS": result["VS"], "RHOB": result["RHOB"]}
+    if fill_invalid or where is not None:
+        for name, source in (("VP", vp), ("VS", vs), ("RHOB", rho)):
+            out[name] = np.where(applied, out[name], source)
+
+    n_bad = int((~applied).sum())
     note = (f"{target}: Gassmann-substituted here from the {source_case} case"
-            + (f"; {n_bad} of {len(vp)} samples could not be substituted"
+            + (f"; {n_bad} of {len(vp)} samples "
+               + ("kept their " + source_case + " values" if fill_invalid or where is not None
+                  else "could not be substituted")
                if n_bad else ""))
-    well.add_case(target, result["VP"], result["VS"], result["RHOB"], note=note)
+    well.add_case(target, out["VP"], out["VS"], out["RHOB"], note=note)
     return result
 
 
-def standardise(df, mapping=None, units=None, depth_unit="m", name="well", case=None):
+def add_standard_cases(well, porosity, k_mineral=37.0,
+                       cases=("brine", "oil", "gas"), source_case=None,
+                       in_situ_hydrocarbon=None, sw=None, hydrocarbon_sw=0.2,
+                       parameters=None, conditions=None, datum=0.0,
+                       mixing="wood", reservoir=None):
+    """Model the whole standard fluid suite for a well that carries none.
+
+    Many wells arrive with `VP_BR`, `VP_OIL`, `VP_GAS` already computed by
+    whoever built the model; many arrive with one set of logs and nothing else.
+    For the second kind this substitutes the well into each of the standard
+    cases in one pass, at Batzle-Wang reservoir conditions taken from the depth
+    log rather than from a single number held over the whole well.
+
+    Two modelling choices are explicit rather than buried:
+
+    ``in_situ_hydrocarbon`` and ``sw`` say what is in the pores **now**.  A
+    well logged in a gas leg is not brine-filled, and substituting it as though
+    it were puts the gas effect in twice.  Leave both out and the rock is taken
+    as brine-filled.
+
+    ``hydrocarbon_sw`` is the water left behind in the hydrocarbon cases — a
+    reservoir at residual water, not a pore of pure gas, which is not a rock
+    that exists.
+
+    Returns ``{case: result}`` from :func:`avo_qi.core.gassmann.substitute`,
+    whose ``valid`` mask and ``reasons`` a caller must not ignore.
+    """
+    from avo_qi.core.fluids import fluid_suite, mix_two_fluids
+
+    source_case = well._resolve(source_case)
+    depth = well.df["DEPTH"].to_numpy(dtype=float)
+    suite = fluid_suite(depth, cases=("brine", "oil", "gas"),
+                        parameters=parameters, conditions=conditions,
+                        datum=datum)
+    k_brine, rho_brine = suite["brine"]
+
+    # What is in the pores now.
+    if in_situ_hydrocarbon in ("oil", "gas"):
+        k_hc, rho_hc = suite[in_situ_hydrocarbon]
+        water = np.ones_like(depth) if sw is None else np.asarray(sw, dtype=float)
+        fluid_in = mix_two_fluids(k_brine, rho_brine, k_hc, rho_hc, water,
+                                  law=mixing)
+    else:
+        fluid_in = (k_brine, rho_brine)
+
+    results = {}
+    for case in cases:
+        if case == "brine":
+            fluid_out = (k_brine, rho_brine)
+        elif case in ("oil", "gas"):
+            k_hc, rho_hc = suite[case]
+            fluid_out = mix_two_fluids(
+                k_brine, rho_brine, k_hc, rho_hc,
+                np.full_like(depth, float(hydrocarbon_sw)), law=mixing)
+        else:
+            raise ValueError(f"cannot model the {case!r} case; expected brine, "
+                             "oil or gas")
+        results[case] = add_substituted_case(
+            well, case, fluid_in, fluid_out, porosity, k_mineral,
+            source_case=source_case, where=reservoir, fill_invalid=True)
+    return results
+
+
+def standardise(df, mapping=None, units=None, depth_unit="m", name="well", case=None,
+                case_mapping=None):
     """Rename to canonical mnemonics and convert every curve to core units.
 
     Parameters
@@ -583,7 +681,16 @@ def standardise(df, mapping=None, units=None, depth_unit="m", name="well", case=
     # Fluid-substituted cases (VP_BR, VS_OIL, RHOB_GAS, ...).  Substitution is
     # done upstream; all that happens here is recognising and standardising the
     # results so every page can switch between them.
-    detected = detect_fluid_cases(df.columns)
+    # An explicit assignment wins over the suffix detection: a well whose
+    # cases are named VP_1/VP_2, or whose "OIL" curves are really the in-situ
+    # ones, cannot be read by naming convention and has to be told.
+    detected = ({name: {c: col for c, col in curves.items() if col in df.columns}
+                 for name, curves in case_mapping.items() if curves}
+                if case_mapping else detect_fluid_cases(df.columns))
+    if case_mapping:
+        notes.append("fluid cases assigned by hand: " + ", ".join(
+            f"{name} ({', '.join(curves.values())})"
+            for name, curves in detected.items()))
     # A single case is already in the plain VP/VS/RHOB columns; materialising
     # a suffixed copy of it would only duplicate every curve in the QC tables.
     if len(detected) > 1:

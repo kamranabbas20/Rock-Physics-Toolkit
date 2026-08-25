@@ -29,9 +29,17 @@ from avo_qi.core.qc import (  # noqa: E402
 )
 from avo_qi.io.loader import (  # noqa: E402
     CANONICAL,
+    FLUID_CASES,
     detect_fluid_cases,
     guess_mnemonics,
     standardise,
+)
+from avo_qi.core.fluids import (  # noqa: E402
+    BRINE_PRESETS,
+    CONDITION_DEFAULTS,
+    GAS_PRESETS,
+    OIL_PRESETS,
+    fluid_suite,
 )
 from avo_qi.core.depth import survey_from_table  # noqa: E402
 from avo_qi.core.lithology import GR_METHODS  # noqa: E402
@@ -43,6 +51,8 @@ from avo_qi.ui import (  # noqa: E402
     PETRO_CURVES,
     apply_petrophysics,
     file_depth_curves,
+    model_fluid_cases,
+    vsh_series,
     parameter_defaults,
     petro_sources,
     read_uploaded_table,
@@ -474,9 +484,253 @@ elif not _petro_missing and _mode == "file":
     st.caption("Nothing is being recomputed; the file's own interpretation is "
                "in use throughout.")
 
+# -------------------------------------------------------------- fluid cases --
+st.divider()
+st.subheader("5 · Fluid cases")
+st.caption(
+    "A fluid case is the well as it would log with a different pore fluid, and "
+    "comparing them is what separates a fluid response from a lithology one. "
+    "Some wells arrive with the cases already computed — `VP_BR`, `VS_OIL`, "
+    "`RHOB_GAS` — and those are used as they are. A well that carries only one "
+    "set of logs can have them **modelled here** at Batzle-Wang reservoir "
+    "conditions, from industry-default fluids you can overwrite."
+)
+
+_cases_now = list(well.cases) or ["in situ"]
+_modelled = list(well.computed_cases)
+_loaded = [c for c in _cases_now if c not in _modelled]
+st.dataframe(pd.DataFrame([
+    {"case": c,
+     "source": "modelled here" if c in _modelled else "read from the file",
+     "curves": ", ".join(
+         col for col in (f"{n}_{c.upper().replace(' ', '')}" for n in
+                         ("VP", "VS", "RHOB")) if col in well.df.columns)
+     or "VP, VS, RHOB"}
+    for c in _cases_now
+]), use_container_width=True, hide_index=True)
+
+_detected = detect_fluid_cases(raw.columns) if raw is not None else {}
+_assignable = [c for c in FLUID_CASES]
+if raw is not None and len(_detected) > 1:
+    with st.expander("Assign the case curves by hand"):
+        st.caption(
+            "The detector reads the fluid off the mnemonic — `VP_BR` is brine, "
+            "`RHOB_GAS` is gas. A file that names its cases `VP_1` and `VP_2`, "
+            "or whose *oil* curves are really the in-situ ones, cannot be read "
+            "that way and has to be told."
+        )
+        _columns = ["— none —"] + list(raw.columns)
+        _assigned = {}
+        _grid = st.columns(len(_assignable))
+        for _col, _case in zip(_grid, _assignable):
+            _col.markdown(f"**{_case}**")
+            _current = (settings.case_mapping.get(_case)
+                        or _detected.get(_case) or {})
+            _picked = {}
+            for _curve in ("VP", "VS", "RHOB"):
+                _source = _current.get(_curve)
+                _picked[_curve] = _col.selectbox(
+                    f"{_curve} ({_case})", _columns,
+                    index=_columns.index(_source) if _source in _columns else 0,
+                    key=f"case_{_case}_{_curve}", label_visibility="collapsed",
+                    placeholder=_curve)
+            _kept = {k: v for k, v in _picked.items() if v != "— none —"}
+            if len(_kept) == 3:
+                _assigned[_case] = _kept
+            elif _kept:
+                _col.caption("needs all three")
+        if st.button("Apply fluid cases", key="apply_cases"):
+            if not _assigned:
+                st.error("No case has all three of VP, VS and RHOB assigned.")
+            else:
+                settings.case_mapping = _assigned
+                set_well(standardise(raw, mapping=well.mapping, units=raw_units,
+                                     depth_unit=depth_unit, name=well.name,
+                                     case_mapping=_assigned),
+                         raw=raw, units=raw_units)
+                settings.case_mapping = _assigned      # set_well clears it
+                st.rerun()
+
+_missing_cases = [c for c in ("brine", "oil", "gas") if c not in _cases_now]
+if _missing_cases:
+    st.caption(
+        "This well carries no " + ", ".join(f"**{c}**" for c in _missing_cases)
+        + " case. Modelling "
+        + ("it" if len(_missing_cases) == 1 else "them")
+        + " here writes ordinary fluid cases that flow through every page — the "
+          "gather, the AVO classification, the crossplots — exactly as ones "
+          "loaded from the LAS would, and each is labelled *(computed)* so a "
+          "model is never mistaken for a measurement."
+    )
+
+_fluid = dict(settings.fluid_model or {})
+if "PHI" not in well.df.columns:
+    st.info("Modelling a fluid case needs a porosity curve — Gassmann divides "
+            "by it. Assign or compute PHI above.", icon=":material/info:")
+else:
+    _t1, _t2, _t3 = st.tabs(["Fluids", "Conditions", "What is in the pores now"])
+    with _t1:
+        _c1, _c2, _c3 = st.columns(3)
+        _brine_name = _c1.selectbox(
+            "Brine", list(BRINE_PRESETS), key="fluid_brine_preset",
+            index=list(BRINE_PRESETS.values()).index(0.035))
+        _fluid["salinity"] = BRINE_PRESETS[_brine_name]
+        _oil_name = _c2.selectbox("Oil", list(OIL_PRESETS), index=1,
+                                  key="fluid_oil_preset")
+        _fluid["api"], _fluid["gor"] = OIL_PRESETS[_oil_name]
+        _gas_name = _c3.selectbox(
+            "Gas", list(GAS_PRESETS), key="fluid_gas_preset",
+            index=list(GAS_PRESETS.values()).index(0.65))
+        _fluid["gas_gravity"] = GAS_PRESETS[_gas_name]
+        st.caption(
+            "Industry starting values, not this field's fluids: the salinity, "
+            "the API and the GOR are a PVT report's answer where one exists. "
+            "A dead oil and a live one are different rocks — a GOR of 100 can "
+            "halve the modulus."
+        )
+    with _t2:
+        _c1, _c2, _c3, _c4 = st.columns(4)
+        _fluid["pressure_gradient"] = _c1.number_input(
+            "Pressure gradient (MPa/km)",
+            value=float(_fluid.get("pressure_gradient",
+                                   CONDITION_DEFAULTS["pressure_gradient"])),
+            step=0.1, format="%.2f", key="fluid_p_grad",
+            help="10.0 is a normally pressured column; raise it for overpressure.")
+        _fluid["temperature_surface"] = _c2.number_input(
+            "Temperature at datum (°C)",
+            value=float(_fluid.get("temperature_surface",
+                                   CONDITION_DEFAULTS["temperature_surface"])),
+            step=1.0, format="%.1f", key="fluid_t_surface")
+        _fluid["temperature_gradient"] = _c3.number_input(
+            "Geothermal gradient (°C/km)",
+            value=float(_fluid.get("temperature_gradient",
+                                   CONDITION_DEFAULTS["temperature_gradient"])),
+            step=1.0, format="%.1f", key="fluid_t_grad")
+        _fluid["datum"] = _c4.number_input(
+            "Gradient datum (m MD)", value=float(_fluid.get("datum", 0.0)),
+            step=10.0, format="%.1f", key="fluid_datum",
+            help="Depth the gradients start from. An offshore well's MD starts "
+                 "at a rig floor, not at the sea bed.")
+        _preview = fluid_suite(well.df["DEPTH"].to_numpy(float),
+                               parameters=_fluid, conditions=_fluid,
+                               datum=float(_fluid.get("datum", 0.0)))
+        _mid = len(well.df) // 2
+        _p1, _p2, _p3 = st.columns(3)
+        _p1.metric("Pressure at mid-well", f"{_preview['pressure'][_mid]:,.1f} MPa")
+        _p2.metric("Temperature there", f"{_preview['temperature'][_mid]:,.1f} °C")
+        _p3.metric("Gas K there", f"{_preview['gas'][0][_mid]:.3f} GPa",
+                   help="A fixed table would call it 0.021 GPa at any depth.")
+        for _case, _warning in _preview["warnings"].items():
+            st.warning(f"{_case}: {_warning}", icon=":material/warning:")
+    with _t3:
+        _c1, _c2, _c3 = st.columns(3)
+        _in_situ = _c1.selectbox(
+            "Fluid in the pores now", ["brine", "oil", "gas"],
+            index=["brine", "oil", "gas"].index(
+                _fluid.get("in_situ_hydrocarbon") or "brine"),
+            key="fluid_in_situ",
+            help="A well logged in a gas leg is not brine-filled. Substituting "
+                 "it as though it were tells Gassmann the rock is stiffer than "
+                 "the logs say, and it refuses rather than answering.")
+        _fluid["in_situ_hydrocarbon"] = None if _in_situ == "brine" else _in_situ
+        _fluid["hydrocarbon_sw"] = _c2.slider(
+            "Water left in the hydrocarbon cases", 0.0, 1.0,
+            float(_fluid.get("hydrocarbon_sw", 0.2)), 0.05,
+            key="fluid_hc_sw",
+            help="A reservoir at residual water, not a pore of pure gas — "
+                 "which is not a rock that exists.")
+        _fluid["mixing"] = _c3.selectbox(
+            "Mixing law", ["wood", "patchy", "brie"], key="fluid_mixing",
+            help="How the brine and the hydrocarbon share the pore. Wood is "
+                 "the finely-mixed limit, where a little gas dominates.")
+        if _in_situ != "brine" and "SW" not in well.df.columns:
+            st.caption("No SW curve, so the pores are taken as fully "
+                       f"{_in_situ}-filled where the substitution runs.")
+
+    _m1, _m2, _m3 = st.columns(3)
+    _make = _m1.multiselect("Cases to model", ["brine", "oil", "gas"],
+                            default=_missing_cases or ["brine", "oil", "gas"],
+                            key="fluid_cases_to_make")
+    _k_mineral = _m2.number_input(
+        "Mineral K (GPa)", value=float(_fluid.get("k_mineral", 37.0)), step=1.0,
+        format="%.1f", key="fluid_k_mineral",
+        help="Quartz 37, calcite 76.8. The Rock Physics page mixes it from the "
+             "mineral fractions if you need more than one.")
+    _fluid["k_mineral"] = _k_mineral
+    _limit = _m3.checkbox(
+        "Reservoir only", value=bool(_fluid.get("reservoir_only", True)),
+        key="fluid_reservoir_only",
+        help="Gassmann assumes a connected, isotropic frame. A shale is "
+             "neither, and substituting one returns a negative dry frame "
+             "rather than an answer.")
+    _fluid["reservoir_only"] = _limit
+
+    _reservoir = None
+    if _limit:
+        _vsh_curve, _vsh_source = vsh_series(well.df, settings)
+        if _vsh_source is None:
+            st.caption("No VSH or GR curve, so every sample is offered to "
+                       "Gassmann and the ones it refuses keep their own logs.")
+        else:
+            _cut = float(settings.vsh_cutoffs.get("silty sand", 0.35))
+            _reservoir = np.isfinite(_vsh_curve) & (_vsh_curve <= _cut)
+            st.caption(
+                f"Substituting where VSH ≤ {_cut:.2f} — {_reservoir.mean():.0%} "
+                "of the well. Everywhere else each case keeps the well's own "
+                "curves, so the seal above a substituted sand is still there "
+                "and the interface survives."
+            )
+
+    if st.button("Model the fluid cases", type="primary", key="model_cases"):
+        settings.fluid_model = _fluid
+        _overwrites = [c for c in _make if c in _loaded]
+        if _overwrites:
+            st.warning(
+                "Replacing the file's own **" + "**, **".join(_overwrites)
+                + "** case(s) with modelled curves for this session.",
+                icon=":material/warning:")
+        _results = model_fluid_cases(
+            well, settings, well.df["PHI"].to_numpy(float), cases=_make,
+            k_mineral=_k_mineral, reservoir=_reservoir)
+        # Samples left alone for two quite different reasons: outside the
+        # reservoir cutoff, which was asked for, and refused by Gassmann, which
+        # was not. Reporting them together would hide the second.
+        _outside = (np.zeros(len(well.df), bool) if _reservoir is None
+                    else ~_reservoir)
+        st.session_state["fluid_case_results"] = {
+            case: {
+                "substituted": int(r["valid"].sum()),
+                "of": int(r["valid"].size),
+                "outside": int(_outside.sum()),
+                "reasons": [str(x) for x in pd.unique(
+                    r["reasons"][~r["valid"] & ~_outside]) if str(x).strip()][:3],
+            }
+            for case, r in _results.items()}
+        st.rerun()
+
+    _outcome = st.session_state.get("fluid_case_results")
+    if _outcome:
+        st.success(
+            "  \n".join(
+                f"- **{case}**: substituted {row['substituted']:,} of "
+                f"{row['of']:,} samples"
+                + (f"; {row['outside']:,} outside the reservoir cutoff"
+                   if row["outside"] else "")
+                + (f"; refused elsewhere ({', '.join(row['reasons'])})"
+                   if row["reasons"] else "")
+                + ", all of them keeping the well's own curves."
+                for case, row in _outcome.items()),
+            icon=":material/water_drop:")
+        st.caption(
+            "Pick a case in the sidebar to carry it through the rest of the "
+            "app. A refusal is not a failure to hide: a negative dry frame "
+            "means the porosity, the mineral and the measured velocities "
+            "disagree, and the rock cannot be what all three say it is."
+        )
+
 # ---------------------------------------------------------------- zonation --
 st.divider()
-st.subheader("5 · Zonation")
+st.subheader("6 · Zonation")
 
 _has_zone_curve = "ZONE" in well.df.columns
 if _has_zone_curve:
@@ -583,7 +837,7 @@ else:
 
 # -------------------------------------------------------------------- QC ---
 st.divider()
-st.subheader("6 · Quality control")
+st.subheader("7 · Quality control")
 
 frame = well.frame(settings.case)
 numeric = [c for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c])]
@@ -685,7 +939,7 @@ if flagged:
 
 # ------------------------------------------------------- analysis window ---
 st.divider()
-st.subheader("7 · Analysis window")
+st.subheader("8 · Analysis window")
 
 depth = work["DEPTH"].to_numpy(float)
 lo, hi = float(np.nanmin(depth)), float(np.nanmax(depth))

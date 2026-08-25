@@ -28,8 +28,9 @@ from avo_qi.core.wavelet import bandpass_ormsby, load_wavelet, ricker
 from avo_qi.core.zones import (UNZONED, assign_zones, zones_from_curve,
                                zones_from_tops)
 from avo_qi.core.depth import depth_references, survey_from_table
-from avo_qi.io.loader import (CANONICAL, depth_to_twt, read_las_header,
-                              read_well, resample_to_time, standardise)
+from avo_qi.io.loader import (CANONICAL, add_standard_cases, depth_to_twt,
+                              detect_fluid_cases, read_las_header, read_well,
+                              resample_to_time, standardise)
 
 DEMO_WELL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data", "demo_well.las")
 
@@ -101,6 +102,13 @@ class Settings:
     #: How VSH, PHI and SW are obtained — ``mode`` is ``"file"``, ``"fill"`` or
     #: ``"all"`` — and the parameters of each transform.
     petrophysics: dict = field(default_factory=dict)
+    #: Pore-fluid parameters and conditions for modelling the fluid cases a
+    #: well does not carry: salinity, API, GOR, gas gravity, the pressure and
+    #: temperature gradients, and what is in the pores now.
+    fluid_model: dict = field(default_factory=dict)
+    #: An explicit ``{case: {curve: column}}`` assignment, for a well whose
+    #: fluid-case curves are not named the way the detector expects.
+    case_mapping: dict = field(default_factory=dict)
     vsh_cutoffs: dict = field(default_factory=lambda: dict(DEFAULT_VSH_CUTOFFS))
     lithologies: list = field(default_factory=lambda: list(LITHOLOGIES) + [UNDEFINED])
     gr_method: str = "linear"
@@ -162,6 +170,8 @@ def set_well(well, raw=None, units=None):
         settings.deviation_survey = []
         settings.vertical_well = False
         settings.petrophysics = {}
+        settings.fluid_model = {}
+        settings.case_mapping = {}
 
 
 def load_demo_well():
@@ -1233,6 +1243,38 @@ def petro_sources():
     wrong everywhere downstream, in the same direction, and silently.
     """
     return dict(st.session_state.get("petro_source") or {})
+
+
+def model_fluid_cases(well, settings, porosity, cases=("brine", "oil", "gas"),
+                      k_mineral=37.0, reservoir=None):
+    """Model the standard fluid cases with the settings' fluid parameters.
+
+    Thin by design: the physics is :func:`add_standard_cases`, so the one-click
+    suite here and the single substitution on the Rock Physics page cannot
+    drift apart.
+    """
+    options = dict(settings.fluid_model or {})
+    results = add_standard_cases(
+        well, porosity, k_mineral=k_mineral, cases=tuple(cases),
+        in_situ_hydrocarbon=options.get("in_situ_hydrocarbon"),
+        sw=(well.df["SW"].to_numpy(float)
+            if options.get("in_situ_hydrocarbon") and "SW" in well.df.columns
+            else None),
+        hydrocarbon_sw=float(options.get("hydrocarbon_sw", 0.2)),
+        parameters={k: options[k] for k in ("salinity", "api", "gor", "gas_gravity")
+                    if k in options},
+        conditions={k: options[k] for k in ("pressure_gradient",
+                                            "temperature_surface",
+                                            "temperature_gradient")
+                    if k in options},
+        datum=float(options.get("datum", 0.0)),
+        mixing=options.get("mixing", "wood"),
+        reservoir=reservoir,
+    )
+    # The cases are new curves on the same samples, so anything already
+    # resampled into time is stale.
+    st.session_state.pop("time_well_cache", None)
+    return results
 
 
 def apply_petrophysics(well, settings):
