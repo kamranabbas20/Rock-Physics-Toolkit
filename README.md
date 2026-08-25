@@ -393,8 +393,8 @@ What the cases unlock:
 
 - **Data & Crossplots** — overlay every case on the QI crossplots to see the
   fluid vector in AI–Vp/Vs space.
-- **Synthetic Gather** — a gather per case, a difference gather between any
-  two, and their full stacks superimposed.
+- **Synthetic Gather** — a gather per case, built on the shared time axis so
+  the cases stay aligned sample for sample.
 - **AVO Classification** — every reflector fitted in every case, an A–B
   crossplot with an arrow along each reflector's fluid vector, a table of the
   class each reflector takes in each case, and a list of the reflectors whose

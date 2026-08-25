@@ -23,7 +23,6 @@ from avo_qi.ui import (  # noqa: E402
     add_derived_curves,
     build_wavelet,
     wavelet_spectrum_figure,
-    case_colour,
     gather_figure,
     log_track_figure,
     page_setup,
@@ -173,56 +172,6 @@ if "Near" in stacks and "Far" in stacks:
         f"Largest far-minus-near difference is {diff[idx]:+.4f} at TWT {twt[idx]:.3f} s — "
         "a negative value there means the event brightens with offset."
     )
-
-# ---------------------------------------------------- fluid-case compare ----
-if well.has_fluid_cases:
-    st.divider()
-    st.subheader("Fluid case comparison")
-
-    others = [c for c in well.cases if c != settings.case]
-    against = st.selectbox("Compare against", others, index=len(others) - 1)
-
-    tw_other = time_well(well, settings, against)
-    other = build_gather(
-        tw_other["VP"].to_numpy(float), tw_other["VS"].to_numpy(float),
-        tw_other["RHOB"].to_numpy(float), angles, wavelet,
-        dt=settings.dt, method=settings.method,
-    )
-    difference = gather - other
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Peak |difference|", f"{np.nanmax(np.abs(difference)):.4f}")
-    peak_sample = int(np.unravel_index(np.nanargmax(np.abs(difference)), difference.shape)[0])
-    c2.metric("At TWT", f"{twt[peak_sample]:.3f} s")
-    depth_at = tw["DEPTH"].to_numpy(float)[peak_sample] if "DEPTH" in tw.columns else np.nan
-    c3.metric("Depth", f"{depth_at:.1f} m" if np.isfinite(depth_at) else "—")
-
-    left, right = st.columns(2)
-    with left:
-        st.plotly_chart(
-            gather_figure(other, angles, twt, mode=mode, gain=gain, height=560),
-            use_container_width=True,
-        )
-        st.caption(f"Gather for the **{against}** case.")
-    with right:
-        st.plotly_chart(
-            gather_figure(difference, angles, twt, mode=mode, gain=gain, height=560),
-            use_container_width=True,
-        )
-        st.caption(f"**{settings.case} − {against}**: where the fluid changes the seismic.")
-
-    fig = go.Figure()
-    for label, case_gather in ((settings.case, gather), (against, other)):
-        fig.add_trace(go.Scatter(
-            x=full_stack(case_gather), y=twt, mode="lines", name=label,
-            line=dict(width=1.8, color=case_colour(label)),
-        ))
-    fig.add_vline(x=0, line=dict(color="#999", width=1))
-    fig.update_yaxes(autorange="reversed", title_text="TWT (s)")
-    fig.update_layout(xaxis_title="Full-stack amplitude", height=520,
-                      margin=dict(l=60, r=20, t=30, b=40), hovermode="y unified",
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
-    st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------------------------------------------- export -----
 st.divider()

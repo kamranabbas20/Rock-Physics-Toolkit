@@ -699,10 +699,6 @@ class TestFluidCasesInTheApp:
     def test_crossplots_page_reports_the_cases(self, crossplots_page):
         assert any("fluid cases" in i.value for i in crossplots_page.info)
 
-    def test_gather_page_builds_a_difference_gather(self, gather_page):
-        labels = {m.label for m in gather_page.metric}
-        assert "Peak |difference|" in labels
-
     def test_avo_page_compares_every_case(self, avo_page):
         labels = {m.label for m in avo_page.metric}
         assert "Reflectors compared" in labels
