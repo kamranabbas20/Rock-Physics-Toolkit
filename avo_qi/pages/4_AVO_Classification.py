@@ -16,14 +16,11 @@ from plotly.subplots import make_subplots  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from avo_qi import report  # noqa: E402
+from avo_qi.analysis import reflector_analysis  # noqa: E402
 
 from avo_qi.core.blocking import (  # noqa: E402
     block_properties,
-    blocked_reflectivity,
-    half_cycle_samples,
-    lobe_windows,
 )
-from avo_qi.core.lithology import interface_lithology, lobe_lithology  # noqa: E402
 from avo_qi.core.zones import (  # noqa: E402
     zone_event_summary,
     zone_of_interface,
@@ -31,9 +28,7 @@ from avo_qi.core.zones import (  # noqa: E402
     zone_statistics,
 )
 from avo_qi.core.tuning import (  # noqa: E402
-    apparent_period,
     tuned_amplitudes,
-    tuning_thickness_from_wavelet,
     tuning_thickness_depth,
     apparent_frequency,
     wedge_model,
@@ -56,7 +51,6 @@ from avo_qi.core.synthetic import (  # noqa: E402
     angle_stack,
     build_gather,
     full_stack,
-    trace_events,
     trace_extrema,
 )
 from avo_qi.core.uncertainty import (  # noqa: E402
@@ -67,14 +61,12 @@ from avo_qi.core.uncertainty import (  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     ab_crossplot,
-    lithology_labels,
     vsh_series,
     detail_log_tracks,
     wavelet_spectrum_figure,
     apply_zone_filter,
     zone_labels,
     well_zones,
-    build_wavelet,
     case_colour,
     classified_trace_figure,
     fluid_vector_crossplot,
@@ -90,33 +82,6 @@ from avo_qi.ui import (  # noqa: E402
 page_setup("AVO Classification", icon=":triangular_ruler:")
 settings = sidebar()
 well = require_well()
-
-try:
-    tw = time_well(well, settings, settings.case)
-except ValueError as exc:
-    st.error(str(exc))
-    st.stop()
-
-vp = tw["VP"].to_numpy(float)
-vs = tw["VS"].to_numpy(float)
-rho = tw["RHOB"].to_numpy(float)
-twt = tw["TWT"].to_numpy(float)
-depth = tw["DEPTH"].to_numpy(float) if "DEPTH" in tw.columns else None
-angles = settings.angles
-
-if angles.size < 2:
-    st.error("At least two angles are needed for an intercept–gradient fit.")
-    st.stop()
-
-
-def _rc_at(reference, samples, values):
-    """A full-length RC matrix carrying ``values`` at ``samples``, else zero."""
-    out = np.zeros_like(reference)
-    out[np.asarray(samples, dtype=int), :] = values
-    return out
-
-
-rc = reflectivity_series(vp, vs, rho, angles, method=settings.method)
 
 # --- how the untuned response is measured ------------------------------------
 st.subheader("Untuned response")
@@ -141,8 +106,26 @@ guard = c2.number_input(
          "window stands in — the lobe halves meet at the extremum and need no "
          "gap.")
 
-_, page_wavelet = build_wavelet(settings)
-window = half_cycle_samples(apparent_period(page_wavelet, settings.dt), settings.dt)
+# The whole pipeline — trace, events, lobes, blocked layers, A and B, class —
+# lives in `avo_qi/analysis.py` so the Multi-well page runs exactly this on the
+# wells it compares rather than a copy that could drift.
+try:
+    analysis = reflector_analysis(well, settings, settings.case,
+                                  block_method=block_method, guard=int(guard))
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
+
+tw = analysis["tw"]
+vp, vs, rho = analysis["vp"], analysis["vs"], analysis["rho"]
+twt, depth, angles = analysis["twt"], analysis["depth"], analysis["angles"]
+rc = analysis["rc"]
+page_wavelet, window = analysis["wavelet"], analysis["window"]
+page_gather, page_full_stack = analysis["gather"], analysis["full_stack"]
+tuning_twt = analysis["tuning_twt"]
+events, samples = analysis["events"], analysis["samples"]
+table = analysis["table"]
+blocked_props, lobe_bounds = analysis["blocked"], analysis["lobe_bounds"]
 
 with st.expander("Wavelet amplitude spectrum"):
     from avo_qi.core.wavelet import bandwidth as _bandwidth  # noqa: E402
@@ -156,89 +139,9 @@ with st.expander("Wavelet amplitude spectrum"):
         "below it: the lobe each event is blocked on, the thickness at which "
         "a bed tunes, and whether two interfaces are separable at all."
     )
-tuning_twt = tuning_thickness_from_wavelet(page_wavelet, settings.dt)
-
-# The gather is built once here rather than again further down: the full stack
-# is what the lobes are read from, so blocking needs it before anything else.
-page_gather = build_gather(vp, vs, rho, angles, page_wavelet,
-                           dt=settings.dt, method=settings.method)
-page_full_stack = full_stack(page_gather)
-
-blocked_props = None
-lobe_bounds = None
-table = pd.DataFrame()
-
-# The trace picks the reflectors. Every turning point on the full stack above
-# the amplitude cut is an event; the logs are never consulted about *where* a
-# reflector is, only about what the rock does there. Two consequences, both
-# intended: every event has a lobe of its own by construction — a reflector
-# buried in a neighbour's is no longer possible, because the neighbour is the
-# event — and a thin bed whose top and base interfere into one trough gives one
-# event rather than two, which is what the seismic actually shows.
-events = trace_events(page_full_stack, relative=settings.threshold)
-samples = events["index"]
-polarity = events["polarity"].astype(float)
 
 if samples.size:
-    fixed = blocked_reflectivity(
-        vp, vs, rho, samples, angles, window=window, method=block_method,
-        guard=int(guard), reflectivity_method=settings.method,
-    )
-    fixed_table = reflector_avo(
-        _rc_at(rc, samples, fixed["rc"]),
-        vp, vs, rho, angles, method=settings.method, both=False,
-        depth=depth, twt=twt, samples=samples, a_tol=settings.a_tol,
-        mask_post_critical=False,
-    )
-
-    # Polarity comes from the trace now, not from a log-derived R0: the event
-    # is a trough or a peak because that is what the trace does there.
-    lobe_bounds = lobe_windows(page_full_stack, samples, polarity=polarity,
-                               max_half_width=2 * window)
-
-    blocked = blocked_reflectivity(
-        vp, vs, rho, samples, angles, window=window, method=block_method,
-        guard=int(guard), reflectivity_method=settings.method,
-        bounds=lobe_bounds,
-    )
-    blocked_mask = np.isnan(blocked["rc"])
-
-    rc_for_fit = _rc_at(rc, samples, blocked["rc"])
-    # Kept for the reflector detail panel, which has to show the *same* layers
-    # the fit was made on.
-    blocked_props = blocked
-    table = reflector_avo(
-        rc_for_fit, vp, vs, rho, angles, method=settings.method, both=True,
-        depth=depth, twt=twt, samples=samples,
-        a_tol=settings.a_tol, mask_post_critical=False,
-    )
-    table["critical_angle"] = blocked["critical_angle"]
-    table["n_angles"] = (~blocked_mask).sum(axis=1)
-    table["blocking"] = np.where(blocked["from_lobe"], "lobe", "fixed window")
-    table["amplitude"] = events["amplitude"]
-    table["polarity"] = np.where(events["polarity"] > 0, "peak", "trough")
-    table["lobe_samples"] = (
-        np.asarray(blocked["n_upper"]) + np.asarray(blocked["n_lower"]))
-    # True vertical depth per event, where the well has a datum. MD is hole
-    # length and is not comparable between wells; a class-against-depth trend
-    # needs TVDSS, and a compaction trend needs TVDBML.
-    for _reference in ("TVD", "TVDSS", "TVDBML"):
-        if _reference in tw.columns:
-            table[_reference.lower()] = tw[_reference].to_numpy(float)[samples]
-    if "depth" in table.columns:
-        _lead = ["sample", "depth", "tvd", "tvdss", "tvdbml", "twt"]
-        _lead = [c for c in _lead if c in table.columns]
-        table = table[_lead + [c for c in table.columns if c not in _lead]]
-    table["A_fixed"] = fixed_table["A_shuey"].to_numpy()
-    table["class_fixed"] = fixed_table["avo_class"].to_numpy()
-    table["dA_blocking"] = table["A_shuey"] - table["A_fixed"]
-    # `blocked_props` and `lobe_bounds` are arrays parallel to the table *as
-    # blocked*, but the zone, lithology and interface-pair filters below shorten
-    # it and reset the index. Without a row of its own to point back with, the
-    # detail panel would quote — and the class probabilities would be computed
-    # on — whichever reflector happened to land at that position after
-    # filtering, which is a different interface.
-    table["props_row"] = np.arange(len(table))
+    blocked = blocked_props
 
     from_lobe = int(np.count_nonzero(blocked["from_lobe"]))
     moved = int((table["avo_class"] != table["class_fixed"]).sum())
@@ -306,16 +209,11 @@ if table.empty:
 
 # Lithology either side of each reflector.  For AVO the pair is what matters:
 # a "shale over sand" top is a different event from a "sand over shale" base.
-litho = lithology_labels(tw, settings)
-# Read over the *same half-lobes* the elastic properties were averaged over, so
+# The lithology either side of each event comes with the analysis: it is read
+# over the *same half-lobes* the elastic properties were averaged over, so
 # "shale over sand" names the rock the intercept and gradient actually came
 # from rather than the two samples nearest the extremum.
-if lobe_bounds is not None:
-    pairs = lobe_lithology(litho, lobe_bounds, samples=table["sample"].to_numpy())
-else:
-    pairs = interface_lithology(litho, table["sample"].to_numpy())
-table = table.assign(litho_upper=pairs["upper"], litho_lower=pairs["lower"],
-                     litho_pair=pairs["pair"])
+litho = analysis.get("litho")
 
 # Zone per reflector. An interface whose two sides are in different zones is
 # the zone boundary itself, which is usually the reflector of interest.

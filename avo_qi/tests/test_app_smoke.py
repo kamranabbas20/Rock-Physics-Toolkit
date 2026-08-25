@@ -2009,3 +2009,60 @@ class TestTheLandingPage:
         text = self._text(self._page())
         assert "1 · Data & Crossplots" not in text
         assert "3 · AVO Classification" not in text
+
+
+class TestThePipelineIsShared:
+    """The AVO page and the cross-well page must run the *same* analysis.
+
+    Copying the pipeline would guarantee they drift: the blocking rule, the
+    amplitude cut and the class tolerance would diverge and nobody would notice
+    until two pages disagreed about the same reflector.
+    """
+
+    def test_the_page_and_the_function_agree_reflector_for_reflector(self, avo_page):
+        from avo_qi.analysis import reflector_analysis
+
+        page = reflector_table(avo_page)
+        settings = avo_page.session_state["settings"]
+        direct = reflector_analysis(avo_page.session_state["well"], settings,
+                                    settings.case)["table"]
+        assert len(direct) == len(page)
+        for column in ("sample", "A_shuey", "B_shuey", "avo_class", "blocking"):
+            left = direct[column].to_numpy()
+            right = page[column].to_numpy()
+            if left.dtype.kind == "f":
+                # The table on screen is the display copy, rounded to five
+                # decimals for reading, so agreement is to that.
+                assert np.allclose(left, right, atol=5e-5, equal_nan=True), column
+            else:
+                assert (left.astype(str) == right.astype(str)).all(), column
+
+    def test_it_runs_on_a_well_that_is_not_the_active_one(self):
+        """The whole reason for extracting it."""
+        from avo_qi.analysis import reflector_analysis
+        from avo_qi.ui import Settings
+
+        well, _, _ = demo_well()
+        found = reflector_analysis(well, Settings())
+        assert len(found["table"]) > 0
+        assert found["case"] in (well.cases or ["in situ"])
+
+    def test_a_case_from_another_well_is_resolved_against_this_one(self):
+        """Case names do not travel: 'gas' means nothing in a well that has
+        only in-situ logs, and asking for it must not raise."""
+        from avo_qi.analysis import reflector_analysis
+        from avo_qi.ui import Settings
+
+        well, _, _ = demo_well()
+        well.cases = ["in situ"]
+        found = reflector_analysis(well, Settings(), case="gas")
+        assert found["case"] == "in situ"
+
+    def test_too_few_angles_is_refused_rather_than_fitted(self):
+        from avo_qi.analysis import reflector_analysis
+        from avo_qi.ui import Settings
+
+        settings = Settings()
+        settings.angle_min = settings.angle_max = 0.0
+        with pytest.raises(ValueError, match="two angles"):
+            reflector_analysis(demo_well()[0], settings)
