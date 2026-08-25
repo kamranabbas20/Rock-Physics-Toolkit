@@ -49,8 +49,11 @@ from avo_qi.ui import (  # noqa: E402
     DEPTH_REFERENCES,
     apply_depth_references,
     PETRO_CURVES,
+    active_well_name,
     apply_petrophysics,
+    drop_well,
     file_depth_curves,
+    wells,
     model_fluid_cases,
     vsh_series,
     parameter_defaults,
@@ -113,6 +116,38 @@ if well.notes:
     with st.expander("Load notes", expanded=False):
         for note in well.notes:
             st.write(f"- {note}")
+
+# Several wells can be open at once. Each keeps its own tops, datum,
+# petrophysics choice and fluid model, so switching does not put one well on
+# another's rig floor.
+_library = wells()
+if len(_library) > 1:
+    st.caption(
+        f"**{len(_library)} wells loaded.** Every page works on the active "
+        "one — switch in the sidebar — and the **Multi-well** page compares "
+        "them. Loading a well again by the same name replaces it."
+    )
+    _rows = []
+    for _name, _each in _library.items():
+        _depth = _each.df["DEPTH"].to_numpy(float)
+        _refs = [c for c in DEPTH_REFERENCES if c in _each.df.columns]
+        _rows.append({
+            "well": _name,
+            "active": "●" if _name == active_well_name() else "",
+            "samples": len(_each.df),
+            "from (m MD)": round(float(np.nanmin(_depth)), 1),
+            "to (m MD)": round(float(np.nanmax(_depth)), 1),
+            "vertical reference": ", ".join(_refs) or "—",
+            "fluid cases": len(_each.cases) or 1,
+            "zonation": "ZONE curve" if "ZONE" in _each.df.columns else "—",
+        })
+    st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+
+    _r1, _r2 = st.columns([3, 1])
+    _drop = _r1.selectbox("Remove a well", list(_library), key="drop_well_pick")
+    if _r2.button("Remove", use_container_width=True, key="drop_well_go"):
+        drop_well(_drop)
+        st.rerun()
 
 # ------------------------------------------------------------ assignment ---
 st.divider()

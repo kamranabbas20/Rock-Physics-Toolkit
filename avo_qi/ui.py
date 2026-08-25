@@ -6,6 +6,7 @@ Everything Streamlit- or Plotly-flavoured lives here or in ``pages/`` so that
 
 from __future__ import annotations
 
+import copy
 import functools
 import io as _stdlib_io
 import os
@@ -168,20 +169,122 @@ def get_settings():
     return st.session_state["settings"]
 
 
+#: Settings fields that describe **one well** rather than the session. They
+#: travel with the well: a rig floor height, a set of tops and a fluid model
+#: are facts about the hole they were entered against, and applying one well's
+#: to another puts it on the wrong datum.
+WELL_SETTINGS = (
+    "case", "zones", "zone_names", "zone_tops", "kb_elevation", "water_depth",
+    "deviation_survey", "vertical_well", "petrophysics", "fluid_model",
+    "case_mapping",
+)
+
+#: Session-state keys that likewise belong to the active well.
+WELL_SESSION_KEYS = (
+    "raw_df", "raw_units", "las_header", "file_depth_curves", "petro_source",
+    "petro_original", "petro_notes", "fluid_case_results", "mc_result",
+    "_uploaded_name", "_tops_file", "_survey_file",
+)
+
+
+def wells():
+    """The well library: ``{name: WellData}``, in the order they were loaded."""
+    return st.session_state.setdefault("wells", {})
+
+
 def get_well():
-    return st.session_state.get("well")
+    """The active well, or None.
+
+    A well assigned straight into ``session_state["well"]`` — which the tests
+    do, and which is the obvious thing for a caller to do — is adopted into the
+    library here, so "the library holds the active well" is true however the
+    well arrived rather than only when it came through :func:`set_well`.
+    """
+    well = st.session_state.get("well")
+    if well is not None:
+        library = wells()
+        if library.get(well.name) is not well:
+            library[well.name] = well
+            st.session_state["active_well"] = well.name
+    return well
+
+
+def active_well_name():
+    name = st.session_state.get("active_well")
+    return name if name in wells() else None
+
+
+def _capture_well_state():
+    """Everything about the active well that lives outside ``WellData``."""
+    settings = get_settings()
+    return {
+        "settings": {field: copy.deepcopy(getattr(settings, field))
+                     for field in WELL_SETTINGS},
+        "session": {key: st.session_state[key] for key in WELL_SESSION_KEYS
+                    if key in st.session_state},
+    }
+
+
+def _restore_well_state(record):
+    settings = get_settings()
+    blank = Settings()
+    for field in WELL_SETTINGS:
+        stored = (record or {}).get("settings", {})
+        setattr(settings, field,
+                copy.deepcopy(stored[field]) if field in stored
+                else copy.deepcopy(getattr(blank, field)))
+    session = (record or {}).get("session", {})
+    for key in WELL_SESSION_KEYS:
+        if key in session:
+            st.session_state[key] = session[key]
+        else:
+            st.session_state.pop(key, None)
+
+
+def set_active_well(name):
+    """Switch which well the pages work on, taking its own state with it.
+
+    The zone tops, the datum, the petrophysics choice and the fluid model are
+    stored per well and swapped here.  Without that, switching wells would
+    leave well B standing on well A's rig floor and filtered by zone names that
+    do not exist in it.
+    """
+    library = wells()
+    if name not in library or name == active_well_name():
+        return get_well()
+
+    current = active_well_name()
+    if current is not None:
+        st.session_state.setdefault("well_state", {})[current] = _capture_well_state()
+
+    st.session_state["active_well"] = name
+    st.session_state["well"] = library[name]
+    _restore_well_state(st.session_state.get("well_state", {}).get(name))
+    st.session_state.pop("zone_cache", None)
+    return library[name]
 
 
 def set_well(well, raw=None, units=None):
-    st.session_state["well"] = well
+    """Add a well to the library — replacing one of the same name — and make
+    it active.  A newly loaded well starts with its own blank state."""
+    current = active_well_name()
+    if current is not None and (well is None or current != well.name):
+        st.session_state.setdefault("well_state", {})[current] = _capture_well_state()
+
+    if well is None:
+        st.session_state["well"] = None
+        st.session_state["active_well"] = None
+    else:
+        wells()[well.name] = well
+        st.session_state["well"] = well
+        st.session_state["active_well"] = well.name
+        st.session_state.setdefault("well_state", {}).pop(well.name, None)
+
+    _restore_well_state(None)                    # a fresh well, a fresh state
     st.session_state["raw_df"] = raw
     st.session_state["raw_units"] = units or {}
     st.session_state.pop("time_well_cache", None)
     st.session_state.pop("zone_cache", None)
-    st.session_state.pop("las_header", None)
-    # The interpretation state belongs to the well that was loaded.
-    for key in ("petro_source", "petro_original"):
-        st.session_state.pop(key, None)
     # Which depth references this file supplied, recorded before anything is
     # computed into the same columns.
     st.session_state["file_depth_curves"] = set() if well is None else {
@@ -189,22 +292,31 @@ def set_well(well, raw=None, units=None):
     settings = st.session_state.get("settings")
     if settings is not None:
         settings.case = well.active_case if well is not None else None
-        # Zone names belong to the well that was loaded, not to the session.
-        # Carrying a previous well's selection into a new one silently hides
-        # every sample, because none of those names exists here.  Tops are the
-        # same: they are depths in *this* well and mean nothing in the next.
-        settings.zones = []
-        settings.zone_tops = []
-        # Same reasoning for the depth reference: a rig floor height, a water
-        # depth and a survey are facts about one well, and carrying them into
-        # the next would put the new well at the old one's datum.
-        settings.kb_elevation = None
-        settings.water_depth = None
-        settings.deviation_survey = []
-        settings.vertical_well = False
-        settings.petrophysics = {}
-        settings.fluid_model = {}
-        settings.case_mapping = {}
+
+
+def drop_well(name):
+    """Forget one well, and fall back to whichever remains.
+
+    Whether the dropped well was the active one has to be read *before* it
+    leaves the library: ``active_well_name`` only reports a name the library
+    still holds, so asking afterwards always says no — and ``get_well`` would
+    then adopt the dropped well straight back in.
+    """
+    library = wells()
+    was_active = active_well_name() == name
+    library.pop(name, None)
+    (st.session_state.get("well_state") or {}).pop(name, None)
+
+    if was_active:
+        st.session_state["well"] = None
+        st.session_state["active_well"] = None
+        _restore_well_state(None)
+        st.session_state.pop("raw_df", None)
+        st.session_state.pop("raw_units", None)
+        if library:
+            set_active_well(next(iter(library)))
+    st.session_state.pop("time_well_cache", None)
+    st.session_state.pop("zone_cache", None)
 
 
 def load_demo_well():
@@ -316,6 +428,21 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
 
     with st.sidebar:
         st.header("Well")
+        library = wells()
+        if len(library) > 1:
+            # The library is the point of loading more than one: switching here
+            # takes each well's own tops, datum and interpretation with it.
+            names = list(library)
+            chosen = st.selectbox(
+                "Active well", names,
+                index=names.index(active_well_name()) if active_well_name() in names else 0,
+                key="active_well_picker",
+                help=f"{len(names)} wells loaded. Every page works on the "
+                     "active one; the Multi-well page compares them.")
+            if chosen != active_well_name():
+                set_active_well(chosen)
+                st.rerun()
+            well = get_well()
         if well is None:
             st.info("No well loaded.")
         else:
