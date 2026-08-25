@@ -29,7 +29,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 
 | Page | What it does |
 |------|--------------|
-| **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
+| **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
 | **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Ends with a one-click **self-contained HTML report**. |
@@ -60,6 +60,7 @@ avo_qi/
 │   ├── misfit.py               # bounds checks and predicted-vs-measured residuals
 │   ├── uncertainty.py          # Monte Carlo priors, bands and AVO class odds
 │   ├── zones.py                # zonation from a LAS curve or a tops list
+│   ├── petrophysics.py         # density/neutron porosity, Archie, Simandoux
 │   ├── depth.py                # minimum curvature, TVD, TVDSS, TVDBML
 │   ├── qc.py                   # nulls, ranges, spikes, elastic consistency
 │   └── tuning.py               # tuned vs untuned AVO, wedge model, apparent thickness
@@ -179,6 +180,41 @@ scan that does not exclude script *bodies* finds those strings and calls a
 perfectly self-contained file external. Nothing in a report draws a map, so
 none of it is ever fetched — but a `<script src=...>` pointing elsewhere would
 genuinely break offline, so that is still checked on its own and never excused.
+
+## Does the file already carry an interpretation?
+
+VSH, PHI and SW drive the lithology classes, the zone summary's net-to-gross,
+the forward model and every fluid substitution, so where they come from decides
+a great deal — and the toolkit asks rather than deciding. *4 · Petrophysics* on
+the Load & QC page reports which of the three the file carries and offers three
+answers: keep them, compute only what is missing, or compute all three here.
+
+**Keeping them is usually right.** An interpretation that arrived with the well
+was made with core, pressures and local calibration, none of which is in the
+toolkit. Computing is for the well that carries only raw logs, where the
+alternative is nothing at all.
+
+The transforms are the standard first pass — `vsh_from_gr`, density or
+density-neutron porosity, Archie or Simandoux — with every parameter exposed
+rather than buried. The defaults are read off **the well's own parameter
+curves** where it has them (`RHOMA`, `RHOFL`, `RW`, `M`, `N`, `GRMIN`,
+`GRMAX`), because those are what its interpretation was actually made with. On
+15/9-19-A that is the difference between a textbook 2.65 / 1.00 g/cc and the
+well's own 2.66 / 0.80, and recomputing with the latter reproduces the file's
+own porosity to a median difference of **0.0002** (correlation 0.94); Sw comes
+back at 0.97 and VSH at 0.96.
+
+Three things keep it honest:
+
+- **The file's curves are never destroyed.** They are snapshotted before
+  anything is computed into the same columns, so "use what the file carries" is
+  a real revert and the file-versus-computed comparison stays available.
+- **What is computed says so**, in the status table and in the sidebar next to
+  the well's name. A density porosity built on the wrong matrix density is
+  wrong everywhere downstream, in the same direction, and silently.
+- **What cannot be computed is explained.** The demo well carries no
+  resistivity, so no saturation is derived from it and the page says why rather
+  than quietly leaving the field empty.
 
 ## Depth references
 

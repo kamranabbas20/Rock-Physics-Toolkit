@@ -42,7 +42,7 @@ __all__ = [
 #: ``DEPTH`` is measured depth; the three vertical references beside it are
 #: what make one well comparable with another (see ``core/depth.py``).
 CANONICAL = ["DEPTH", "TVD", "TVDSS", "TVDBML", "VP", "VS", "RHOB", "GR",
-             "VSH", "PHI", "SW", "FACIES", "ZONE"]
+             "NPHI", "RT", "VSH", "PHI", "SW", "FACIES", "ZONE"]
 
 #: Candidate source mnemonics for each canonical curve, in priority order.
 #: Sonic mnemonics are listed too: they are converted to velocity on load.
@@ -58,6 +58,10 @@ MNEMONIC_MAP = {
     "VS": ["VS", "S_VEL", "SVEL", "VELS", "DTS", "DTSM", "DTSH", "ACS"],
     "RHOB": ["RHOB", "RHO", "DEN", "DENS", "RHOZ", "DENB"],
     "GR": ["GR", "GRD", "SGR", "CGR", "GAMM"],
+    # The two raw curves a first-pass interpretation needs where the file
+    # carries no PHI or SW of its own.
+    "NPHI": ["NPHI", "TNPH", "NPOR", "CNC", "NEUT"],
+    "RT": ["RT", "RDEP", "RESD", "ILD", "LLD", "AT90", "RD", "RES"],
     "VSH": ["VSH", "VSHALE", "VCL", "VCLAY"],
     "PHI": ["PHI", "PHIE", "PHIT", "POR", "NPHI", "PHID"],
     "SW": ["SW", "SWE", "SWT", "SUW"],

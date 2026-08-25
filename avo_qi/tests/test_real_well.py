@@ -535,3 +535,80 @@ class TestDepthReferenceOnARealWell:
         table = reflector_table(self._zoned())
         assert (np.diff(table["tvdss"].to_numpy(float)) > 0).all()
         assert table["tvdss"].notna().all()
+
+
+class TestThePetrophysicsQuestionOnARealWell:
+    """15/9-19-A carries both the raw logs and a full interpretation — VSH,
+    PHIF, SW — and also the parameter curves that interpretation was made with:
+    RHOMA, RHOFL, RW, M, N, GRMIN, GRMAX. That makes it the well that shows why
+    the toolkit asks rather than assumes, and why the defaults come off the
+    file rather than out of a textbook.
+    """
+
+    @staticmethod
+    def _page():
+        return run_page(os.path.join(PAGES, "1_Load_and_QC.py"))
+
+    @staticmethod
+    def _compute(at, mode="all"):
+        next(r for r in at.radio
+             if r.label.startswith("Where VSH")).set_value(mode).run()
+        next(b for b in at.button
+             if b.label == "Apply interpretation").click().run()
+        assert not at.exception
+        return at
+
+    def test_the_defaults_come_from_the_wells_own_parameter_curves(self):
+        at = self._page()
+        next(r for r in at.radio
+             if r.label.startswith("Where VSH")).set_value("all").run()
+        values = {n.label: n.value for n in at.number_input}
+        assert values["Matrix density (g/cc)"] == pytest.approx(2.66)   # RHOMA
+        assert values["Fluid density (g/cc)"] == pytest.approx(0.80)    # RHOFL
+        assert values["Rw (ohm·m)"] == pytest.approx(0.0211, abs=1e-3)  # RW
+        assert values["Cementation m"] == pytest.approx(1.793, abs=1e-3)  # M
+        assert values["Saturation n"] == pytest.approx(2.45, abs=1e-3)    # N
+        assert values["GR clean (API)"] == pytest.approx(14.0)          # GRMIN
+        assert values["GR shale (API)"] == pytest.approx(115.0)         # GRMAX
+        assert any("parameter curves" in c.value for c in at.caption)
+
+    def test_computing_with_them_reproduces_the_files_interpretation(self):
+        """Not a coincidence and not a tautology: the transforms here are the
+        standard ones, so given the same parameters they land on the same
+        answer. Porosity comes back to within 0.0002 in the median."""
+        at = self._compute(self._page())
+        well = at.session_state["well"]
+        original = at.session_state["petro_original"]
+        for curve, correlation, difference in (("PHI", 0.90, 0.01),
+                                               ("SW", 0.90, 0.02),
+                                               ("VSH", 0.90, 0.05)):
+            mine = well.df[curve].to_numpy(float)
+            theirs = np.asarray(original[curve], dtype=float)
+            both = np.isfinite(mine) & np.isfinite(theirs)
+            assert both.sum() > 1000, curve
+            assert np.corrcoef(mine[both], theirs[both])[0, 1] > correlation, curve
+            assert abs(np.median(mine[both] - theirs[both])) < difference, curve
+
+    def test_the_textbook_defaults_would_have_been_worse(self):
+        """Which is the argument for reading the file's parameters at all."""
+        from avo_qi.core.petrophysics import porosity_from_density
+
+        well = load()[0]
+        rhob = well.df["RHOB"].to_numpy(float)
+        theirs = well.df["PHI"].to_numpy(float)
+        both = np.isfinite(rhob) & np.isfinite(theirs)
+        textbook = porosity_from_density(rhob, 2.65, 1.00)["phi"]
+        from_file = porosity_from_density(rhob, 2.66, 0.80)["phi"]
+        assert abs(np.median(from_file[both] - theirs[both])) < \
+            abs(np.median(textbook[both] - theirs[both]))
+
+    def test_filling_only_the_gaps_leaves_the_file_curves_alone(self):
+        """This well has all three, so 'fill' must change nothing."""
+        at = self._page()
+        before = {c: at.session_state["well"].df[c].to_numpy(float).copy()
+                  for c in ("VSH", "PHI", "SW")}
+        self._compute(at, mode="fill")
+        for curve, values in before.items():
+            assert np.allclose(at.session_state["well"].df[curve].to_numpy(float),
+                               values, equal_nan=True), curve
+        assert set(at.session_state["petro_source"].values()) == {"file"}

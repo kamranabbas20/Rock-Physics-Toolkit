@@ -98,6 +98,9 @@ class Settings:
     water_depth: float = None
     deviation_survey: list = field(default_factory=list)
     vertical_well: bool = False
+    #: How VSH, PHI and SW are obtained — ``mode`` is ``"file"``, ``"fill"`` or
+    #: ``"all"`` — and the parameters of each transform.
+    petrophysics: dict = field(default_factory=dict)
     vsh_cutoffs: dict = field(default_factory=lambda: dict(DEFAULT_VSH_CUTOFFS))
     lithologies: list = field(default_factory=lambda: list(LITHOLOGIES) + [UNDEFINED])
     gr_method: str = "linear"
@@ -135,6 +138,9 @@ def set_well(well, raw=None, units=None):
     st.session_state.pop("time_well_cache", None)
     st.session_state.pop("zone_cache", None)
     st.session_state.pop("las_header", None)
+    # The interpretation state belongs to the well that was loaded.
+    for key in ("petro_source", "petro_original"):
+        st.session_state.pop(key, None)
     # Which depth references this file supplied, recorded before anything is
     # computed into the same columns.
     st.session_state["file_depth_curves"] = set() if well is None else {
@@ -155,6 +161,7 @@ def set_well(well, raw=None, units=None):
         settings.water_depth = None
         settings.deviation_survey = []
         settings.vertical_well = False
+        settings.petrophysics = {}
 
 
 def load_demo_well():
@@ -272,6 +279,13 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
             st.success(f"**{well.name}** — {len(well.df)} samples")
             depth = well.depth
             st.caption(f"{depth.min():.1f} – {depth.max():.1f} m MD")
+            # A computed interpretation is a model of the well, not a
+            # measurement of it, and must say so wherever the well is named.
+            _computed = [c for c, source in petro_sources().items()
+                         if source == "computed"]
+            if _computed:
+                st.caption(f"{', '.join(_computed)} computed on the Load & QC "
+                           "page, not read from the file.")
         if st.button("Load demo well", use_container_width=True):
             load_demo_well()
             st.rerun()
@@ -1163,6 +1177,175 @@ def lithology_crossplot(frame, labels, x, y, title=None, height=520, size=4):
 
 #: The depth references, in the order they are resolved and displayed.
 DEPTH_REFERENCES = ("TVD", "TVDSS", "TVDBML")
+
+#: The interpreted curves a well either arrives with or has computed for it.
+PETRO_CURVES = ("VSH", "PHI", "SW")
+
+#: Curves that carry an interpretation *parameter* rather than a measurement.
+#: A well that was interpreted properly often ships them, and they are the
+#: right defaults — far better than a textbook constant, because they are what
+#: this well's own porosity and saturation were actually made with.
+PARAMETER_MNEMONICS = {
+    "rho_matrix": ["RHOMA", "RHOGA", "RHOG", "RHOMAT"],
+    "rho_fluid": ["RHOFL", "RHOF", "RHOFLU"],
+    "rw": ["RW", "RWA", "RWAT"],
+    "m": ["M", "MEXP", "CEMENT"],
+    "n": ["N", "NEXP", "NSAT"],
+    "gr_clean": ["GRMIN", "GRCLEAN", "GRSAND"],
+    "gr_shale": ["GRMAX", "GRSHALE", "GRSH"],
+    "r_shale": ["RSH", "RSHALE", "RCLAY"],
+}
+
+
+def parameter_defaults(frame):
+    """Interpretation parameters read off the file's own parameter curves.
+
+    Returns ``(values, from_file)``.  A curve is reduced to its median: these
+    are per-zone constants written out per sample, not logs.
+    """
+    values, from_file = {}, {}
+    if frame is None or not len(frame):
+        return values, from_file
+
+    lookup = {}
+    for column in frame.columns:
+        lookup.setdefault(str(column).strip().upper().replace(" ", "").replace("_", ""),
+                          column)
+    for role, candidates in PARAMETER_MNEMONICS.items():
+        for candidate in candidates:
+            column = lookup.get(candidate)
+            if column is None:
+                continue
+            series = pd.to_numeric(frame[column], errors="coerce").to_numpy(float)
+            series = series[np.isfinite(series) & (series > -999.0)]
+            if series.size:
+                values[role] = float(np.median(series))
+                from_file[role] = str(column)
+                break
+    return values, from_file
+
+
+def petro_sources():
+    """``{curve: "file" | "computed"}`` for VSH, PHI and SW.
+
+    Which of these came out of the well and which came out of a transform is
+    not a detail: a density porosity built on the wrong matrix density is
+    wrong everywhere downstream, in the same direction, and silently.
+    """
+    return dict(st.session_state.get("petro_source") or {})
+
+
+def apply_petrophysics(well, settings):
+    """Compute VSH, PHI and SW per the settings and write them into the well.
+
+    ``settings.petrophysics["mode"]`` decides how much is recomputed: keep the
+    file's interpretation, fill only what the file is missing, or recompute
+    everything here.  Returns a list of notes describing what was done.
+    """
+    from avo_qi.core.petrophysics import (effective_porosity,
+                                          porosity_from_density,
+                                          porosity_from_density_neutron,
+                                          sw_archie, sw_simandoux)
+
+    options = dict(settings.petrophysics or {})
+    mode = options.get("mode", "file")
+
+    # The file's own curves, kept from the first pass. Computing into the same
+    # columns would destroy them, and then "use what the file carries" could
+    # never be gone back to — the choice has to stay reversible.
+    originals = st.session_state.get("petro_original")
+    if originals is None:
+        originals = {c: well.df[c].to_numpy(float).copy()
+                     for c in PETRO_CURVES if c in well.df.columns}
+        st.session_state["petro_original"] = originals
+
+    frame = well.df
+    for curve, values in originals.items():
+        frame[curve] = values
+    original = set(originals)
+    notes = []
+    sources = {c: ("file" if c in original else None) for c in PETRO_CURVES}
+
+    def wanted(curve):
+        if mode == "file":
+            return False
+        if mode == "fill":
+            return curve not in original
+        return True                                   # mode == "all"
+
+    def column(name):
+        return (frame[name].to_numpy(float) if name in frame.columns
+                else np.full(len(frame), np.nan))
+
+    # --- VSH, from gamma ray
+    if wanted("VSH") and "GR" in frame.columns:
+        vsh = vsh_from_gr(column("GR"),
+                          gr_clean=options.get("gr_clean"),
+                          gr_shale=options.get("gr_shale"),
+                          method=options.get("vsh_method", settings.gr_method))
+        frame["VSH"] = vsh
+        sources["VSH"] = "computed"
+        notes.append(f"VSH computed from GR ({options.get('vsh_method', 'linear')}).")
+    elif wanted("VSH"):
+        notes.append("VSH not computed: this well has no gamma-ray curve.")
+
+    # --- porosity, from density alone or with the neutron
+    if wanted("PHI") and "RHOB" in frame.columns:
+        rho_matrix = float(options.get("rho_matrix", 2.65))
+        rho_fluid = float(options.get("rho_fluid", 1.0))
+        if options.get("phi_method") == "density-neutron" and "NPHI" in frame.columns:
+            found = porosity_from_density_neutron(
+                column("RHOB"), column("NPHI"), rho_matrix, rho_fluid,
+                method=options.get("dn_method", "rms"))
+            how = f"density-neutron ({options.get('dn_method', 'rms')})"
+        else:
+            found = porosity_from_density(column("RHOB"), rho_matrix, rho_fluid)
+            how = "density"
+        phi = found["phi"]
+        if options.get("shale_correct") and "VSH" in frame.columns:
+            phi = effective_porosity(phi, frame["VSH"].to_numpy(float),
+                                     float(options.get("phi_shale", 0.10)))
+            how += ", shale-corrected"
+        frame["PHI"] = phi
+        sources["PHI"] = "computed"
+        notes.append(
+            f"PHI computed from {how} at matrix {rho_matrix:.2f}, fluid "
+            f"{rho_fluid:.2f} g/cc"
+            + (f"; {found['clipped']:.0%} of samples clipped to 0–1."
+               if found["clipped"] > 0.01 else "."))
+    elif wanted("PHI"):
+        notes.append("PHI not computed: this well has no bulk-density curve.")
+
+    # --- saturation, from resistivity
+    if wanted("SW") and "RT" in frame.columns and "PHI" in frame.columns:
+        rw = float(options.get("rw", 0.05))
+        a = float(options.get("a", 1.0))
+        m = float(options.get("m", 2.0))
+        if options.get("sw_method") == "simandoux" and "VSH" in frame.columns:
+            frame["SW"] = sw_simandoux(column("RT"), column("PHI"),
+                                       column("VSH"), rw=rw,
+                                       r_shale=float(options.get("r_shale", 2.0)),
+                                       a=a, m=m)
+            notes.append(f"SW computed by Simandoux at Rw {rw:.4f}, a {a:.2f}, "
+                         f"m {m:.2f}, Rshale "
+                         f"{float(options.get('r_shale', 2.0)):.2f}.")
+        else:
+            n = float(options.get("n", 2.0))
+            frame["SW"] = sw_archie(column("RT"), column("PHI"), rw=rw, a=a,
+                                    m=m, n=n)
+            notes.append(f"SW computed by Archie at Rw {rw:.4f}, a {a:.2f}, "
+                         f"m {m:.2f}, n {n:.2f}.")
+        sources["SW"] = "computed"
+    elif wanted("SW"):
+        notes.append("SW not computed: it needs a resistivity curve and a "
+                     "porosity.")
+
+    ordered = [c for c in CANONICAL if c in frame.columns]
+    well.df = frame[ordered + [c for c in frame.columns if c not in ordered]]
+    st.session_state["petro_source"] = {k: v for k, v in sources.items()
+                                        if v is not None}
+    st.session_state.pop("time_well_cache", None)
+    return notes
 
 
 def file_depth_curves():

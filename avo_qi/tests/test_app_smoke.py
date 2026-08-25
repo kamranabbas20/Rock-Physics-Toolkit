@@ -1742,3 +1742,103 @@ class TestDepthReferenceOnThePage:
         settings = at.session_state["settings"]
         assert settings.kb_elevation is None and settings.water_depth is None
         assert not settings.vertical_well and not settings.deviation_survey
+
+
+class TestThePetrophysicsQuestion:
+    """The page asks where VSH, PHI and SW come from rather than deciding.
+
+    A well that arrives interpreted was interpreted by someone with core and
+    pressures; a well that arrives with only raw logs has nothing unless the
+    toolkit computes something. Both cases are real, so it is a question.
+    """
+
+    @staticmethod
+    def _page():
+        return run_page(os.path.join(PAGES, "1_Load_and_QC.py"), timeout=180)
+
+    @staticmethod
+    def _mode(at, mode):
+        next(r for r in at.radio
+             if r.label.startswith("Where VSH")).set_value(mode).run()
+        next(b for b in at.button
+             if b.label == "Apply interpretation").click().run()
+        assert not at.exception
+        return at
+
+    def test_it_asks(self, qc_page):
+        assert "4 · Petrophysics" in {s.value for s in qc_page.subheader}
+        choice = next(r for r in qc_page.radio if r.label.startswith("Where VSH"))
+        assert list(choice.options) == ["Use what the file carries",
+                                        "Compute only what the file is missing",
+                                        "Compute all three here"]
+
+    def test_the_default_keeps_what_the_file_carries(self, qc_page):
+        """The demo well has all three, so nothing should be recomputed until
+        it is asked for."""
+        choice = next(r for r in qc_page.radio if r.label.startswith("Where VSH"))
+        assert choice.value == "file"
+        assert not any(v == "computed"
+                       for v in (qc_page.session_state["petro_source"]
+                                 if "petro_source" in qc_page.session_state
+                                 else {}).values())
+
+    def test_computing_replaces_the_curves_and_says_so(self):
+        at = self._mode(self._page(), "all")
+        sources = at.session_state["petro_source"]
+        assert sources["VSH"] == "computed" and sources["PHI"] == "computed"
+        notes = " ".join(s.value for s in at.success)
+        assert "VSH computed from GR" in notes
+        assert "PHI computed from density" in notes
+
+    def test_what_cannot_be_computed_is_explained_not_silently_skipped(self):
+        """The demo well carries no resistivity, so no saturation can be
+        derived from it — and Sw is left as the file's rather than invented."""
+        at = self._mode(self._page(), "all")
+        notes = " ".join(s.value for s in at.success)
+        assert "SW not computed" in notes and "resistivity" in notes
+        assert at.session_state["petro_source"]["SW"] == "file"
+
+    def test_the_file_curves_survive_so_the_choice_is_reversible(self):
+        """Computing into the same columns would destroy the originals, and
+        then 'use what the file carries' could never be gone back to."""
+        at = self._page()
+        before = at.session_state["well"].df["PHI"].to_numpy(float).copy()
+        self._mode(at, "all")
+        computed = at.session_state["well"].df["PHI"].to_numpy(float)
+        assert not np.allclose(computed, before, equal_nan=True)
+
+        self._mode(at, "file")
+        restored = at.session_state["well"].df["PHI"].to_numpy(float)
+        assert np.allclose(restored, before, equal_nan=True)
+        assert at.session_state["petro_source"] == {
+            "VSH": "file", "PHI": "file", "SW": "file"}
+
+    def test_a_computed_curve_is_labelled_wherever_the_well_is_named(self):
+        at = self._mode(self._page(), "all")
+        captions = " ".join(c.value for c in at.sidebar.caption)
+        assert "computed on the Load & QC page" in captions
+
+    def test_the_parameters_are_exposed_rather_than_buried(self):
+        at = self._page()
+        next(r for r in at.radio
+             if r.label.startswith("Where VSH")).set_value("all").run()
+        labels = {n.label for n in at.number_input}
+        assert {"GR clean (API)", "GR shale (API)", "Matrix density (g/cc)",
+                "Fluid density (g/cc)", "Rw (ohm·m)"} <= labels
+
+    def test_the_matrix_density_actually_moves_the_porosity(self):
+        """The parameter that matters most: 0.05 g/cc out is about three
+        porosity units, everywhere, in the same direction."""
+        at = self._page()
+        next(r for r in at.radio
+             if r.label.startswith("Where VSH")).set_value("all").run()
+        next(b for b in at.button
+             if b.label == "Apply interpretation").click().run()
+        quartz = at.session_state["well"].df["PHI"].to_numpy(float).copy()
+
+        next(n for n in at.number_input
+             if n.label == "Matrix density (g/cc)").set_value(2.87).run()
+        next(b for b in at.button
+             if b.label == "Apply interpretation").click().run()
+        dolomite = at.session_state["well"].df["PHI"].to_numpy(float)
+        assert np.nanmedian(dolomite - quartz) > 0.05

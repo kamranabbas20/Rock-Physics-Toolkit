@@ -34,12 +34,17 @@ from avo_qi.io.loader import (  # noqa: E402
     standardise,
 )
 from avo_qi.core.depth import survey_from_table  # noqa: E402
+from avo_qi.core.lithology import GR_METHODS  # noqa: E402
 from avo_qi.core.zones import tops_from_table  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     DEMO_WELL,
     DEPTH_REFERENCES,
     apply_depth_references,
+    PETRO_CURVES,
+    apply_petrophysics,
     file_depth_curves,
+    parameter_defaults,
+    petro_sources,
     read_uploaded_table,
     well_zones,
     load_demo_well,
@@ -267,9 +272,211 @@ else:
         "measured depth — fine within this well, wrong between wells.",
         icon=":material/info:")
 
+# ----------------------------------------------------------- petrophysics ---
+st.divider()
+st.subheader("4 · Petrophysics")
+
+_petro_present = {c: (c in well.df.columns
+                      and bool(np.isfinite(well.df[c].to_numpy(float)).any()))
+                  for c in PETRO_CURVES}
+_petro_missing = [c for c, there in _petro_present.items() if not there]
+_sources = petro_sources()
+
+st.caption(
+    "**Does this file already carry a petrophysical interpretation, or should "
+    "the toolkit compute one?** VSH, PHI and SW drive the lithology classes, "
+    "the zone summary's net-to-gross, the forward model and every fluid "
+    "substitution, so where they come from decides a great deal. An "
+    "interpretation that arrived with the well was made with core, pressures "
+    "and local calibration — none of which is here — and should normally be "
+    "kept. Computing them is for the well that carries only raw logs."
+)
+
+# What the file itself carried, snapshotted before anything was computed into
+# the same columns; before the first apply, that is simply what is here now.
+_originals = st.session_state.get("petro_original")
+_in_file = (set(_originals) if _originals is not None
+            else {c for c, there in _petro_present.items() if there})
+_status = pd.DataFrame([
+    {"curve": c,
+     "in the file": "yes" if c in _in_file else "no",
+     "coverage now": (f"{np.isfinite(well.df[c].to_numpy(float)).mean():.0%}"
+                      if c in well.df.columns else "—"),
+     "source": _sources.get(c, "file" if _petro_present[c] else "—")}
+    for c in PETRO_CURVES
+])
+st.dataframe(_status, use_container_width=True, hide_index=True)
+
+_mode_labels = {
+    "file": "Use what the file carries",
+    "fill": "Compute only what the file is missing",
+    "all": "Compute all three here",
+}
+_default_mode = _petro_options.get("mode") if (
+    _petro_options := dict(settings.petrophysics or {})) else (
+    "fill" if _petro_missing else "file")
+_mode = st.radio(
+    "Where VSH, PHI and SW come from", list(_mode_labels),
+    format_func=lambda k: _mode_labels[k],
+    index=list(_mode_labels).index(_default_mode or "file"),
+    horizontal=True, key="petro_mode",
+    help="Nothing is recomputed until you apply it, and the file's own curves "
+         "are kept, so this is reversible.")
+
+if _petro_missing:
+    st.caption("This file carries no " + ", ".join(f"**{c}**" for c in _petro_missing)
+               + " — computing " + ("it" if len(_petro_missing) == 1 else "them")
+               + " here is the only way to have "
+               + ("it" if len(_petro_missing) == 1 else "them") + " at all.")
+
+_defaults, _from_parameters = parameter_defaults(raw)
+if _from_parameters:
+    st.caption(
+        "Defaults below come from this well's own parameter curves — "
+        + ", ".join(f"`{v}`" for v in _from_parameters.values())
+        + " — which is what its interpretation was actually made with, and a "
+          "better starting point than any textbook constant."
+    )
+
+_params = dict(settings.petrophysics or {})
+if _mode != "file":
+    _v, _p, _s = st.tabs(["VSH from GR", "Porosity", "Saturation"])
+    with _v:
+        _c1, _c2, _c3 = st.columns(3)
+        _gr = (well.df["GR"].to_numpy(float) if "GR" in well.df.columns
+               else np.array([np.nan]))
+        _gr_finite = _gr[np.isfinite(_gr)]
+        _params["vsh_method"] = _c1.selectbox(
+            "GR transform", list(GR_METHODS), key="petro_vsh_method",
+            index=list(GR_METHODS).index(_params.get("vsh_method",
+                                                     settings.gr_method)),
+            help="The non-linear transforms all read *less* shale than the "
+                 "linear index for the same gamma-ray value.")
+        _params["gr_clean"] = _c2.number_input(
+            "GR clean (API)", value=float(_params.get(
+                "gr_clean", _defaults.get("gr_clean",
+                                          float(np.percentile(_gr_finite, 5))
+                                          if _gr_finite.size else 20.0))),
+            key="petro_gr_clean")
+        _params["gr_shale"] = _c3.number_input(
+            "GR shale (API)", value=float(_params.get(
+                "gr_shale", _defaults.get("gr_shale",
+                                          float(np.percentile(_gr_finite, 95))
+                                          if _gr_finite.size else 120.0))),
+            key="petro_gr_shale")
+    with _p:
+        _c1, _c2, _c3, _c4 = st.columns(4)
+        _phi_methods = ["density"] + (["density-neutron"]
+                                      if "NPHI" in well.df.columns else [])
+        _params["phi_method"] = _c1.selectbox(
+            "Porosity from", _phi_methods, key="petro_phi_method",
+            help="Density and neutron respond to gas in opposite directions, "
+                 "so combining them both estimates porosity and shows gas.")
+        _matrix_default = float(_params.get("rho_matrix",
+                                            _defaults.get("rho_matrix", 2.65)))
+        _params["rho_matrix"] = _c2.number_input(
+            "Matrix density (g/cc)", value=_matrix_default, step=0.01,
+            format="%.3f", key="petro_rho_matrix",
+            help="Quartz 2.65, calcite 2.71, dolomite 2.87. Being 0.05 g/cc "
+                 "out moves porosity by about 3 units everywhere.")
+        _params["rho_fluid"] = _c3.number_input(
+            "Fluid density (g/cc)", value=float(_params.get(
+                "rho_fluid", _defaults.get("rho_fluid", 1.0))),
+            step=0.01, format="%.3f", key="petro_rho_fluid",
+            help="What fills the invaded zone the density tool reads — mud "
+                 "filtrate, not necessarily the reservoir fluid.")
+        _params["shale_correct"] = _c4.checkbox(
+            "Shale-correct", value=bool(_params.get("shale_correct", False)),
+            key="petro_shale_correct",
+            help="Subtract the clay-bound part: φe = φt − Vsh·φsh. Gassmann "
+                 "wants the connected porosity, not the total.")
+        if _params["shale_correct"]:
+            _params["phi_shale"] = st.number_input(
+                "Shale porosity φsh", value=float(_params.get("phi_shale", 0.10)),
+                step=0.01, format="%.2f", key="petro_phi_shale")
+        if _params["phi_method"] == "density-neutron":
+            _params["dn_method"] = st.radio(
+                "Combination", ["rms", "average"], horizontal=True,
+                key="petro_dn_method",
+                help="RMS is the usual gas-bearing combination; the average is "
+                     "right in a liquid-filled hole.")
+    with _s:
+        _c1, _c2, _c3, _c4 = st.columns(4)
+        _sw_methods = ["archie"] + (["simandoux"] if "VSH" in well.df.columns
+                                    else [])
+        _params["sw_method"] = _c1.selectbox(
+            "Saturation model", _sw_methods, key="petro_sw_method",
+            help="Archie assumes only the pore water conducts. In a shaly sand "
+                 "the clay conducts too, so Archie reads too much water — it "
+                 "hides pay rather than inventing it.")
+        _params["rw"] = _c2.number_input(
+            "Rw (ohm·m)", value=float(_params.get("rw", _defaults.get("rw", 0.05))),
+            step=0.005, format="%.4f", key="petro_rw")
+        _params["m"] = _c3.number_input(
+            "Cementation m", value=float(_params.get("m", _defaults.get("m", 2.0))),
+            step=0.05, format="%.3f", key="petro_m")
+        if _params["sw_method"] == "simandoux":
+            _params["r_shale"] = _c4.number_input(
+                "Shale resistivity (ohm·m)",
+                value=float(_params.get("r_shale", _defaults.get("r_shale", 2.0))),
+                step=0.1, format="%.2f", key="petro_r_shale")
+        else:
+            _params["n"] = _c4.number_input(
+                "Saturation n",
+                value=float(_params.get("n", _defaults.get("n", 2.0))),
+                step=0.05, format="%.3f", key="petro_n")
+        _params["a"] = st.number_input(
+            "Tortuosity a", value=float(_params.get("a", 1.0)), step=0.05,
+            format="%.2f", key="petro_a")
+        if "RT" not in well.df.columns:
+            st.warning("No resistivity curve here, so no saturation can be "
+                       "computed. Assign one above if the file has one.",
+                       icon=":material/warning:")
+
+if st.button("Apply interpretation", type="primary", key="apply_petro"):
+    _params["mode"] = _mode
+    settings.petrophysics = _params
+    _notes = apply_petrophysics(well, settings)
+    for _note in _notes:
+        st.session_state.setdefault("petro_notes", [])
+    st.session_state["petro_notes"] = _notes
+    st.rerun()
+
+_notes = st.session_state.get("petro_notes") or []
+if _notes and any(v == "computed" for v in _sources.values()):
+    st.success("  \n".join(f"- {n}" for n in _notes),
+               icon=":material/calculate:")
+    _both = [c for c in PETRO_CURVES
+             if _sources.get(c) == "computed"
+             and c in (st.session_state.get("petro_original") or {})]
+    if _both:
+        _rows = []
+        for _curve in _both:
+            _theirs = np.asarray(st.session_state["petro_original"][_curve], float)
+            _mine = well.df[_curve].to_numpy(float)
+            _ok = np.isfinite(_theirs) & np.isfinite(_mine)
+            _rows.append({
+                "curve": _curve,
+                "samples compared": int(_ok.sum()),
+                "correlation": (float(np.corrcoef(_mine[_ok], _theirs[_ok])[0, 1])
+                                if _ok.sum() > 2 else np.nan),
+                "median difference": (float(np.median(_mine[_ok] - _theirs[_ok]))
+                                      if _ok.any() else np.nan),
+            })
+        st.caption(
+            "Computed here against what the file carried — the file's curves "
+            "are kept, so this comparison stays available and the choice stays "
+            "reversible."
+        )
+        st.dataframe(pd.DataFrame(_rows).round(4), use_container_width=True,
+                     hide_index=True)
+elif not _petro_missing and _mode == "file":
+    st.caption("Nothing is being recomputed; the file's own interpretation is "
+               "in use throughout.")
+
 # ---------------------------------------------------------------- zonation --
 st.divider()
-st.subheader("4 · Zonation")
+st.subheader("5 · Zonation")
 
 _has_zone_curve = "ZONE" in well.df.columns
 if _has_zone_curve:
@@ -376,7 +583,7 @@ else:
 
 # -------------------------------------------------------------------- QC ---
 st.divider()
-st.subheader("5 · Quality control")
+st.subheader("6 · Quality control")
 
 frame = well.frame(settings.case)
 numeric = [c for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c])]
@@ -478,7 +685,7 @@ if flagged:
 
 # ------------------------------------------------------- analysis window ---
 st.divider()
-st.subheader("6 · Analysis window")
+st.subheader("7 · Analysis window")
 
 depth = work["DEPTH"].to_numpy(float)
 lo, hi = float(np.nanmin(depth)), float(np.nanmax(depth))
