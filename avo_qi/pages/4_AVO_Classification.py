@@ -15,6 +15,8 @@ import plotly.graph_objects as go  # noqa: E402
 from plotly.subplots import make_subplots  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from avo_qi import report  # noqa: E402
+
 from avo_qi.core.blocking import (  # noqa: E402
     block_properties,
     blocked_reflectivity,
@@ -65,6 +67,7 @@ from avo_qi.ui import (  # noqa: E402
     wavelet_spectrum_figure,
     apply_zone_filter,
     zone_labels,
+    well_zones,
     build_wavelet,
     case_colour,
     classified_trace_figure,
@@ -1197,6 +1200,146 @@ markers = table[["twt", "avo_class"]] if "twt" in table.columns else None
 st.plotly_chart(gather_figure(gather, angles, twt, mode=mode, markers=markers),
                 use_container_width=True)
 st.caption("Triangles on the left edge mark classified reflectors.")
+
+
+# ------------------------------------------------------------- report -------
+st.divider()
+st.subheader("Report")
+st.caption(
+    "The CSVs above carry the numbers and none of the context: six months on, "
+    "nothing in them says which wavelet was used, what the amplitude cut was, "
+    "or which events a filter removed. This builds a single **self-contained "
+    "HTML** — settings first, then the figures and the table — that opens with "
+    "no network and can be emailed or archived as it is."
+)
+
+if st.button("Build report", type="primary"):
+    with st.spinner("Building…"):
+        _low_hz, _high_hz = _bandwidth(page_wavelet, settings.dt)
+        _wavelet_fig = wavelet_spectrum_figure(page_wavelet, settings.dt)
+
+        _provenance = [
+            ("Well", well.name),
+            ("Samples (depth)", f"{len(well.df):,}"),
+            ("Fluid case", str(settings.case)),
+            ("Analysis window", f"{twt[0]:.3f} – {twt[-1]:.3f} s TWT"),
+            ("Samples (time)", f"{twt.size:,} at {settings.dt * 1000:.1f} ms"),
+        ]
+        if depth is not None and np.isfinite(depth).any():
+            _provenance.insert(
+                2, ("Depth range",
+                    f"{np.nanmin(depth):,.1f} – {np.nanmax(depth):,.1f} m MD"))
+
+        _wavelet_name = settings.wavelet_kind
+        if settings.wavelet_kind == "Ricker":
+            _wavelet_name += f" {settings.ricker_freq:.0f} Hz"
+        elif settings.wavelet_kind == "Ormsby":
+            _wavelet_name += " " + "-".join(f"{f:.0f}" for f in settings.ormsby)
+
+        _method = [
+            ("Reflectivity", settings.method.replace("_", "-")),
+            ("Angles", f"{angles[0]:.0f}–{angles[-1]:.0f}° "
+                       f"step {settings.angle_step:.0f}° ({angles.size})"),
+            ("Wavelet", _wavelet_name),
+            ("Wavelet peak", f"{dominant_frequency(page_wavelet, settings.dt):.0f} Hz"),
+            ("Wavelet band (-6 dB)", f"{_low_hz:.0f}–{_high_hz:.0f} Hz"),
+            ("Tuning thickness", f"{tuning_twt * 1000:.1f} ms TWT"),
+            ("Event amplitude cut", f"{settings.threshold:.0%} of the strongest"),
+            ("Blocking", f"{block_method} over each event's lobe"),
+            ("Guard (fallback only)", f"{int(guard)} samples"),
+            ("Class tolerance a_tol", f"{settings.a_tol:.3f}"),
+        ]
+
+        _filters = []
+        if settings.zones:
+            _filters.append(("Zones kept", ", ".join(map(str, settings.zones))))
+        if settings.lithologies and len(settings.lithologies) < 5:
+            _filters.append(("Lithologies kept", ", ".join(settings.lithologies)))
+        _pairs_kept = sorted(set(table["litho_pair"].astype(str)))
+        if len(_pairs_kept) <= 3:
+            _filters.append(("Interface pairs kept", ", ".join(_pairs_kept)))
+
+        # The intervals behind the `zone` column, whether they came from a
+        # ZONE curve or from hand-entered tops.
+        _zone_intervals = well_zones(well, settings)
+
+        _counts = table["avo_class"].value_counts()
+        _class_rows = pd.DataFrame({
+            "class": list(CLASS_COLOURS),
+            "events": [int(_counts.get(c, 0)) for c in CLASS_COLOURS],
+        })
+
+        _sections = [
+            report.Section(
+                "How this was produced",
+                lead="Every number below depends on these. A reflector table "
+                     "without them is not reproducible.",
+                blocks=[report.key_values_html(_provenance),
+                        report.key_values_html(_method)]
+                       + ([report.key_values_html(_filters)] if _filters else [])),
+            report.Section(
+                "Wavelet",
+                lead="The bandwidth sets the lobe each event is blocked on, the "
+                     "thickness at which a bed tunes, and whether two "
+                     "interfaces are separable at all.",
+                blocks=[report.figure_html(_wavelet_fig, first=True, height=320)]),
+            report.Section(
+                "Events",
+                lead=f"{len(table)} event(s) picked from the full stack — every "
+                     "turning point above the amplitude cut. The trace decides "
+                     "where the reflectors are; the logs say only what they are.",
+                blocks=[
+                    report.frame_html(_class_rows),
+                    report.paragraph_html(
+                        f"{int((table['blocking'] == 'lobe').sum())} of "
+                        f"{len(table)} blocked on a lobe of their own; the rest "
+                        "fell back to the fixed half cycle.", kind="note"),
+                ]),
+            report.Section(
+                "Intercept and gradient",
+                lead=("Background trend "
+                      f"B = {trend.slope:.3f} A {trend.intercept:+.4f} through "
+                      f"{trend.n_points} events."
+                      if np.isfinite(trend.slope) else
+                      "Too few events to fit a background trend."),
+                blocks=[report.figure_html(
+                    ab_crossplot(table, trend=trend, a_tol=settings.a_tol),
+                    height=520)]),
+            report.Section(
+                "Reflector table",
+                lead="Every picked event, with the layers it was fitted on.",
+                blocks=[report.frame_html(
+                    show.drop(columns=["props_row"], errors="ignore"))]),
+            report.Section(
+                "Tuning",
+                lead="What bed thickness does to these events, against the "
+                     "interface response they would give if thick.",
+                blocks=[report.frame_html(tuning_table, max_rows=40)]),
+        ]
+        if _zone_intervals is not None and len(_zone_intervals):
+            _sections.insert(1, report.Section(
+                "Zonation", lead=f"{len(_zone_intervals)} interval(s).",
+                blocks=[report.frame_html(_zone_intervals.round(2))]))
+
+        _document = report.report_html(
+            f"AVO analysis — {well.name}",
+            _sections,
+            subtitle=f"{len(table)} events · "
+                     f"{settings.method.replace('_', '-')} · {_wavelet_name}")
+
+    if not report.no_external_references(_document):
+        st.warning(
+            "The report references something outside itself, so it will not "
+            "render fully without a network. That is a bug — please report it.",
+            icon=":material/warning:")
+    st.download_button(
+        "Download report (HTML)", _document.encode("utf-8"),
+        file_name=f"{well.name}_avo_report.html", mime="text/html",
+        type="primary")
+    st.caption(
+        f"{len(_document) / 1e6:.1f} MB, most of it the plotting library "
+        "embedded once so the figures stay interactive with no network."
+    )
 
 
 # ---------------------------------------------------- fluid-case compare ----

@@ -32,7 +32,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 | **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
-| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. |
+| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Ends with a one-click **self-contained HTML report**. |
 | **Rock Physics** | A **rock physics template** — constant-porosity and constant-Sw curves on the AI vs Vp/Vs crossplot, so the axes read as porosity and saturation rather than merely "softer", built by running the per-sample forward model over the grid so the template and the prediction cannot drift apart. Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus Hertz-Mindlin soft-sand, stiff-sand and critical-porosity frames — raised dry-to-saturated through Gassmann on request. Then a **forward model** driven per-sample from VSH, PHIT and SW with a misfit readout, an optional **Monte Carlo** P10–P90 band, and **fluid substitution** at Batzle-Wang reservoir conditions. |
 
 ## Layout
@@ -41,6 +41,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 avo_qi/
 ├── app.py                      # Streamlit entry + landing
 ├── ui.py                       # shared sidebar, session state, Plotly helpers
+├── report.py                   # the self-contained HTML report
 ├── SPEC.md                     # the build specification
 ├── io/loader.py                # LAS + CSV/Excel, mnemonic map, unit standardise
 ├── core/
@@ -150,6 +151,33 @@ label over each half-lobe rather than the two samples nearest the extremum, so
 "shale over sand" names the rock the intercept and gradient actually came from;
 a single sample of silt at the boundary no longer renames a layer the wave saw
 as shale.
+
+## The report
+
+A CSV moves numbers well and a *result* badly: it carries none of the settings
+that produced it, none of the figures, and none of the caveats. Six months on,
+nothing in one says which wavelet was used, what the amplitude cut was, or
+which events a filter removed.
+
+The **Build report** button at the foot of the AVO Classification page writes a
+single HTML file that answers those first — provenance and settings, then the
+wavelet and its spectrum, the event and class counts, the A–B crossplot, the
+full reflector table and the tuning summary.
+
+It is genuinely self-contained: Plotly is inlined once rather than pulled from
+a CDN, so the file opens with no network and still works when a CDN version
+moves on. That costs about 5 MB, which is the right trade for something meant
+to be emailed and archived, and `no_external_references` exists so a test holds
+the property rather than trusting it. Verified by opening the report in a
+browser with networking disabled: both figures render and zero requests fail.
+
+That check has one subtlety worth knowing, because it read as a bug first. The
+inlined Plotly bundle carries map support, and that support has OpenStreetMap
+and MapLibre attribution links and an unpkg icon URL written into its source. A
+scan that does not exclude script *bodies* finds those strings and calls a
+perfectly self-contained file external. Nothing in a report draws a map, so
+none of it is ever fetched — but a `<script src=...>` pointing elsewhere would
+genuinely break offline, so that is still checked on its own and never excused.
 
 ## Zonation
 

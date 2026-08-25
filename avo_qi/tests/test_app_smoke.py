@@ -1388,6 +1388,45 @@ class TestBlockingAndTuningInTheApp:
         # because the reflector belonged to someone else's lobe.
         assert (table["blocking"] == "lobe").mean() > 0.5
 
+    def test_the_report_builds_and_is_self_contained(self):
+        """The button path is not exercised by simply rendering the page, and
+        the document it makes is the deliverable."""
+        import streamlit as st_mod
+
+        from avo_qi.report import no_external_references
+
+        captured = {}
+        real = st_mod.download_button
+
+        def spy(label, data, *args, **kwargs):
+            if str(label).startswith("Download report"):
+                captured["data"] = data
+            return real(label, data, *args, **kwargs)
+
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=300)
+        _inject_demo_well(at)
+        st_mod.download_button = spy
+        try:
+            at.run()
+            next(b for b in at.button if b.label == "Build report").click().run()
+        finally:
+            st_mod.download_button = real
+
+        assert not at.exception
+        document = captured.get("data")
+        assert document, "the button produced no document"
+        text = document.decode() if isinstance(document, bytes) else document
+
+        assert no_external_references(text)
+        assert text.startswith("<!doctype html>")
+        # The provenance the CSVs cannot carry.
+        for probe in ("How this was produced", "Event amplitude cut",
+                      "Wavelet band", "Class tolerance a_tol", "DEMO-1"):
+            assert probe in text, probe
+        # ...and the results.
+        assert "Reflector table" in text and "Intercept and gradient" in text
+
     def test_the_wedge_model_is_on_the_page(self, avo_page):
         """It was in core/tuning.py, tested, with no way to reach it."""
         assert "Wedge model" in {s.value for s in avo_page.subheader}
