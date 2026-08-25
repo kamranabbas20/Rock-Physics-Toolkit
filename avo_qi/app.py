@@ -62,6 +62,11 @@ PAGES = [
      "Hashin-Shtrikman, Hertz-Mindlin, Castagna, Gardner — a per-sample "
      "forward model with its misfit and an optional Monte Carlo band, and "
      "Gassmann substitution at Batzle-Wang reservoir conditions."),
+    (":material/compare_arrows:", "Multi-well",
+     "Every well in the library through the same pipeline, side by side: a "
+     "background trend fitted across wells rather than in one hole, curves and "
+     "picked events against TVDSS or TVDBML, the class mix per well, and "
+     "events by zone using each well's own tops."),
 ]
 
 _cards = list(st.columns(3)) + list(st.columns(3))
@@ -79,7 +84,9 @@ if well is None:
     st.write(
         "Load the bundled three-layer demo well — shale over a Class III gas sand "
         "over shale, with a brine sand and a cemented streak below, carrying its "
-        "brine, oil and gas cases — or upload your own on the **Load & QC** page."
+        "brine, oil and gas cases — or upload your own on the **Load & QC** page. "
+        "Load a second well there too and they join a library rather than "
+        "replacing each other, each keeping its own tops, datum and fluid cases."
     )
     if st.button("Load demo well", type="primary"):
         load_demo_well()

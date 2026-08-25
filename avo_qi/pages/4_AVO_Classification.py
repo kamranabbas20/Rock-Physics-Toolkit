@@ -23,8 +23,6 @@ from avo_qi.core.blocking import (  # noqa: E402
 )
 from avo_qi.core.zones import (  # noqa: E402
     zone_event_summary,
-    zone_of_interface,
-    zone_of_lobe,
     zone_statistics,
 )
 from avo_qi.core.tuning import (  # noqa: E402
@@ -215,19 +213,13 @@ if table.empty:
 # from rather than the two samples nearest the extremum.
 litho = analysis.get("litho")
 
-# Zone per reflector. An interface whose two sides are in different zones is
-# the zone boundary itself, which is usually the reflector of interest.
-zone_per_sample = zone_labels(tw, well, settings)
-# Over the lobe, not the two samples at the extremum: with events picked off
-# the trace there are few of them, and a formation top almost never falls
-# exactly between one event's two samples, which left the boundary flag dead.
-if lobe_bounds is not None:
-    zoning = zone_of_lobe(zone_per_sample, lobe_bounds,
-                          samples=table["sample"].to_numpy())
-else:
-    zoning = zone_of_interface(zone_per_sample, table["sample"].to_numpy())
-table = table.assign(zone=zoning["zone"], zone_below=zoning["zone_below"],
-                     is_zone_boundary=zoning["is_zone_boundary"])
+# Zone per reflector, from the analysis: an interface whose two sides are in
+# different zones is the zone boundary itself, which is usually the reflector
+# of interest. Read over the lobe rather than the two samples at the extremum —
+# with events picked off the trace, a top almost never falls exactly between
+# one event's two samples, which left the boundary flag dead.
+zone_per_sample = analysis.get("zone_labels")
+
 if settings.zones:
     in_zone = apply_zone_filter(table["zone"].to_numpy(), settings) | \
         apply_zone_filter(table["zone_below"].to_numpy(), settings)

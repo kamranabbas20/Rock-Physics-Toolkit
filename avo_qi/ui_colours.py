@@ -27,3 +27,23 @@ CASE_COLOURS = {
     "oil": "#2ca02c",
     "gas": "#d62728",
 }
+
+#: Qualitative colours for wells in a cross-well comparison. Deliberately
+#: distinct from CLASS_COLOURS and CASE_COLOURS: on a multi-well crossplot the
+#: colour means *which well*, and reusing a class colour there would say
+#: "Class III" to anyone reading it out of the corner of an eye.
+WELL_COLOURS = [
+    "#0E5A6B",   # the toolkit's own petrol, for the first well
+    "#B4622D",
+    "#4C6E31",
+    "#7B4F9D",
+    "#2E6DA4",
+    "#9A2E3F",
+    "#5C6B73",
+    "#8A6D1F",
+]
+
+
+def well_colour(index):
+    """Colour for the *n*-th well, wrapping round if there are many."""
+    return WELL_COLOURS[int(index) % len(WELL_COLOURS)]

@@ -1979,7 +1979,7 @@ class TestModellingTheFluidCases:
 
 class TestTheLandingPage:
     """It is the first thing anyone sees, and it had drifted: three pages
-    numbered 1/2/3 when there are five."""
+    numbered 1/2/3 when there are six."""
 
     @staticmethod
     def _page():
@@ -1996,8 +1996,10 @@ class TestTheLandingPage:
         assert not at.exception
         text = self._text(at)
         for name in ("Load & QC", "Data & Crossplots", "Synthetic Gather",
-                     "AVO Classification", "Rock Physics"):
+                     "AVO Classification", "Rock Physics", "Multi-well"):
             assert name in text, name
+        # A card per page, so a page added without a card fails here.
+        assert len(at.caption) >= 6
 
     def test_it_describes_what_the_tool_now_does(self):
         text = self._text(self._page())
@@ -2066,3 +2068,30 @@ class TestThePipelineIsShared:
         settings.angle_min = settings.angle_max = 0.0
         with pytest.raises(ValueError, match="two angles"):
             reflector_analysis(demo_well()[0], settings)
+
+    def test_zoning_adds_columns_and_changes_nothing_else(self):
+        """Zoning moved into the pipeline so a well that is not active can be
+        zoned by its own tops. It must be additive: the same reflectors, the
+        same A and B, with the zone columns attached."""
+        from avo_qi.analysis import reflector_analysis
+        from avo_qi.ui import Settings
+
+        well, _, _ = demo_well()
+        settings = Settings()
+        from avo_qi.sample_data.make_demo_well import ZONE_NAMES
+        settings.zone_names = dict(ZONE_NAMES)
+
+        bare = reflector_analysis(well, settings, zones=False)["table"]
+        zoned = reflector_analysis(well, settings, zones=True)["table"]
+
+        added = {"zone", "zone_below", "is_zone_boundary"}
+        assert added.isdisjoint(bare.columns)
+        assert added <= set(zoned.columns)
+        for column in bare.columns:
+            left, right = bare[column].to_numpy(), zoned[column].to_numpy()
+            if left.dtype.kind == "f":
+                assert np.allclose(left, right, equal_nan=True), column
+            else:
+                assert (left.astype(str) == right.astype(str)).all(), column
+        # The demo well's ZONE curve, not a stand-in: its own names come back.
+        assert set(zoned["zone"]) & set(ZONE_NAMES.values())

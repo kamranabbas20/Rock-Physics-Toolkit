@@ -34,6 +34,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
 | **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Ends with a one-click **self-contained HTML report**. |
 | **Rock Physics** | A **rock physics template** — constant-porosity and constant-Sw curves on the AI vs Vp/Vs crossplot, so the axes read as porosity and saturation rather than merely "softer", built by running the per-sample forward model over the grid so the template and the prediction cannot drift apart. Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus Hertz-Mindlin soft-sand, stiff-sand and critical-porosity frames — raised dry-to-saturated through Gassmann on request. Then a **forward model** driven per-sample from VSH, PHIT and SW with a misfit readout, an optional **Monte Carlo** P10–P90 band, and **fluid substitution** at Batzle-Wang reservoir conditions. |
+| **Multi-well** | Every well in the library run through the *same* reflector pipeline and set side by side: an overview of what each well contributed, the intercept–gradient crossplot with all wells on it and a background trend fitted through the lot — a trend fitted in one hole is that hole's rock, fitted across several it is the field's — a curve of your choice against TVDSS or TVDBML, every picked event at its true vertical depth coloured by class and shaped by well, the class mix per well, and events by zone using **each well's own** tops. |
 
 ## Layout
 
@@ -41,6 +42,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 avo_qi/
 ├── app.py                      # Streamlit entry + landing
 ├── ui.py                       # shared sidebar, session state, Plotly helpers
+├── analysis.py                 # the reflector pipeline, shared by the pages that need it
 ├── report.py                   # the self-contained HTML report
 ├── SPEC.md                     # the build specification
 ├── io/loader.py                # LAS + CSV/Excel, mnemonic map, unit standardise
@@ -64,7 +66,7 @@ avo_qi/
 │   ├── depth.py                # minimum curvature, TVD, TVDSS, TVDBML
 │   ├── qc.py                   # nulls, ranges, spikes, elastic consistency
 │   └── tuning.py               # tuned vs untuned AVO, wedge model, apparent thickness
-├── pages/                      # the five Streamlit pages
+├── pages/                      # the six Streamlit pages
 ├── sample_data/                # demo_well.las and its generator
 └── tests/                      # acceptance + smoke tests
     └── data/15_9_19_A.las   # a real well, for the tests that need mess
@@ -215,6 +217,40 @@ Three things keep it honest:
 - **What cannot be computed is explained.** The demo well carries no
   resistivity, so no saturation is derived from it and the page says why rather
   than quietly leaving the field empty.
+
+## More than one well
+
+The toolkit held exactly one well for most of its life, and that shaped where
+state lived: the tops, the rig-floor height, the water depth, the petrophysics
+choice and the fluid model all sat on the shared settings, because there was
+only ever one well for them to describe.
+
+With a second well open that arrangement is a trap. Switching wells would leave
+well B standing on well A's rig floor, filtered by zone names that do not exist
+in it, and reporting a fluid case it never had — all of it silently, all of it
+plausible-looking. So the state travels with the well:
+
+- **Per well** — the fluid case and case mapping, zonation and zone names, tops,
+  KB elevation and water depth, the deviation survey, the vertical-well
+  declaration, the petrophysics choice and the fluid model. Loading a well puts
+  its own state back; loading a *new* well starts it blank rather than
+  inheriting the last one's.
+- **Shared** — the sample rate, the time origin, the angle range, the wavelet,
+  the reflectivity method, the amplitude cut and the class tolerance. These are
+  how the wells are being *looked at*, not facts about any of them, and a
+  comparison made on two different sets of physics compares the settings.
+
+The **Active well** selector at the top of the sidebar switches which well
+every other page works on. `Multi-well` is the exception: it runs on the wells
+you tick, whichever one is active, each with its own per-well state, through
+the same `reflector_analysis` the AVO Classification page uses — one pipeline,
+so the two pages cannot come to disagree about the same reflector.
+
+A well that cannot be analysed — too few angles configured, say — is **named
+and skipped** rather than allowed to stop the others, and the analysis runs on
+a button rather than on every rerun, because it is minutes of work on a real
+well. Change a shared setting afterwards and the page says what is on screen is
+stale instead of quietly redrawing half-old numbers.
 
 ## Depth references
 
@@ -710,6 +746,15 @@ Most of these tests assert invariants; the two that pin numbers say so, and
 exist to make a change in the defaults visible rather than silent.
 `test_app_smoke.py` runs each Streamlit page headless against the demo well
 and is skipped if Streamlit is not installed.
+
+`test_well_library.py` and `test_multi_well.py` cover holding more than one
+well. Most of what they check is provenance rather than arithmetic: that
+switching wells takes each one's tops, datum and fluid case with it; that
+dropping the active well falls back to whichever remains; and — on the
+Multi-well page, running the demo well zoned by its `ZONE` curve beside the
+North Sea well zoned by hand-entered tops — that each well's reflectors carry
+**its own** formation names. A page that zoned every well by the active one's
+tops would produce a table that looked entirely reasonable.
 
 ## References
 

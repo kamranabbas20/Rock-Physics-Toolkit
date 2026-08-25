@@ -294,6 +294,29 @@ def set_well(well, raw=None, units=None):
         settings.case = well.active_case if well is not None else None
 
 
+def well_settings_for(name):
+    """The settings as they stand *for one well* in the library.
+
+    The active well's per-well state is the live ``Settings``; every other
+    well's is the record put aside when it was last active.  The global
+    analysis settings — sample rate, angles, wavelet, cutoffs — are shared, so
+    a comparison is made on one set of physics.
+    """
+    settings = get_settings()
+    if name == active_well_name():
+        return settings
+
+    snapshot = copy.copy(settings)
+    stored = ((st.session_state.get("well_state") or {}).get(name) or {}).get(
+        "settings", {})
+    blank = Settings()
+    for field in WELL_SETTINGS:
+        setattr(snapshot, field,
+                copy.deepcopy(stored[field]) if field in stored
+                else copy.deepcopy(getattr(blank, field)))
+    return snapshot
+
+
 def drop_well(name):
     """Forget one well, and fall back to whichever remains.
 

@@ -29,6 +29,7 @@ from avo_qi.core.avo import reflector_avo
 from avo_qi.core.blocking import (blocked_reflectivity, half_cycle_samples,
                                   lobe_windows)
 from avo_qi.core.lithology import interface_lithology, lobe_lithology
+from avo_qi.core.zones import zone_of_interface, zone_of_lobe
 from avo_qi.core.reflectivity import reflectivity_series
 from avo_qi.core.synthetic import build_gather, full_stack, trace_events
 from avo_qi.core.tuning import apparent_period, tuning_thickness_from_wavelet
@@ -44,7 +45,7 @@ def rc_at(reference, samples, values):
 
 
 def reflector_analysis(well, settings, case=None, block_method="backus",
-                       guard=2, lithology=True):
+                       guard=2, lithology=True, zones=True):
     """Pick every reflector on one well's full stack and classify it.
 
     Parameters
@@ -62,9 +63,12 @@ def reflector_analysis(well, settings, case=None, block_method="backus",
     block_method, guard : str, int
         How the layers either side of an event are averaged, and the fallback
         window's guard where a lobe cannot be found.
-    lithology : bool
-        Add the lithology either side of each event, read over the same
-        half-lobes the elastic properties were averaged over.
+    lithology, zones : bool
+        Add the lithology and the zone either side of each event, both read
+        over the same half-lobes the elastic properties were averaged over.
+        ``settings`` carries the zonation, so pass the *well's own* settings
+        (see :func:`avo_qi.ui.well_settings_for`) or a well will be zoned by
+        another well's tops.
 
     Returns
     -------
@@ -80,7 +84,8 @@ def reflector_analysis(well, settings, case=None, block_method="backus",
         than two angles are configured. Both are conditions a caller has to
         show rather than paper over.
     """
-    from avo_qi.ui import build_wavelet, lithology_labels, time_well
+    from avo_qi.ui import (build_wavelet, lithology_labels, time_well,
+                           zone_labels)
 
     angles = settings.angles
     if angles.size < 2:
@@ -188,6 +193,18 @@ def reflector_analysis(well, settings, case=None, block_method="backus",
                              litho_lower=pairs["lower"],
                              litho_pair=pairs["pair"])
         out["litho"] = labels
+
+    if zones:
+        # A top falling anywhere inside an event's lobe is a top that event is
+        # carrying; comparing only the two samples at the extremum went quiet
+        # once reflectors were picked off the trace.
+        labels = zone_labels(tw, well, settings)
+        zoning = (zone_of_lobe(labels, bounds, samples=samples)
+                  if bounds is not None
+                  else zone_of_interface(labels, samples))
+        table = table.assign(zone=zoning["zone"], zone_below=zoning["zone_below"],
+                             is_zone_boundary=zoning["is_zone_boundary"])
+        out["zone_labels"] = labels
 
     out.update({"table": table, "blocked": blocked, "lobe_bounds": bounds,
                 "fixed_table": fixed_table})
