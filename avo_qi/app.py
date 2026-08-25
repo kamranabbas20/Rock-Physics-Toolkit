@@ -21,7 +21,7 @@ import streamlit as st  # noqa: E402
 from avo_qi import __version__  # noqa: E402
 from avo_qi.ui import get_well, load_demo_well, page_setup, sidebar  # noqa: E402
 
-page_setup("AVO & QI Well Analysis Toolkit", icon=":chart_with_upwards_trend:")
+page_setup("AVO & QI Well Analysis Toolkit")
 settings = sidebar()
 
 st.markdown(
@@ -29,39 +29,47 @@ st.markdown(
 Takes a well that **already has Vp, Vs and RHOB** and carries it through the
 standard quantitative-interpretation workflow: rock-physics crossplots, a
 synthetic angle gather, and an intercept–gradient AVO classification of every
-reflector.
+reflector picked off the trace itself.
 
-A well that arrives with its fluid cases already substituted is the normal
-path, and they are read as they are. The **Rock Physics** page can also model
-them here: a forward model driven from VSH, PHIT and SW, and Gassmann fluid
-substitution at Batzle-Wang reservoir conditions. Anything computed here is
-labelled *(computed)* wherever it appears, so a model of the well is never
-mistaken for a measurement of it.
+Where a well arrives short of something — a vertical depth reference, a
+petrophysical interpretation, fluid cases — the toolkit **asks** rather than
+assuming, and labels anything it computes *(computed)* wherever it appears, so
+a model of the well is never mistaken for a measurement of it.
 """
 )
 
-col_a, col_b, col_c = st.columns(3)
-with col_a:
-    st.subheader("1 · Data & Crossplots")
-    st.write(
-        "Load a LAS, CSV or Excel well, remap its mnemonics, and inspect the log "
-        "tracks. Then the QI crossplots: AI vs Vp/Vs, λρ–μρ, IP–IS, Poisson vs AI, "
-        "and EEI over a χ sweep."
-    )
-with col_b:
-    st.subheader("2 · Synthetic Gather")
-    st.write(
-        "Choose a wavelet and an angle range, build the angle gather with exact "
-        "Zoeppritz or the Aki-Richards linearisation, and read the near / mid / far "
-        "and full stacks. Export as CSV, NPY or SEG-Y."
-    )
-with col_c:
-    st.subheader("3 · AVO Classification")
-    st.write(
-        "Fit intercept A and gradient B for every reflector with both Shuey and "
-        "Aki-Richards, classify I / IIp / IIn / III / IV, and inspect the A–B "
-        "crossplot against a robust background trend."
-    )
+PAGES = [
+    (":material/search:", "Load & QC",
+     "Read a LAS, CSV or Excel well and decide what the physics is: curves "
+     "and units, TVD from a survey with TVDSS and TVDBML, whether to keep the "
+     "file's own VSH/PHI/SW, fluid cases assigned or modelled, zonation, then "
+     "nulls, spikes and the elastic consistency checks."),
+    (":material/scatter_plot:", "Data & Crossplots",
+     "Log tracks and the QI crossplots — AI vs Vp/Vs, λρ–μρ, IP–IS, Poisson "
+     "vs AI, and EEI over a χ sweep that reports the χ best correlated with "
+     "Sw, Vsh or φ. Every fluid case can be overlaid to show the fluid vector."),
+    (":material/waves:", "Synthetic Gather",
+     "Ricker, Ormsby or an uploaded wavelet; exact Zoeppritz or the "
+     "Aki-Richards linearisation; the gather as variable density or wiggle, "
+     "the near / mid / far and full stacks, and CSV, NPY or SEG-Y export."),
+    (":material/analytics:", "AVO Classification",
+     "The trace decides where the reflectors are — every turning point above "
+     "the amplitude cut. Each is blocked on its own lobe, fitted for A and B, "
+     "classified, and set against a robust background trend. Then the zone "
+     "summary, tuning, a wedge model and a self-contained HTML report."),
+    (":material/landscape:", "Rock Physics",
+     "A rock physics template in AI–Vp/Vs, the diagnostic bounds and trends — "
+     "Hashin-Shtrikman, Hertz-Mindlin, Castagna, Gardner — a per-sample "
+     "forward model with its misfit and an optional Monte Carlo band, and "
+     "Gassmann substitution at Batzle-Wang reservoir conditions."),
+]
+
+_cards = list(st.columns(3)) + list(st.columns(3))
+for _column, (_icon, _name, _blurb) in zip(_cards, PAGES):
+    with _column:
+        with st.container(border=True):
+            st.markdown(f"#### {_icon} {_name}")
+            st.caption(_blurb)
 
 st.divider()
 
@@ -70,8 +78,8 @@ if well is None:
     st.subheader("Get started")
     st.write(
         "Load the bundled three-layer demo well — shale over a Class III gas sand "
-        "over shale, with a brine sand and a cemented streak below — or upload your "
-        "own on the **Data & Crossplots** page."
+        "over shale, with a brine sand and a cemented streak below, carrying its "
+        "brine, oil and gas cases — or upload your own on the **Load & QC** page."
     )
     if st.button("Load demo well", type="primary"):
         load_demo_well()

@@ -6,6 +6,7 @@ Everything Streamlit- or Plotly-flavoured lives here or in ``pages/`` so that
 
 from __future__ import annotations
 
+import functools
 import io as _stdlib_io
 import os
 import sys
@@ -123,9 +124,41 @@ class Settings:
         return np.arange(float(self.angle_min), float(self.angle_max) + step / 2, step)
 
 
+# -------------------------------------------------------------- brand -----
+#: Where the SVG assets live.
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+
+#: The chrome colour, matching ``.streamlit/config.toml``. It appears in none
+#: of the semantic palettes in ``ui_colours.py`` on purpose: an accent that is
+#: also a class colour makes a button look like a finding.
+BRAND_PETROL = "#0E5A6B"
+
+
+@functools.lru_cache(maxsize=8)
+def brand(name="mark.svg"):
+    """One of the brand assets, as SVG markup.
+
+    The *markup* rather than the path: ``st.image`` resolves a relative path
+    against the working directory, and the app is run from the repository root
+    but the tests run each page from wherever pytest was started.
+    """
+    with open(os.path.join(ASSETS, name), "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
 # --------------------------------------------------------------- state -----
-def page_setup(title, icon="~"):
-    st.set_page_config(page_title=f"{title} | AVO & QI Toolkit", page_icon=icon, layout="wide")
+def page_setup(title, icon=None):
+    """Page config, the favicon, the sidebar logo and the page title.
+
+    Every page calls this, so the identity is set in one place.  ``icon`` still
+    accepts an emoji for a caller that wants one; left alone, the page takes
+    the toolkit's own mark.
+    """
+    st.set_page_config(page_title=f"{title} | AVO & QI Toolkit",
+                       page_icon=icon or brand("mark.svg"), layout="wide")
+    # The lockup sits above the sidebar navigation; the mark stands in for it
+    # when the sidebar is collapsed.
+    st.logo(brand("logo.svg"), icon_image=brand("mark.svg"), size="large")
     st.title(title)
 
 

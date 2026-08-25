@@ -1975,3 +1975,37 @@ class TestModellingTheFluidCases:
         at.run()
         assert not at.exception
         assert any("needs a porosity curve" in i.value for i in at.info)
+
+
+class TestTheLandingPage:
+    """It is the first thing anyone sees, and it had drifted: three pages
+    numbered 1/2/3 when there are five."""
+
+    @staticmethod
+    def _page():
+        return run_page(APP, with_well=False)
+
+    @staticmethod
+    def _text(at):
+        """Card titles are markdown, the blurbs under them are captions."""
+        return " ".join([m.value for m in at.markdown]
+                        + [c.value for c in at.caption])
+
+    def test_it_names_every_page(self):
+        at = self._page()
+        assert not at.exception
+        text = self._text(at)
+        for name in ("Load & QC", "Data & Crossplots", "Synthetic Gather",
+                     "AVO Classification", "Rock Physics"):
+            assert name in text, name
+
+    def test_it_describes_what_the_tool_now_does(self):
+        text = self._text(self._page())
+        for claim in ("TVDSS", "fluid cases", "zonation"):
+            assert claim in text, claim
+
+    def test_the_stale_numbering_is_gone(self):
+        """It advertised '1 · Data & Crossplots' while Load & QC was page 1."""
+        text = self._text(self._page())
+        assert "1 · Data & Crossplots" not in text
+        assert "3 · AVO Classification" not in text

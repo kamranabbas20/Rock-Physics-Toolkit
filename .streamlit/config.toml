@@ -16,3 +16,31 @@ address = "localhost"
 # Uploads are parsed in memory and never written to disk (see
 # avo_qi/ui.py::load_uploaded_well). Raise this if your LAS files are larger.
 maxUploadSize = 400
+
+[theme]
+# The toolkit's own palette. Streamlit's default primary is a bright red, and
+# red already *means* something here: Class III, and the negative fill on every
+# trace. A button and a bright spot should not look like the same kind of
+# thing, so the chrome takes a colour that appears in none of the semantic
+# palettes in avo_qi/ui_colours.py.
+primaryColor = "#0E5A6B"          # deep petrol
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F1F5F6"
+textColor = "#16202A"
+linkColor = "#0E5A6B"
+
+# Pinned rather than left to follow the browser: every Plotly figure in the app
+# is drawn on a light template, and dark chrome around white plots looks like a
+# mistake rather than a choice.
+base = "light"
+
+font = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+headingFont = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+codeFont = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+baseRadius = "small"
+showSidebarBorder = true
+
+[theme.sidebar]
+backgroundColor = "#F1F5F6"
+secondaryBackgroundColor = "#E6EDEF"
+borderColor = "#D5E0E3"
