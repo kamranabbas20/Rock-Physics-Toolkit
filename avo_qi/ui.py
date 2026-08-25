@@ -26,6 +26,7 @@ from avo_qi.core.lithology import (
     classify_lithology,
     vsh_from_gr,
 )
+from avo_qi.core.properties import NET_CUTOFFS
 from avo_qi.core.wavelet import bandpass_ormsby, load_wavelet, ricker
 from avo_qi.core.zones import (UNZONED, assign_zones, zones_from_curve,
                                zones_from_tops)
@@ -112,6 +113,12 @@ class Settings:
     #: fluid-case curves are not named the way the detector expects.
     case_mapping: dict = field(default_factory=dict)
     vsh_cutoffs: dict = field(default_factory=lambda: dict(DEFAULT_VSH_CUTOFFS))
+    #: What counts as *net* rock when a net-to-gross is measured over a
+    #: reflector's lobe.  ``net_pay`` adds the porosity and saturation cutoffs
+    #: to the shale one, turning net sand into net pay.  Shared rather than
+    #: per-well, so a cross-well comparison is made on one definition.
+    net_cutoffs: dict = field(default_factory=lambda: dict(NET_CUTOFFS))
+    net_pay: bool = False
     lithologies: list = field(default_factory=lambda: list(LITHOLOGIES) + [UNDEFINED])
     gr_method: str = "linear"
     near: tuple = (0.0, 12.0)
@@ -218,8 +225,8 @@ def _capture_well_state():
     """Everything about the active well that lives outside ``WellData``."""
     settings = get_settings()
     return {
-        "settings": {field: copy.deepcopy(getattr(settings, field))
-                     for field in WELL_SETTINGS},
+        "settings": {attr: copy.deepcopy(getattr(settings, attr))
+                     for attr in WELL_SETTINGS},
         "session": {key: st.session_state[key] for key in WELL_SESSION_KEYS
                     if key in st.session_state},
     }
@@ -228,11 +235,11 @@ def _capture_well_state():
 def _restore_well_state(record):
     settings = get_settings()
     blank = Settings()
-    for field in WELL_SETTINGS:
+    for attr in WELL_SETTINGS:
         stored = (record or {}).get("settings", {})
-        setattr(settings, field,
-                copy.deepcopy(stored[field]) if field in stored
-                else copy.deepcopy(getattr(blank, field)))
+        setattr(settings, attr,
+                copy.deepcopy(stored[attr]) if attr in stored
+                else copy.deepcopy(getattr(blank, attr)))
     session = (record or {}).get("session", {})
     for key in WELL_SESSION_KEYS:
         if key in session:
@@ -310,10 +317,10 @@ def well_settings_for(name):
     stored = ((st.session_state.get("well_state") or {}).get(name) or {}).get(
         "settings", {})
     blank = Settings()
-    for field in WELL_SETTINGS:
-        setattr(snapshot, field,
-                copy.deepcopy(stored[field]) if field in stored
-                else copy.deepcopy(getattr(blank, field)))
+    for attr in WELL_SETTINGS:
+        setattr(snapshot, attr,
+                copy.deepcopy(stored[attr]) if attr in stored
+                else copy.deepcopy(getattr(blank, attr)))
     return snapshot
 
 
@@ -616,6 +623,34 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
                     "filtered by lithology. Map one on the **Load & QC** page "
                     "to enable it."
                 )
+
+            # One definition of net rock for the whole tool. The zone summary
+            # and the per-reflector net-to-gross ask the same question over
+            # different intervals, and answering it two ways would put two
+            # different net-to-grosses on one screen.
+            with st.expander("Net rock", expanded=False):
+                cuts = dict(s.net_cutoffs)
+                cuts["vsh"] = st.slider(
+                    "Net: VSH ≤", 0.0, 1.0, float(cuts["vsh"]), 0.01,
+                    key="net_vsh_cut",
+                    help="Shale volume below which rock counts as net. Net "
+                         "sand by default; tick net pay to add the porosity "
+                         "and saturation cuts.")
+                s.net_pay = st.checkbox(
+                    "Net pay", value=bool(s.net_pay), key="net_pay_toggle",
+                    help="Net that is also porous and hydrocarbon-bearing. "
+                         "Needs PHI and SW; without them it falls back to net "
+                         "sand rather than reporting a pay that was never "
+                         "tested for.")
+                if s.net_pay:
+                    p1, p2 = st.columns(2)
+                    cuts["phi"] = p1.slider("Pay: PHI ≥", 0.0, 0.40,
+                                            float(cuts["phi"]), 0.01,
+                                            key="net_phi_cut")
+                    cuts["sw"] = p2.slider("Pay: SW ≤", 0.0, 1.0,
+                                           float(cuts["sw"]), 0.05,
+                                           key="net_sw_cut")
+                s.net_cutoffs = cuts
 
         if show_classifier:
             st.header("Classifier")
@@ -1342,6 +1377,309 @@ def apply_lithology_filter(frame, labels, settings):
     if labels.size and all(label == UNDEFINED for label in labels):
         return np.ones(labels.shape, dtype=bool)
     return np.array([label in selected for label in labels], dtype=bool)
+
+
+#: Per-reflector columns the class-against-property panel offers, in the order
+#: an interpreter reaches for them, with the label and the axis format.
+PROPERTY_LABELS = {
+    "phi": ("Porosity φ", "v/v"),
+    "ntg": ("Net-to-gross", "v/v"),
+    "vsh": ("Shale volume VSH", "v/v"),
+    "sw": ("Water saturation SW", "v/v"),
+}
+
+#: The depth references, which need no side because a reflector has one depth.
+DEPTH_PROPERTIES = {
+    "depth": ("Depth", "m MD"),
+    "tvd": ("TVD", "m"),
+    "tvdss": ("TVDSS", "m below MSL"),
+    "tvdbml": ("TVDBML", "m below sea bed"),
+}
+
+#: Which half-lobe a property is read from.
+PROPERTY_SIDES = {
+    "res": "reservoir side",
+    "below": "layer below",
+    "above": "layer above",
+    "d": "change across (below − above)",
+}
+
+
+def property_options(table, axis=False):
+    """The ``{column: label}`` this table can actually plot a class against.
+
+    Built from the columns present rather than from a fixed list, so a well
+    with no SW offers no saturation and a well with no datum offers no TVDSS
+    instead of an axis of nulls.
+
+    ``axis=True`` gives the short form for a y-axis title; the default is the
+    long form for a menu, where the side has to be spelled out.
+    """
+    options = {}
+    for side, side_label in PROPERTY_SIDES.items():
+        for key, (label, unit) in PROPERTY_LABELS.items():
+            column = f"{side}_{key}" if side == "d" else f"{key}_{side}"
+            if column not in table.columns or not table[column].notna().any():
+                continue
+            options[column] = (f"Δ{label} ({unit})" if side == "d"
+                               else f"{label}, {side_label} ({unit})") if axis \
+                else f"{label} — {side_label} ({unit})"
+    for column, (label, unit) in DEPTH_PROPERTIES.items():
+        if column in table.columns and table[column].notna().any():
+            options[column] = f"{label} ({unit})"
+    return options
+
+
+def class_property_figure(table, column, label=None, classes=None, height=520,
+                          split_column=None, symbols=None):
+    """AVO class against one rock property: a box per class, points on top.
+
+    Both at once, deliberately.  With a few dozen reflectors a box plot alone
+    hides that a class is three events and its quartile is two of them, and a
+    scatter alone hides where the bulk of a class sits.  Class order is fixed
+    rather than sorted by value, so the panel reads the same way from one
+    property to the next.
+
+    ``split_column`` — the well, on the cross-well page — gives each group its
+    own marker symbol, so a class carried entirely by one well is visible as
+    such rather than looking like a property of the field.
+    """
+    classes = [c for c in (classes or CLASS_COLOURS)]
+    label = label or column
+    values = table[column].to_numpy(float)
+    labels = table["avo_class"].to_numpy(dtype=object)
+    groups = (table[split_column].to_numpy(dtype=object)
+              if split_column and split_column in table.columns else None)
+    names = list(dict.fromkeys(groups.tolist())) if groups is not None else []
+    shapes = list(symbols or ["circle", "square", "diamond", "triangle-up", "x"])
+
+    fig = go.Figure()
+    for position, avo_class in enumerate(classes):
+        picked = (labels == avo_class) & np.isfinite(values)
+        if not picked.any():
+            continue
+        colour = CLASS_COLOURS.get(avo_class, "#9e9e9e")
+        fig.add_trace(go.Box(
+            y=values[picked], x0=position, width=0.55, name=avo_class,
+            marker_color=colour, fillcolor=_translucent(colour, 0.16),
+            line=dict(width=1.4), boxpoints=False, showlegend=False,
+            hoverinfo="y"))
+
+        # The jitter is deterministic — index-based, not random — so a
+        # reflector does not move when the page reruns and two screenshots of
+        # the same well can be compared.
+        index = np.flatnonzero(picked)
+        offset = position + (((np.arange(index.size) % 7) - 3) / 24.0)
+        if groups is None:
+            fig.add_trace(go.Scatter(
+                x=offset, y=values[index], mode="markers", showlegend=False,
+                marker=dict(size=8, color=colour, opacity=0.9,
+                            line=dict(width=1, color="#FFFFFF")),
+                text=[avo_class] * index.size,
+                hovertemplate="%{text}<br>%{y:.4g}<extra></extra>"))
+            continue
+        for name in names:
+            here = np.array([groups[row] == name for row in index], dtype=bool)
+            if not here.any():
+                continue
+            fig.add_trace(go.Scatter(
+                x=offset[here], y=values[index][here], mode="markers",
+                showlegend=False, legendgroup=str(name),
+                marker=dict(size=8, color=colour, opacity=0.9,
+                            symbol=shapes[names.index(name) % len(shapes)],
+                            line=dict(width=1, color="#FFFFFF")),
+                text=[f"{name} · {avo_class}"] * int(here.sum()),
+                hovertemplate="%{text}<br>%{y:.4g}<extra></extra>"))
+
+    # One legend entry per group, drawn off-plot: the real points are coloured
+    # by class, so a per-group colour in the legend would be a lie.
+    for k, name in enumerate(names):
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers", name=str(name),
+            marker=dict(size=8, color="#555555",
+                        symbol=shapes[k % len(shapes)])))
+
+    fig.update_layout(
+        xaxis=dict(title="AVO class", tickmode="array",
+                   tickvals=list(range(len(classes))), ticktext=classes,
+                   range=[-0.6, len(classes) - 0.4], zeroline=False),
+        yaxis_title=label, height=height,
+        margin=dict(l=70, r=20, t=30, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    return fig
+
+
+def class_dependence_ranking(table, options, min_per_group=3):
+    """Every available property, ranked by how well it separates the classes.
+
+    This is the question the panel exists to answer — *what does the class
+    depend on?* — so it is asked of everything at once rather than one
+    selectbox at a time.  Ranked on effect size, not on the p-value: with a
+    few dozen reflectors the p-value is mostly reporting how many events a
+    property survives on.
+
+    The ``p (adj)`` column is Bonferroni — the raw p times the number of
+    properties tested, capped at 1.  Searching seventeen properties for the
+    one that separates best and then quoting its p-value as if it were the
+    only test is how a coincidence becomes a finding.
+    """
+    from avo_qi.core.properties import class_dependence
+
+    rows = []
+    for column, label in options.items():
+        found = class_dependence(table["avo_class"].to_numpy(dtype=object),
+                                 table[column].to_numpy(float),
+                                 min_per_group=min_per_group)
+        rows.append({"column": column, "property": label,
+                     "eps2": found["epsilon_squared"], "p": found["p"],
+                     "events": found["n"], "classes": found["k"],
+                     "reason": found.get("reason")})
+    frame = pd.DataFrame(rows)
+    tested = int(frame["p"].notna().sum())
+    frame["p_adj"] = (frame["p"] * max(tested, 1)).clip(upper=1.0)
+    return frame.sort_values("eps2", ascending=False, na_position="last")
+
+
+def class_property_panel(table, key, split_column=None, default=None):
+    """The whole *class against property* section, for any reflector table.
+
+    One widget set, one ranking, one figure and one dependence readout —
+    shared so the single-well page and the cross-well page ask the question
+    the same way and cannot come to different answers about the same
+    reflectors.
+
+    Returns the column plotted, or None where the table offers nothing to plot
+    against.
+    """
+    from avo_qi.core.properties import class_dependence, class_property_summary
+
+    options = property_options(table)
+    if not options:
+        st.info(
+            "No per-reflector property to plot against. The petrophysical "
+            "curves are averaged over each reflector's own lobe, so this needs "
+            "VSH, PHI or SW on the well — assign or compute them on the "
+            "**Load & QC** page — or a vertical depth reference for the "
+            "depth trends.", icon=":material/info:")
+        return None
+
+    minimum = int(st.number_input(
+        "Minimum events per class", 2, 20, 3, 1, key=f"{key}_min",
+        help="Classes with fewer events than this are still drawn, but are "
+             "left out of the dependence test: two reflectors say nothing "
+             "about a distribution and destabilise the statistic."))
+
+    ranking = class_dependence_ranking(table, options, min_per_group=minimum)
+    tested = ranking[ranking["p"].notna()]
+    if tested.empty:
+        # A ranking of twenty untested rows is a wall of nulls pretending to be
+        # a result; the reason is the whole answer here.
+        st.info(
+            f"Nothing could be tested: no property has {minimum} or more "
+            "events in at least two classes. That is a statement about how "
+            "many reflectors this well produced, not about the rock — lower "
+            "the minimum, or compare wells. The plot below still shows every "
+            "event.", icon=":material/info:")
+    else:
+        display = ranking.rename(columns={"eps2": "ε²", "p_adj": "p (adj)"})
+        st.dataframe(
+            display[["property", "ε²", "p", "p (adj)", "events", "classes"]]
+            .round({"ε²": 3, "p": 4, "p (adj)": 4}),
+            use_container_width=True, hide_index=True)
+        st.caption(
+            f"{len(tested)} propert{'y' if len(tested) == 1 else 'ies'} tested, "
+            "ranked by **effect size** rather than by p — with a few dozen "
+            "reflectors the p-value mostly reports how many events a property "
+            "survives on. `p (adj)` is Bonferroni over the properties tested, "
+            "because picking the best of many and quoting its raw p is how a "
+            "coincidence becomes a finding. The **contrast** across a "
+            "reflector usually separates the classes better than either side "
+            "alone, which is what the physics says: an intercept and a "
+            "gradient are made of contrasts, not of absolute properties."
+        )
+
+    columns = list(options)
+    if default in columns:
+        start = columns.index(default)
+    elif not tested.empty:
+        start = columns.index(tested.iloc[0]["column"])
+    else:
+        start = next((columns.index(c) for c in ("d_phi", "phi_res", "depth")
+                      if c in columns), 0)
+    column = st.selectbox("Look at", columns, index=start,
+                          format_func=lambda c: options[c],
+                          key=f"{key}_property")
+
+    label = options[column]
+    st.plotly_chart(
+        class_property_figure(table, column, split_column=split_column,
+                              label=property_options(table, axis=True)[column]),
+        use_container_width=True)
+
+    rows = class_property_summary(table["avo_class"].to_numpy(dtype=object),
+                                  table[column].to_numpy(float),
+                                  order=list(CLASS_COLOURS))
+    summary = pd.DataFrame(rows)
+    numeric = [c for c in ("median", "p10", "p90", "mean") if c in summary]
+    summary[numeric] = summary[numeric].round(4)
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+
+    found = class_dependence(table["avo_class"].to_numpy(dtype=object),
+                             table[column].to_numpy(float),
+                             min_per_group=minimum)
+    row = ranking[ranking["column"] == column]
+    adjusted = float(row["p_adj"].iloc[0]) if len(row) else np.nan
+    _dependence_readout(found, label, adjusted=adjusted)
+    return column
+
+
+#: How much of a property's rank variance the class label has to account for
+#: before the separation is worth calling anything. Cohen's conventional
+#: small / medium / large, on the same scale epsilon-squared is measured on.
+DEPENDENCE_BANDS = ((0.14, "a strong separation"), (0.06, "a moderate one"),
+                    (0.01, "a weak one"))
+
+
+def _dependence_readout(found, label, adjusted=np.nan):
+    """Say what the Kruskal-Wallis result means, and what it does not."""
+    if found.get("reason"):
+        st.caption(f"No dependence test: {found['reason']}.")
+        return
+
+    epsilon = found["epsilon_squared"]
+    strength = next((word for cut, word in DEPENDENCE_BANDS if epsilon >= cut),
+                    "essentially none")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Effect size ε²", f"{epsilon:.3f}", help=(
+        "The fraction of this property's rank variance the class label "
+        "accounts for. The number to compare properties on."))
+    c2.metric("p", f"{found['p']:.4f}" if found["p"] >= 1e-4 else "< 0.0001",
+              (f"{adjusted:.3f} adjusted" if np.isfinite(adjusted) else None),
+              delta_color="off",
+              help="Raw, and Bonferroni-adjusted for every property in the "
+                   "ranking above. The adjusted one is what this property is "
+                   "worth given that it was chosen as the best of many.")
+    c3.metric("Events tested", f"{found['n']} in {found['k']} classes")
+
+    st.caption(
+        f"Kruskal-Wallis across the classes on **{label}**: {strength} "
+        f"(ε² = {epsilon:.3f}, H = {found['h']:.2f}, p = {found['p']:.4g}"
+        + (f", {adjusted:.3g} adjusted" if np.isfinite(adjusted) else "") + "). "
+        + (", ".join(f"**{c}**" for c in found["dropped"])
+           + " had too few events to test and "
+           + ("was" if len(found["dropped"]) == 1 else "were")
+           + " left out. " if found["dropped"] else "")
+        + "Picked reflectors are **not independent samples** — neighbouring "
+          "events see overlapping rock and one thick sand can produce several "
+          "of them — so read the p-value as a ranking of which properties "
+          "separate the classes best, not as a significance test."
+    )
+
+
+def _translucent(hex_colour, alpha):
+    hex_colour = hex_colour.lstrip("#")
+    r, g, b = (int(hex_colour[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
 
 
 def lithology_crossplot(frame, labels, x, y, title=None, height=520, size=4):

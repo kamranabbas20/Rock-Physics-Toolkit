@@ -29,6 +29,8 @@ from avo_qi.core.avo import reflector_avo
 from avo_qi.core.blocking import (blocked_reflectivity, half_cycle_samples,
                                   lobe_windows)
 from avo_qi.core.lithology import interface_lithology, lobe_lithology
+from avo_qi.core.properties import (lobe_property, net_to_gross, pick_side,
+                                    reservoir_side)
 from avo_qi.core.zones import zone_of_interface, zone_of_lobe
 from avo_qi.core.reflectivity import reflectivity_series
 from avo_qi.core.synthetic import build_gather, full_stack, trace_events
@@ -44,8 +46,13 @@ def rc_at(reference, samples, values):
     return out
 
 
+#: Petrophysical curves averaged over each reflector's half-lobes, where the
+#: well carries them.  VSH leads because the reservoir side is decided on it.
+LOBE_CURVES = ("VSH", "PHI", "SW")
+
+
 def reflector_analysis(well, settings, case=None, block_method="backus",
-                       guard=2, lithology=True, zones=True):
+                       guard=2, lithology=True, zones=True, properties=True):
     """Pick every reflector on one well's full stack and classify it.
 
     Parameters
@@ -63,11 +70,12 @@ def reflector_analysis(well, settings, case=None, block_method="backus",
     block_method, guard : str, int
         How the layers either side of an event are averaged, and the fallback
         window's guard where a lobe cannot be found.
-    lithology, zones : bool
-        Add the lithology and the zone either side of each event, both read
-        over the same half-lobes the elastic properties were averaged over.
-        ``settings`` carries the zonation, so pass the *well's own* settings
-        (see :func:`avo_qi.ui.well_settings_for`) or a well will be zoned by
+    lithology, zones, properties : bool
+        Add the lithology, the zone and the petrophysics either side of each
+        event, all three read over the same half-lobes the elastic properties
+        were averaged over.  ``settings`` carries the zonation and the net
+        cutoffs, so pass the *well's own* settings (see
+        :func:`avo_qi.ui.well_settings_for`) or a well will be zoned by
         another well's tops.
 
     Returns
@@ -206,6 +214,62 @@ def reflector_analysis(well, settings, case=None, block_method="backus",
                              is_zone_boundary=zoning["is_zone_boundary"])
         out["zone_labels"] = labels
 
+    if properties:
+        table = table.assign(**_lobe_properties(tw, settings, bounds, samples))
+
     out.update({"table": table, "blocked": blocked, "lobe_bounds": bounds,
                 "fixed_table": fixed_table})
     return out
+
+
+def _lobe_properties(tw, settings, bounds, samples):
+    """Petrophysics per reflector, over the layers AVO was actually fitted to.
+
+    The point of averaging over the half-lobes rather than reading the two
+    samples at the boundary: the class came from a lobe of rock, so the
+    porosity it is set against has to come from the same lobe or the two are
+    describing different things.
+
+    Every column is suffixed ``_above`` / ``_below``, plus ``d_`` for the
+    change downwards across the reflector.  ``*_res`` is whichever side
+    :func:`avo_qi.core.properties.reservoir_side` calls the reservoir — a base
+    reflector carries its sand *above*, and plotting the class against "the
+    porosity below" would set half the reflectors against their seal.
+    """
+    if bounds is None:
+        return {}
+
+    columns = {}
+    sides = None
+    for curve in LOBE_CURVES:
+        if curve not in tw.columns:
+            continue
+        name = curve.lower()
+        # The median, not the mean: PHI and SW carry spikes that a mean over a
+        # handful of samples follows straight off the scale.
+        found = lobe_property(tw[curve].to_numpy(float), bounds,
+                              samples=samples, statistic="median")
+        columns[f"{name}_above"] = found["upper"]
+        columns[f"{name}_below"] = found["lower"]
+        columns[f"d_{name}"] = found["contrast"]
+        if curve == "VSH":
+            sides = reservoir_side(found["upper"], found["lower"])
+
+    if "VSH" in tw.columns:
+        cuts = dict(settings.net_cutoffs)
+        pay = bool(settings.net_pay)
+        found = net_to_gross(
+            tw["VSH"].to_numpy(float), bounds, samples=samples,
+            phi=tw["PHI"].to_numpy(float) if pay and "PHI" in tw.columns else None,
+            sw=tw["SW"].to_numpy(float) if pay and "SW" in tw.columns else None,
+            cutoffs=cuts)
+        columns["ntg_above"] = found["upper"]
+        columns["ntg_below"] = found["lower"]
+        columns["d_ntg"] = found["contrast"]
+
+    if sides is not None:
+        columns["reservoir_side"] = sides
+        for base in [c[:-6] for c in list(columns) if c.endswith("_above")]:
+            columns[f"{base}_res"] = pick_side(sides, columns[f"{base}_above"],
+                                               columns[f"{base}_below"])
+    return columns

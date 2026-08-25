@@ -761,6 +761,15 @@ def resample_to_time(df, twt, dt=0.001, columns=None, t0=None, t1=None):
 
     Returns a DataFrame with a ``TWT`` column plus the interpolated curves;
     this is the sampling that ``core/synthetic`` expects.
+
+    A curve is interpolated only **within its own logged interval**.  Outside
+    it the result is NaN rather than the nearest logged value, which is what
+    ``np.interp`` would otherwise hand back: 15/9-19-A carries no VSH, PHI or
+    SW above 3666 m, and clamping filled the 166 m above that with the first
+    valid reading of each — a constant porosity and a constant shale volume
+    over rock nobody interpreted. Every reader downstream believed it, so the
+    lithology pair read "silt over silt" and a net-to-gross came out of an
+    interval with no petrophysics in it at all.
     """
     twt = np.asarray(twt, dtype=float)
     if twt.size < 2:
@@ -784,5 +793,6 @@ def resample_to_time(df, twt, dt=0.001, columns=None, t0=None, t1=None):
         if good.sum() < 2:
             out[c] = np.full(n, np.nan)
         else:
-            out[c] = np.interp(grid, twt_sorted[good], values[good])
+            out[c] = np.interp(grid, twt_sorted[good], values[good],
+                               left=np.nan, right=np.nan)
     return pd.DataFrame(out)

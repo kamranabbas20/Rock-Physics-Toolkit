@@ -59,6 +59,7 @@ from avo_qi.core.uncertainty import (  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     ab_crossplot,
+    class_property_panel,
     vsh_series,
     detail_log_tracks,
     wavelet_spectrum_figure,
@@ -373,22 +374,25 @@ if zone_intervals is not None and len(zone_intervals):
         if _curve in zone_frame.columns:
             zone_curves[_curve] = zone_frame[_curve].to_numpy(float)
 
+    # The cutoffs come from **Net rock** in the sidebar, not from sliders of
+    # their own: the per-reflector net-to-gross asks the same question over a
+    # lobe instead of a zone, and two controls would let one screen carry two
+    # different net-to-grosses.
+    cuts = settings.net_cutoffs
     net_cuts, pay_cuts = {}, {}
-    cut_cols = st.columns(3)
     if "VSH" in zone_curves:
-        net_cuts["VSH"] = {"max": cut_cols[0].slider(
-            "Net: VSH ≤", 0.0, 1.0,
-            float(settings.vsh_cutoffs.get("silty sand", 0.35)), 0.05,
-            key="zone_vsh_cut",
-            help="The same shale-volume cut the lithology classes use.")}
+        net_cuts["VSH"] = {"max": float(cuts["vsh"])}
     if "PHI" in zone_curves:
-        net_cuts["PHI"] = {"min": cut_cols[1].slider(
-            "Net: PHI ≥", 0.0, 0.40, 0.08, 0.01, key="zone_phi_cut")}
+        net_cuts["PHI"] = {"min": float(cuts["phi"])}
     if "SW" in zone_curves and net_cuts:
         pay_cuts = dict(net_cuts)
-        pay_cuts["SW"] = {"max": cut_cols[2].slider(
-            "Pay: SW ≤", 0.0, 1.0, 0.50, 0.05, key="zone_sw_cut",
-            help="Pay is net that also passes this saturation cut.")}
+        pay_cuts["SW"] = {"max": float(cuts["sw"])}
+    st.caption(
+        "Net is VSH ≤ {vsh:.2f}".format(**cuts)
+        + (" and PHI ≥ {phi:.2f}".format(**cuts) if "PHI" in zone_curves else "")
+        + (", pay adds SW ≤ {sw:.2f}".format(**cuts) if pay_cuts else "")
+        + " — set under **Net rock** in the sidebar."
+    )
 
     zone_stats = zone_statistics(
         zone_per_depth, zone_frame["DEPTH"].to_numpy(float), zone_curves,
@@ -492,6 +496,23 @@ if zone_intervals is not None and len(zone_intervals):
             st.caption(f"{_outside} of {len(table)} events sit above the "
                        "shallowest top or below the deepest, so they are in no "
                        "named zone and are not counted above.")
+
+# ------------------------------------------------- class against property ---
+# The classification so far says what the seismic does. This asks whether it
+# has anything to do with the rock: is Class III where the porosity is, does
+# net-to-gross separate II from III, and is any of it just depth?
+st.divider()
+st.subheader("Class against property")
+st.caption(
+    "Each reflector's properties are averaged over the **same two half-lobes "
+    "its intercept and gradient were fitted from**, not read off the two "
+    "samples at the boundary — the class came from a lobe of rock, so the "
+    "porosity it is set against has to come from the same lobe. The "
+    "*reservoir side* is whichever half-lobe carries less shale, because a "
+    "sand base carries its reservoir above and setting every class against "
+    "\"the layer below\" would put half the reflectors against their seal."
+)
+class_property_panel(table, key="avo_property")
 
 # ---------------------------------------------------- class confidence -----
 st.divider()

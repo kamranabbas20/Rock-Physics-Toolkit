@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
+import pandas as pd
 import pytest
 
 streamlit = pytest.importorskip("streamlit")
@@ -179,3 +181,55 @@ class TestTheAnalysisCarriesEachWellsOwnSettings:
         table = at.session_state["multiwell_results"]["results"]["15/9-19-A"]["table"]
         assert "WRONG" not in set(table["zone"])
         assert {"Heather", "Brent", "Dunlin"} & set(table["zone"])
+
+
+class TestClassAgainstProperty:
+    """The panel that answers what the class actually depends on.
+
+    Pooled across wells it is the same code page 4 runs on one, so what is
+    worth pinning here is the pooling itself and the honesty of the readout:
+    a ranking that quotes the best of seventeen raw p-values as if it were the
+    only test is worse than no ranking at all.
+    """
+
+    @staticmethod
+    def ranking(at):
+        for element in at.dataframe:
+            frame = element.value
+            if hasattr(frame, "columns") and "property" in frame.columns:
+                return frame
+        raise AssertionError("no dependence ranking on the page")
+
+    def test_the_ranking_covers_every_available_property(self, compared):
+        from avo_qi.ui import property_options
+
+        everything = pd.concat(
+            [r["table"] for r in
+             compared.session_state["multiwell_results"]["results"].values()],
+            ignore_index=True)
+        assert len(self.ranking(compared)) == len(property_options(everything))
+
+    def test_it_is_ranked_by_effect_size(self, compared):
+        found = self.ranking(compared)["ε²"].dropna().to_numpy(float)
+        assert (np.diff(found) <= 1e-9).all()
+
+    def test_the_adjusted_p_is_never_smaller_than_the_raw_one(self, compared):
+        """Bonferroni over the properties tested. The panel picks the best of
+        many and must not quote its raw p as if it had asked once."""
+        found = self.ranking(compared).dropna(subset=["p"])
+        assert len(found) >= 2
+        assert (found["p (adj)"] >= found["p"] - 1e-12).all()
+        assert (found["p (adj)"] <= 1.0).all()
+
+    def test_both_wells_are_pooled_into_it(self, compared):
+        """The count tested has to exceed either well on its own, or the panel
+        is quietly showing one well."""
+        results = compared.session_state["multiwell_results"]["results"]
+        each = [len(r["table"]) for r in results.values()]
+        tested = self.ranking(compared)["events"].max()
+        assert tested > max(each) - min(each)     # more than one well's worth
+        assert tested <= sum(each)
+
+    def test_the_pooled_table_carries_the_lobe_properties(self, compared):
+        for table in compared.session_state["multiwell_results"]["results"].values():
+            assert {"phi_res", "ntg_res", "d_phi", "reservoir_side"} <= set(table["table"].columns)

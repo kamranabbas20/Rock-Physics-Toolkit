@@ -32,9 +32,9 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 | **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, **fluid cases** assigned where the file carries them and modelled from industry-default fluids where it does not, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
-| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Ends with a one-click **self-contained HTML report**. |
+| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Then **class against property** — every reflector's φ, VSH, SW and net-to-gross averaged over the same two half-lobes its intercept and gradient were fitted from, every available property ranked by how well it separates the classes, and the one you pick drawn as a box and its own events. Ends with a one-click **self-contained HTML report**. |
 | **Rock Physics** | A **rock physics template** — constant-porosity and constant-Sw curves on the AI vs Vp/Vs crossplot, so the axes read as porosity and saturation rather than merely "softer", built by running the per-sample forward model over the grid so the template and the prediction cannot drift apart. Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus Hertz-Mindlin soft-sand, stiff-sand and critical-porosity frames — raised dry-to-saturated through Gassmann on request. Then a **forward model** driven per-sample from VSH, PHIT and SW with a misfit readout, an optional **Monte Carlo** P10–P90 band, and **fluid substitution** at Batzle-Wang reservoir conditions. |
-| **Multi-well** | Every well in the library run through the *same* reflector pipeline and set side by side: an overview of what each well contributed, the intercept–gradient crossplot with all wells on it and a background trend fitted through the lot — a trend fitted in one hole is that hole's rock, fitted across several it is the field's — a curve of your choice against TVDSS or TVDBML, every picked event at its true vertical depth coloured by class and shaped by well, the class mix per well, and events by zone using **each well's own** tops. |
+| **Multi-well** | Every well in the library run through the *same* reflector pipeline and set side by side: an overview of what each well contributed, the intercept–gradient crossplot with all wells on it and a background trend fitted through the lot — a trend fitted in one hole is that hole's rock, fitted across several it is the field's — a curve of your choice against TVDSS or TVDBML, every picked event at its true vertical depth coloured by class and shaped by well, the class mix per well, and events by zone using **each well's own** tops — then the same class-against-property panel over every well at once, which is where a class-porosity relationship stops being one hole's coincidence. |
 
 ## Layout
 
@@ -63,6 +63,7 @@ avo_qi/
 │   ├── uncertainty.py          # Monte Carlo priors, bands and AVO class odds
 │   ├── zones.py                # zonation from a LAS curve or a tops list
 │   ├── petrophysics.py         # density/neutron porosity, Archie, Simandoux
+│   ├── properties.py           # lobe-averaged rock properties, NTG, class dependence
 │   ├── depth.py                # minimum curvature, TVD, TVDSS, TVDBML
 │   ├── qc.py                   # nulls, ranges, spikes, elastic consistency
 │   └── tuning.py               # tuned vs untuned AVO, wedge model, apparent thickness
@@ -217,6 +218,105 @@ Three things keep it honest:
 - **What cannot be computed is explained.** The demo well carries no
   resistivity, so no saturation is derived from it and the page says why rather
   than quietly leaving the field empty.
+- **A curve is not reported where it was never logged.** Resampling the logs
+  onto the time grid interpolates each curve **only within its own logged
+  interval**. `np.interp` clamps outside its data range, and that is a quiet
+  and expensive default: 15/9-19-A has no VSH, PHI or SW above 3666 m, a
+  quarter of the interval, and the time frame came back with *zero* missing
+  samples — a constant VSH of 0.599, a constant porosity of 0.200 and a
+  constant SW of 0.559 filling rock nobody had interpreted. Nothing about that
+  read as wrong downstream: the lithology pair said "silt over silt" with
+  conviction and a net-to-gross could be measured over an interval with no
+  petrophysics in it. Those five reflectors now report `undefined over
+  undefined`, and the interface-pair filter leaves them out by default and
+  says on screen that it has.
+
+## What does the class depend on?
+
+The classification says what the seismic does. This is the other half: does it
+have anything to do with the rock? Is Class III where the porosity is, does
+net-to-gross separate II from III, and is any of it just depth?
+
+**The properties come from the same rock the class did.** Each reflector's φ,
+VSH, SW and net-to-gross are averaged over the *same two half-lobes* its
+intercept and gradient were fitted from — not read off the two samples at the
+boundary. The class came from a lobe of rock; a porosity read from two samples
+is describing something else, and setting one against the other compares two
+different intervals.
+
+Every property is reported three ways, and the third is the one to reach for:
+
+| Column | What it is |
+|---|---|
+| `*_above`, `*_below` | the two half-lobes, in the wave's direction of travel |
+| `d_*` | the change downwards across the reflector, `below − above` |
+| `*_res` | whichever half-lobe carries **less shale** — the reservoir side |
+
+The reservoir side exists because a sand *base* carries its reservoir above.
+Plotting every class against "the porosity below" sets half the reflectors
+against their seal and washes out whatever trend was there. The rule is
+deliberately blunt and the choice it made is written into the table as
+`reservoir_side`, so it can be read and argued with.
+
+Net-to-gross is the mean of a 0/1 net flag over the same lobe, with one
+deliberate refusal: a sample where the criterion cannot be evaluated is
+**unknown, not non-net**. A gap in the VSH shortens the interval a
+net-to-gross is measured over rather than quietly pushing it down. The cutoffs
+live under **Net rock** in the sidebar and are the *only* definition of net in
+the tool — the zone summary reads the same ones, because one screen carrying
+two different net-to-grosses is worse than either.
+
+### Ranked, and honest about it
+
+The panel does not make you hunt through a selectbox. It runs a
+**Kruskal-Wallis** test — one-way ANOVA on ranks, so nothing is assumed about
+the shape of a porosity distribution within a class — on every property the
+well offers, and ranks them by **effect size** (epsilon-squared: the fraction
+of the property's rank variance the class label accounts for). Effect size and
+not p, because with thirty reflectors the p-value mostly reports how many
+events a property survives on.
+
+Two caveats are built into what it prints, because both are ways this analysis
+gets over-read:
+
+- **`p (adj)` is Bonferroni** over the properties tested. Searching twenty
+  properties for the one that separates best and then quoting its raw p as if
+  you had asked once is how a coincidence becomes a finding. On 15/9-19-A the
+  winner's raw p of 0.006 becomes 0.12 once the search is paid for — the tool
+  says so rather than letting the small number stand.
+- **Picked reflectors are not independent samples.** Neighbouring events see
+  overlapping rock and one thick sand can produce several of them, so a well
+  contributes far fewer independent observations than it does rows. Read the
+  ranking as *which property separates the classes best*, not as a
+  significance test.
+
+### What it finds
+
+On 15/9-19-A at the defaults, the ranking is unambiguous about one thing: the
+**contrast** across a reflector separates the classes far better than either
+side's absolute value.
+
+| Property | ε² |
+|---|---|
+| Δφ across the reflector | 0.72 |
+| ΔSw across the reflector | 0.57 |
+| φ of the layer above | 0.13 |
+| φ of the layer below | 0.07 |
+| net-to-gross, reservoir side | 0.00 |
+| depth | 0.00 |
+
+Which is what the physics says — an intercept and a gradient are made of
+contrasts, not of absolute properties — and it is worth seeing a tool derive
+it from the data rather than assert it. The plot shows the same thing
+directly: Class I events sit at negative Δφ, porosity dropping downwards into
+a tighter layer, and Class IV at positive Δφ, porosity rising into a softer
+one. That depth scores 0.00 is its own small relief: if class were just depth,
+every property that varies with depth would look like a cause.
+
+This is a measurement of one well at one set of defaults, not a law, and
+`test_real_well.py` pins it so that a change to the blocking or the classifier
+which overturns it shows up as a failing test rather than leaving a confident
+sentence on screen with nothing behind it.
 
 ## More than one well
 
@@ -755,6 +855,16 @@ Multi-well page, running the demo well zoned by its `ZONE` curve beside the
 North Sea well zoned by hand-entered tops — that each well's reflectors carry
 **its own** formation names. A page that zoned every well by the active one's
 tops would produce a table that looked entirely reasonable.
+
+`test_properties.py` covers the per-reflector properties, mostly at the two
+places they go quietly wrong: a net-to-gross must treat a gap in the VSH as a
+*shorter interval*, not as non-net rock, and the reservoir side of a sand base
+is the layer **above**. `test_real_well.py` adds two that only a real well can
+make: that a curve is not reported where it was never logged — 15/9-19-A has
+no VSH, PHI or SW over the top 166 m, and the resampler used to fill it with
+each curve's first valid reading — and the measured ranking of what the class
+depends on in that well, so a change to the blocking or the classifier that
+overturns it fails a test rather than leaving a confident sentence on screen.
 
 ## References
 

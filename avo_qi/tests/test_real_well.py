@@ -149,10 +149,29 @@ class TestTracePicking:
         assert (table["lobe_samples"] > 0).all()
 
     def test_the_event_count_is_pinned(self, table):
-        """A deliberate pin, not an invariant. 25 events at the default 5% cut
-        and a 30 Hz Ricker; if a default moves, this should say so rather than
-        the number changing quietly."""
-        assert len(table) == 25
+        """A deliberate pin, not an invariant, and it says two things.
+
+        The trace carries **25** events at the default 5% cut and a 30 Hz
+        Ricker. The page shows **20** of them, because the interface-pair
+        filter's default keeps only pairs whose lithology is known, and this
+        well has no VSH over its top 166 m — five events sit in that interval
+        and cannot be named. They used to pass the filter, labelled "silt over
+        silt", only because the resampler filled that interval with the first
+        VSH it could find (see
+        ``TestACurveIsNotReportedWhereItWasNeverLogged``). The page says so on
+        screen rather than dropping them quietly.
+
+        If a default moves, this should fail rather than the numbers changing
+        in silence.
+        """
+        from avo_qi.analysis import reflector_analysis
+        from avo_qi.ui import Settings
+
+        picked = reflector_analysis(load()[0], Settings())["table"]
+        assert len(picked) == 25
+        assert len(table) == 20
+        unnamed = picked["litho_pair"].astype(str).str.contains("undefined")
+        assert int(unnamed.sum()) == 5
 
     def test_the_seismic_merges_many_log_interfaces_into_each_event(self, avo, table):
         """3905 log samples over ~316 samples of two-way time cannot yield 269
@@ -678,3 +697,113 @@ class TestModellingFluidCasesOnARealWell:
         page.run()
         assert not page.exception
         assert len(reflector_table(page)) > 0
+
+
+class TestACurveIsNotReportedWhereItWasNeverLogged:
+    """The resampler used to extrapolate, and everything downstream believed it.
+
+    15/9-19-A carries no VSH, PHI or SW above 3666 m — 166 m of the logged
+    interval, a quarter of the well. ``np.interp`` clamps outside its data
+    range, so the time frame came back with *zero* missing samples: a constant
+    VSH of 0.599, a constant porosity of 0.200 and a constant SW of 0.559
+    filling rock nobody had interpreted. Nothing about that reads as wrong
+    downstream — the lithology pair said "silt over silt" with conviction, and
+    a net-to-gross could be measured over an interval with no petrophysics in
+    it at all. This is the fixture that shows it, because the demo well is
+    complete and never could.
+    """
+
+    @staticmethod
+    def timed():
+        from avo_qi.ui import Settings, time_well
+
+        return time_well(load()[0], Settings())
+
+    @pytest.mark.parametrize("curve", ["VSH", "PHI", "SW"])
+    def test_the_unlogged_section_comes_back_missing(self, curve):
+        frame = self.timed()
+        values = frame[curve].to_numpy(float)
+        assert not np.isfinite(values).all(), curve
+        # Missing at the top, where the curve does not start until 3666 m.
+        assert not np.isfinite(values[0])
+
+    @pytest.mark.parametrize("curve", ["VSH", "PHI", "SW"])
+    def test_nothing_survives_outside_the_curves_own_interval(self, curve):
+        """Every finite time sample has to sit inside the depth range the
+        curve was actually logged over."""
+        well = load()[0]
+        depth = well.df["DEPTH"].to_numpy(float)
+        logged = np.isfinite(well.df[curve].to_numpy(float))
+        first, last = depth[logged].min(), depth[logged].max()
+
+        frame = self.timed()
+        good = np.isfinite(frame[curve].to_numpy(float))
+        seen = frame["DEPTH"].to_numpy(float)[good]
+        step = float(np.median(np.diff(depth)))
+        assert seen.min() >= first - step
+        assert seen.max() <= last + step
+
+    @pytest.mark.parametrize("curve", ["VP", "VS", "RHOB"])
+    def test_the_elastic_logs_are_untouched(self, curve):
+        """The fix must not put holes in the three curves the whole synthetic
+        is built from — they are complete over the timed interval, and a NaN
+        in any of them would blank the trace."""
+        assert np.isfinite(self.timed()[curve].to_numpy(float)).all()
+
+    def test_the_reflectors_in_that_section_report_no_lithology(self):
+        """Which is the honest answer, and was 'silt over silt' before."""
+        from avo_qi.analysis import reflector_analysis
+        from avo_qi.ui import Settings
+
+        table = reflector_analysis(load()[0], Settings())["table"]
+        shallow = table[table["depth"] < 3666.0]
+        assert len(shallow) >= 3
+        assert (shallow["litho_pair"] == "undefined over undefined").all()
+        assert shallow["ntg_below"].isna().all()
+        assert shallow["phi_res"].isna().all()
+
+
+class TestWhatTheClassDependsOnInThisWell:
+    """The class-against-property panel, measured on a real well.
+
+    The caption on that panel makes a claim — that the *contrast* across a
+    reflector separates the classes better than either side's absolute value,
+    because an intercept and a gradient are made of contrasts. This is the
+    measurement behind it. It is a fact about 15/9-19-A at the default
+    settings, not a law, and it is pinned so that a change in the blocking or
+    the classifier that overturns it shows up here rather than leaving a
+    confident sentence on screen with nothing behind it.
+    """
+
+    @staticmethod
+    def ranked():
+        from avo_qi.ui import Settings, property_options
+        from avo_qi.analysis import reflector_analysis
+        from avo_qi.ui import class_dependence_ranking
+
+        table = reflector_analysis(load()[0], Settings())["table"]
+        return table, class_dependence_ranking(table, property_options(table))
+
+    def test_the_porosity_contrast_beats_either_side_alone(self):
+        _, ranking = self.ranked()
+        effect = ranking.set_index("column")["eps2"]
+        assert effect["d_phi"] > effect["phi_above"]
+        assert effect["d_phi"] > effect["phi_below"]
+        assert effect["d_phi"] > 0.3          # a strong separation, not a nudge
+
+    def test_the_best_property_does_not_survive_the_search_correction(self):
+        """Seventeen properties tested, so the winner's raw p of 0.006 is worth
+        about 0.1 once the search is paid for. The panel has to say so — this
+        is the number that stops a coincidence being reported as a finding."""
+        _, ranking = self.ranked()
+        best = ranking.dropna(subset=["p"]).iloc[0]
+        assert best["p"] < 0.05
+        assert best["p_adj"] > 0.05
+
+    def test_depth_alone_does_not_sort_the_classes(self):
+        """Worth knowing before reading anything into the rest: if class were
+        just depth, every property that varies with depth would look like a
+        cause."""
+        _, ranking = self.ranked()
+        effect = ranking.set_index("column")["eps2"]
+        assert effect["depth"] < 0.06         # below Cohen's 'moderate'

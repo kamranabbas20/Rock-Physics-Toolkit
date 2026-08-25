@@ -31,6 +31,7 @@ from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     DEPTH_REFERENCES,
     active_well_name,
+    class_property_panel,
     page_setup,
     sidebar,
     well_settings_for,
@@ -293,6 +294,25 @@ if zoned:
     st.dataframe(by_zone[["well"] + [c for c in by_zone.columns if c != "well"]],
                  use_container_width=True, hide_index=True)
 
+# ------------------------------------------------- class against property ---
+# The same panel page 4 carries, over every well at once. This is where it
+# earns its keep: a class-porosity separation seen in one well is that well's
+# rock and might be a coincidence of five reflectors; seen across the field it
+# is a relationship worth predicting away from a well with.
+st.divider()
+st.subheader("Class against property, all wells")
+st.caption(
+    "Every compared well's reflectors pooled, each event's properties averaged "
+    "over the **same two half-lobes its own intercept and gradient were fitted "
+    "from**. Marker shape is the well, so a class carried by one hole alone "
+    "reads as that rather than as a property of the field. The wells must "
+    "share a petrophysical definition for this to mean anything — the net "
+    "cutoffs in the sidebar are one definition for all of them, but VSH and "
+    "PHI computed by different vendors on different tools are not."
+)
+class_property_panel(everything, key="multiwell_property", split_column="well")
+
+st.divider()
 st.download_button(
     "Download every well's reflectors (CSV)",
     everything.drop(columns=["props_row"], errors="ignore").to_csv(index=False).encode(),
