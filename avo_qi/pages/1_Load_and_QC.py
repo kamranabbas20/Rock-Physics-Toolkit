@@ -14,8 +14,6 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-import io as _stdlib_io  # noqa: E402
-
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
@@ -36,12 +34,13 @@ from avo_qi.io.loader import (  # noqa: E402
     standardise,
 )
 from avo_qi.core.depth import survey_from_table  # noqa: E402
-from avo_qi.core.zones import zones_from_tops  # noqa: E402
+from avo_qi.core.zones import tops_from_table  # noqa: E402
 from avo_qi.ui import (  # noqa: E402
     DEMO_WELL,
     DEPTH_REFERENCES,
     apply_depth_references,
     file_depth_curves,
+    read_uploaded_table,
     well_zones,
     load_demo_well,
     load_uploaded_well,
@@ -210,14 +209,15 @@ if _header.get("kb_elevation") is not None or _header.get("water_depth") is not 
 
 if _tvd_choice == "From a deviation survey":
     _survey_file = st.file_uploader(
-        "Deviation survey (CSV: measured depth, inclination, azimuth)",
-        type=["csv", "txt"], key="survey_csv",
-        help="Column names are matched loosely — MD/DEPTH, INC/DEVI/DRIFT and "
+        "Deviation survey — LAS, CSV or Excel (measured depth, inclination, "
+        "azimuth)", type=["las", "csv", "txt", "xlsx", "xls"], key="survey_csv",
+        help="A survey is a depth-indexed set of curves, so a LAS is as "
+             "natural a format for it as a spreadsheet. Column and mnemonic "
+             "names are matched loosely — MD/DEPTH/DEPT, INC/DEVI/DRIFT and "
              "AZI/AZIM/HAZI. Inclination and azimuth in degrees.")
     if _survey_file is not None and st.session_state.get("_survey_file") != _survey_file.name:
         try:
-            _table = pd.read_csv(_stdlib_io.BytesIO(_survey_file.getvalue()),
-                                 sep=None, engine="python")
+            _table = read_uploaded_table(_survey_file)
             _md, _inc, _azi = survey_from_table(_table)
             settings.deviation_survey = [
                 {"md": float(a), "inc": float(b), "azi": float(c)}
@@ -289,9 +289,10 @@ else:
         "leaves the zone filter, the zone-boundary flag on each reflector and "
         "the **Zone summary** on the AVO Classification page — thickness, "
         "net-to-gross, log averages and the events inside each zone — with "
-        "nothing to work from. Enter **formation tops** here instead: a name "
-        "and the measured depth it starts at. Each zone runs down to the next "
-        "top, and the deepest to the bottom of the well."
+        "nothing to work from. Give it a zonation here instead — **upload** a "
+        "LAS carrying a discrete zone curve, or a tops list as CSV or Excel, "
+        "or type the **formation tops** straight into the table. Each zone "
+        "runs down to the next top, and the deepest to the bottom of the well."
     )
 
     _depth_md = well.df["DEPTH"].to_numpy(float)
@@ -300,17 +301,28 @@ else:
     st.caption(f"This well runs {_lo:,.1f} – {_hi:,.1f} m MD.")
 
     _upload = st.file_uploader(
-        "Tops as CSV (a name column and a depth column)", type=["csv", "txt"],
+        "Zonation — LAS, CSV or Excel", type=["las", "csv", "txt", "xlsx", "xls"],
         key="tops_csv",
-        help="Column names are matched loosely: zone/name/formation/marker "
-             "for the name, and top/depth/md/tvd for the depth.")
+        help="Two shapes are read. A tops list needs a name column "
+             "(zone/name/formation/marker) and a depth column "
+             "(top/depth/md/tvd). A LAS instead carries a discrete zone curve "
+             "— a code per sample — because its data section is numeric and "
+             "has nowhere to put a name; intervals are then built where the "
+             "code changes, and the codes stand in as their own names.")
     if _upload is not None and st.session_state.get("_tops_file") != _upload.name:
         try:
-            _read = pd.read_csv(_stdlib_io.BytesIO(_upload.getvalue()))
-            settings.zone_tops = zones_from_tops(_read)[["zone", "top"]].to_dict("records")
+            _read = read_uploaded_table(_upload)
+            settings.zone_tops = tops_from_table(
+                _read, names=settings.zone_names or None
+            )[["zone", "top"]].to_dict("records")
             st.session_state["_tops_file"] = _upload.name
             st.session_state.pop("zone_cache", None)
-            st.success(f"Read {len(settings.zone_tops)} top(s) from {_upload.name}.")
+            _codes = all(str(t["zone"]).strip().lstrip("-").isdigit()
+                         for t in settings.zone_tops)
+            st.success(
+                f"Read {len(settings.zone_tops)} top(s) from {_upload.name}."
+                + (" A LAS carries codes rather than names — type over them in "
+                   "the table below to name the zones." if _codes else ""))
             st.rerun()
         except Exception as exc:              # a bad file must not kill the page
             st.error(f"Could not read {_upload.name}: {exc}")

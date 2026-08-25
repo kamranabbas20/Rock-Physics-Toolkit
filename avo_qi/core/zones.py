@@ -20,6 +20,7 @@ __all__ = [
     "ZONE_MNEMONICS",
     "zones_from_curve",
     "zones_from_tops",
+    "tops_from_table",
     "assign_zones",
     "zone_of_interface",
     "zone_of_lobe",
@@ -157,6 +158,87 @@ def zones_from_tops(tops, base_depth=None):
         base.iloc[-1] = float(base_depth)
     frame["base"] = base
     return frame[["zone", "top", "base"]]
+
+
+#: Column names that hold the depth of a zonation row, in priority order.
+_ZONATION_DEPTH = ["TOP", "DEPTH", "DEPT", "MD", "TVD", "TVDSS"]
+#: ...and the ones that hold its name or code.
+_ZONATION_LABEL = ["ZONE", "NAME", "FORMATION", "MARKER"] + ZONE_MNEMONICS
+
+
+def _zonation_columns(frame):
+    """``(depth_column, label_column)`` for a zonation table, or ``(None, None)``."""
+    lookup = {}
+    for column in frame.columns:
+        key = str(column).strip().upper().replace(" ", "").replace("_", "")
+        lookup.setdefault(key, column)
+
+    def pick(candidates, taken=None):
+        for candidate in candidates:                     # exact match first
+            if candidate in lookup and lookup[candidate] != taken:
+                return lookup[candidate]
+        for candidate in candidates:                     # then a prefix match
+            for key, column in lookup.items():
+                if key.startswith(candidate) and column != taken:
+                    return column
+        return None
+
+    depth_col = pick(_ZONATION_DEPTH)
+    label_col = pick(_ZONATION_LABEL, taken=depth_col)
+    if label_col is None and len(frame.columns) == 2:
+        # Two columns and one of them is the depth: the other must be it.
+        label_col = next((c for c in frame.columns if c != depth_col), None)
+    return depth_col, label_col
+
+
+def tops_from_table(frame, names=None, min_samples=1):
+    """Formation tops from a table, whichever of the two shapes it arrives in.
+
+    A zonation reaches the toolkit as a **tops list** — a name and the depth it
+    starts at, which is what a spreadsheet holds — or as a **discrete curve**:
+    a code per sample on a depth axis.  A LAS can only ever be the second,
+    because its data section is numeric and has nowhere to put a name; the
+    zonation comes as codes, and the codes stand in as their own names unless
+    ``names`` maps them.
+
+    Which of the two it is, is decided **on the content, not on the column
+    names**: if the label repeats on consecutive rows it is a curve, because a
+    tops list never lists the same zone twice in a row — that would be a zone
+    interrupted by nothing.  Deciding on names instead looks fine until a zone
+    curve arrives with its depth mnemonic spelled ``DEPTH`` or ``MD``, which
+    a tops reader happily accepts and turns into several thousand one-sample
+    tops.
+    """
+    import pandas as pd
+
+    frame = pd.DataFrame(frame)
+    depth_col, label_col = _zonation_columns(frame)
+    if depth_col is None or label_col is None:
+        raise ValueError(
+            "a zonation needs either a name column (zone/name/formation/"
+            "marker) and a depth column (top/depth/md/tvd), or a depth and a "
+            f"discrete zone curve; found {list(frame.columns)}")
+
+    ordered = frame[[depth_col, label_col]].copy()
+    ordered[depth_col] = pd.to_numeric(ordered[depth_col], errors="coerce")
+    ordered = ordered.dropna(subset=[depth_col]).sort_values(depth_col)
+    if ordered.empty:
+        return pd.DataFrame(columns=["zone", "top", "base"])
+
+    labels = ordered[label_col]
+    previous = labels.shift()
+    repeated = bool((labels.eq(previous) | (labels.isna() & previous.isna())).any())
+
+    if repeated:
+        zones = zones_from_curve(
+            ordered[depth_col].to_numpy(float), labels.to_numpy(),
+            names=names, min_samples=min_samples)
+        return zones[["zone", "top", "base"]] if len(zones) else zones
+
+    named = ordered.rename(columns={depth_col: "top", label_col: "zone"})
+    if names:
+        named["zone"] = [names.get(v, v) for v in named["zone"]]
+    return zones_from_tops(named)
 
 
 def assign_zones(depth, zones, unzoned=UNZONED):

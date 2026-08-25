@@ -196,6 +196,20 @@ def load_uploaded_well(uploaded, mapping=None, depth_unit="m"):
     return well
 
 
+def read_uploaded_table(uploaded):
+    """A supporting table — a deviation survey, a zonation — as a DataFrame.
+
+    Routed by extension through the same reader the well itself uses, so LAS,
+    CSV, TXT and Excel all arrive the same way.  A LAS is the natural format
+    for both of these: a survey is a depth-indexed set of curves, and a
+    zonation is a discrete curve on a depth axis.
+    """
+    suffix = os.path.splitext(uploaded.name)[1].lower()
+    frame, _units = read_well(_stdlib_io.BytesIO(uploaded.getvalue()),
+                              suffix=suffix)
+    return frame
+
+
 def time_well(well, settings, case=None):
     """Resample one fluid case onto a regular two-way-time grid.
 

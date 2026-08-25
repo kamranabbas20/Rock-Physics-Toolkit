@@ -203,8 +203,10 @@ opposite sign.
 1. **Curves in the file win.** A TVD or TVDSS the file already carries was made
    with the survey and the datum the well was actually drilled on, and nothing
    reconstructed here beats that.
-2. **A deviation survey**, uploaded as a CSV of measured depth, inclination and
-   azimuth, gives TVD by **minimum curvature** — a circular arc between
+2. **A deviation survey** — a LAS, CSV or Excel file of measured depth,
+   inclination and azimuth; a survey is a depth-indexed set of curves, so a LAS
+   is as natural a format for it as a spreadsheet — gives TVD by **minimum
+   curvature** — a circular arc between
    stations rather than a straight line. Log samples are placed inside a survey
    interval by interpolating the hole's attitude and taking one curvature step
    from the station above, not by interpolating TVD linearly between stations.
@@ -231,7 +233,17 @@ Wells arrive zoned two ways, and both work here. A LAS carrying a discrete
 into named intervals. Most wells carry no such curve — 15/9-19-A does not —
 which used to leave the zone filter, the zone-boundary flag and every per-zone
 summary with nothing to work from; **formation tops** entered or uploaded on
-the *Load & QC* page now fill that gap. Each zone runs to the next top and the
+the *Load & QC* page now fill that gap. An uploaded zonation may be a **LAS**
+as well as a CSV or Excel tops list: a LAS data section is numeric and has
+nowhere to put a name, so it carries the zonation as a discrete curve, and the
+codes stand in as their own names until they are typed over.
+
+Which shape a table is, is decided on its **content, not its column names**. A
+tops list never repeats a zone on consecutive rows — that would be a zone
+interrupted by nothing — so a label that repeats means a curve. Deciding on
+names instead looks fine until a zone curve arrives with its depth mnemonic
+spelled `DEPTH` or `MD`, which a tops reader accepts and turns into several
+thousand one-sample tops. Each zone runs to the next top and the
 deepest to the bottom of the well. Tops are cleared when another well is
 loaded, because a top is a depth in the well it was typed against.
 

@@ -16,6 +16,7 @@ from avo_qi.core.zones import (
     zone_event_summary,
     zone_of_lobe,
     zone_statistics,
+    tops_from_table,
 )
 
 STEP = 0.1524
@@ -471,3 +472,95 @@ class TestZoneEventSummary:
         assert zone_event_summary(pd.DataFrame()).empty
         assert zone_event_summary(None).empty
         assert zone_event_summary(pd.DataFrame({"a": [1]})).empty
+
+
+class TestTopsFromTable:
+    """A zonation arrives as a tops list or as a discrete curve, and a LAS can
+    only ever be the second: its data section is numeric, with nowhere to put a
+    name."""
+
+    def test_a_named_tops_list_is_read_as_one(self):
+        frame = pd.DataFrame({"Formation": ["Upper", "Reservoir"],
+                              "MD": [3500.0, 3900.0]})
+        tops = tops_from_table(frame)
+        assert list(tops["zone"]) == ["Upper", "Reservoir"]
+        assert list(tops["top"]) == [3500.0, 3900.0]
+
+    def test_a_discrete_curve_becomes_intervals(self):
+        depth, codes = zoned_well(null_top=0)
+        tops = tops_from_table(pd.DataFrame({"DEPT": depth, "ZONE": codes}),
+                               names=NAMES)
+        assert list(tops["zone"]) == ["Shale A", "Sand A", "Shale A", "Sand B",
+                                      "Shale A", "Sand A", "Shale A"]
+        assert tops["top"].iloc[1] == pytest.approx(2040.0, abs=STEP)
+
+    def test_unmapped_codes_stand_in_as_their_own_names(self):
+        depth, codes = zoned_well(null_top=0)
+        tops = tops_from_table(pd.DataFrame({"DEPT": depth, "ZONE": codes}))
+        assert set(tops["zone"]) == {"1", "2", "3"}
+
+    def test_one_row_per_top_is_read_as_a_tops_list(self):
+        """No label repeats, so this is a list of tops that happens to use
+        codes for names, not a curve."""
+        tops = tops_from_table(pd.DataFrame({"MD": [2000.0, 2100.0, 2200.0],
+                                             "ZONE": [1, 2, 3]}))
+        assert list(tops["top"]) == [2000.0, 2100.0, 2200.0]
+        assert len(tops) == 3
+
+    def test_the_shape_is_decided_on_content_not_on_column_names(self):
+        """The defect this guards. A zone curve whose depth mnemonic is spelled
+        DEPTH or MD matches a tops reader's own column names exactly, and a
+        name-based rule then turns 3905 samples into 3905 one-sample tops."""
+        depth, codes = zoned_well(null_top=0)
+        for depth_name in ("DEPT", "DEPTH", "MD", "TVDSS"):
+            tops = tops_from_table(pd.DataFrame({depth_name: depth,
+                                                 "ZONE": codes}), names=NAMES)
+            assert len(tops) == 7, depth_name
+            assert list(tops["zone"])[:2] == ["Shale A", "Sand A"]
+
+    def test_a_repeated_name_that_is_not_consecutive_stays_a_tops_list(self):
+        """Shale over sand over shale is three tops, not a curve."""
+        tops = tops_from_table(pd.DataFrame(
+            {"top": [2000.0, 2040.0, 2070.0],
+             "formation": ["Shale", "Sand", "Shale"]}))
+        assert len(tops) == 3
+        assert list(tops["zone"]) == ["Shale", "Sand", "Shale"]
+
+    def test_tops_are_sorted_before_anything_else(self):
+        tops = tops_from_table(pd.DataFrame({"top": [2100.0, 2000.0],
+                                             "zone": ["B", "A"]}))
+        assert list(tops["zone"]) == ["A", "B"]
+
+    def test_codes_can_be_named_on_the_way_through(self):
+        tops = tops_from_table(pd.DataFrame({"MD": [2000.0, 2100.0],
+                                             "ZONE": [1, 2]}), names=NAMES)
+        assert list(tops["zone"]) == ["Shale A", "Sand A"]
+
+    def test_a_two_column_table_needs_no_recognised_mnemonic(self):
+        tops = tops_from_table(pd.DataFrame({"DEPTH": [10.0, 20.0],
+                                             "whatever": [1, 2]}))
+        assert len(tops) == 2
+
+    def test_a_table_that_is_neither_says_so(self):
+        with pytest.raises(ValueError) as err:
+            tops_from_table(pd.DataFrame({"a": [1.0], "b": [2.0], "c": [3.0]}))
+        assert "discrete zone curve" in str(err.value)
+
+    def test_a_zonation_las_round_trips(self, tmp_path):
+        """The path the page actually takes: a LAS off disk, through the well
+        reader, into tops."""
+        import lasio
+
+        from avo_qi.io.loader import read_well
+
+        depth, codes = zoned_well(null_top=0)
+        las = lasio.LASFile()
+        las.well["NULL"] = lasio.HeaderItem("NULL", value=-999.25)
+        las.append_curve("DEPT", depth, unit="M")
+        las.append_curve("ZONE", codes, unit="")
+        path = tmp_path / "zonation.las"
+        las.write(str(path), version=2.0)
+
+        frame, _ = read_well(str(path))
+        tops = tops_from_table(frame, names=NAMES)
+        assert list(tops["zone"])[:2] == ["Shale A", "Sand A"]
