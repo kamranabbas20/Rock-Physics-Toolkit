@@ -177,10 +177,11 @@ else:
     st.caption(
         "Many wells carry no discrete zone curve — this one does not — which "
         "leaves the zone filter, the zone-boundary flag on each reflector and "
-        "every per-zone summary with nothing to work from. Enter **formation "
-        "tops** here instead: a name and the measured depth it starts at. Each "
-        "zone runs down to the next top, and the deepest to the bottom of the "
-        "well."
+        "the **Zone summary** on the AVO Classification page — thickness, "
+        "net-to-gross, log averages and the events inside each zone — with "
+        "nothing to work from. Enter **formation tops** here instead: a name "
+        "and the measured depth it starts at. Each zone runs down to the next "
+        "top, and the deepest to the bottom of the well."
     )
 
     _depth_md = well.df["DEPTH"].to_numpy(float)

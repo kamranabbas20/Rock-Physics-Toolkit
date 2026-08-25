@@ -397,3 +397,70 @@ class TestLithologyOnRealCurves:
         picker.set_value([target]).run()
         assert not at.exception
         assert set(reflector_table(at)["litho_pair"]) == {target}
+
+
+class TestZoneSummaryOnARealWell:
+    """The summary on a well with the gaps real logs have.
+
+    15/9-19-A logs VSH on 2812 of 3905 samples and SW on 1965, so this is where
+    a net-to-gross quoted without its coverage would be quietly wrong.  The
+    tops are invented, as above; the wiring is what is under test.
+    """
+
+    TOPS = TestZonationFromTops.TOPS
+
+    @staticmethod
+    def _summary(page):
+        """The widest zone-summary frame on the page.
+
+        The page shows the answer columns first and every column behind an
+        expander, so there are two; the tests want the complete one.
+        """
+        found = [e.value for e in page.dataframe
+                 if hasattr(e.value, "columns")
+                 and {"zone", "gross", "ntg"} <= set(e.value.columns)]
+        if not found:
+            raise AssertionError("no zone summary on the page")
+        return max(found, key=lambda f: len(f.columns))
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def zoned(cls):
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"))
+        at.session_state["settings"].zone_tops = list(cls.TOPS)
+        at.run()
+        assert not at.exception
+        return at
+
+    def test_there_is_no_summary_until_there_are_tops(self, avo):
+        with pytest.raises(AssertionError):
+            self._summary(avo)
+
+    def test_the_thicknesses_add_up_to_the_logged_interval(self, zoned):
+        summary = self._summary(zoned)
+        assert list(summary["zone"]) == ["Upper", "Middle", "Reservoir"]
+        depth = load()[0].df["DEPTH"].to_numpy(float)
+        assert summary["gross"].sum() == pytest.approx(depth.max() - depth.min(),
+                                                       abs=0.5)
+
+    def test_net_never_exceeds_gross_and_pay_never_exceeds_net(self, zoned):
+        summary = self._summary(zoned)
+        assert (summary["net"] <= summary["gross"] + 1e-9).all()
+        assert (summary["pay"] <= summary["net"] + 1e-9).all()
+        assert summary["ntg"].between(0.0, 1.0).all()
+
+    def test_a_gap_in_a_curve_shows_up_as_coverage_not_as_zero_net(self, zoned):
+        """VSH is missing over the shallow part of this well.  That has to read
+        as *not judged* rather than as *not reservoir*."""
+        summary = self._summary(zoned).set_index("zone")
+        assert summary["net_coverage"].min() < 0.95
+        # ...and where a curve is missing entirely the cutoff cannot bite: the
+        # zone still reports its gross thickness and its logged averages.
+        assert (summary["gross"] > 0).all()
+        assert summary["mean_VSH"].notna().any()
+
+    def test_the_events_are_attributed_to_zones(self, zoned):
+        summary = self._summary(zoned)
+        table = reflector_table(zoned)
+        assert summary["n_events"].sum() >= len(table)   # boundaries count twice
+        assert summary["class_mix"].notna().any()

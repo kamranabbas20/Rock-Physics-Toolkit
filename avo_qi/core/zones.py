@@ -23,6 +23,8 @@ __all__ = [
     "assign_zones",
     "zone_of_interface",
     "zone_of_lobe",
+    "zone_statistics",
+    "zone_event_summary",
     "UNZONED",
 ]
 
@@ -174,6 +176,236 @@ def assign_zones(depth, zones, unzoned=UNZONED):
         base = float(base) if base is not None and np.isfinite(base) else np.inf
         labels[(depth >= top) & (depth < base)] = row["zone"]
     return labels
+
+
+def _sample_thickness(depth):
+    """Thickness each sample stands for, from the midpoints either side.
+
+    Summing these over a set of samples gives a thickness that is right under
+    irregular sampling and does not depend on the samples being contiguous —
+    which matters because a zone name can reappear deeper in the well, and its
+    first-to-last span would then include the rock in between.
+    """
+    depth = np.asarray(depth, dtype=float)
+    n = depth.size
+    if n == 0:
+        return np.zeros(0)
+    if n == 1:
+        return np.zeros(1)
+    edges = np.empty(n + 1)
+    edges[1:-1] = 0.5 * (depth[:-1] + depth[1:])
+    edges[0] = depth[0] - 0.5 * (depth[1] - depth[0])
+    edges[-1] = depth[-1] + 0.5 * (depth[-1] - depth[-2])
+    return np.abs(np.diff(edges))
+
+
+def _as_bounds(criterion):
+    """``(lo, hi)`` from a pair or a ``{"min": .., "max": ..}`` mapping."""
+    if isinstance(criterion, dict):
+        lo, hi = criterion.get("min"), criterion.get("max")
+    else:
+        lo, hi = criterion
+    return (None if lo is None else float(lo),
+            None if hi is None else float(hi))
+
+
+def _criteria_masks(criteria, curves, n):
+    """``(passes, logged)`` for a set of cutoffs.
+
+    ``logged`` marks the samples where every curve the criteria name is
+    actually present.  Keeping it separate is the honest part: a sample with no
+    VSH is not net, but neither is it demonstrably non-net, and a net-to-gross
+    quoted without saying how much of the zone could be judged is a number with
+    a hole in it.
+    """
+    passes = np.ones(n, dtype=bool)
+    logged = np.ones(n, dtype=bool)
+    for name, criterion in dict(criteria).items():
+        if name not in curves:
+            raise ValueError(f"no curve {name!r} for the net/pay criteria; "
+                             f"have {sorted(curves)}")
+        values = np.asarray(curves[name], dtype=float)
+        if values.size != n:
+            raise ValueError(f"curve {name!r} has {values.size} samples, "
+                             f"expected {n}")
+        finite = np.isfinite(values)
+        logged &= finite
+        lo, hi = _as_bounds(criterion)
+        ok = finite.copy()
+        if lo is not None:
+            ok &= values >= lo
+        if hi is not None:
+            ok &= values <= hi
+        passes &= ok
+    return passes, logged
+
+
+def zone_statistics(zone_labels, depth, curves=None, net=None, pay=None,
+                    unzoned=UNZONED, include_unzoned=False):
+    """Per-zone thickness, net-to-gross and curve averages.
+
+    The zonation on its own is a filter.  This turns it into an answer: how
+    thick each zone is, how much of it passes a reservoir cutoff, and what the
+    logs average over it.
+
+    Parameters
+    ----------
+    zone_labels : array_like
+        Zone name per sample, as :func:`assign_zones` returns.
+    depth : array_like
+        Depth per sample, in the same frame as ``zone_labels``.  **Use the
+        depth frame, not time**: a fast layer occupies fewer time samples per
+        metre, so a net-to-gross counted in time is biased by velocity.
+    curves : mapping or DataFrame, optional
+        Curves to average, e.g. ``{"VSH": .., "PHI": .., "SW": ..}``.  Averages
+        are thickness-weighted and ignore missing samples.
+    net, pay : mapping, optional
+        Cutoffs as ``{curve: (lo, hi)}`` or ``{curve: {"min": .., "max": ..}}``
+        with either bound optional — ``{"VSH": {"max": 0.35}}`` is reservoir,
+        adding ``{"SW": {"max": 0.5}}`` is pay.  A sample must pass every named
+        cutoff.
+    include_unzoned : bool
+        Report the samples outside every named zone as their own row.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``zone``, ``top``, ``base``, ``gross``, then ``net``/``ntg`` and
+        ``pay``/``ptg`` where cutoffs were given, the thickness-weighted mean
+        of each curve as ``mean_<name>`` (and ``net_mean_<name>`` over the net
+        interval), ``n_samples``, and ``net_coverage`` / ``pay_coverage`` — the
+        fraction of the zone where those cutoffs could be evaluated at all.
+        Coverage is what stops a zone with no Sw curve from reading as zero pay
+        rather than as unknown.
+    """
+    import pandas as pd
+
+    labels = np.asarray(zone_labels, dtype=object)
+    depth = np.asarray(depth, dtype=float)
+    if labels.size != depth.size:
+        raise ValueError("zone_labels and depth must have the same length")
+
+    curves = {} if curves is None else (
+        {c: curves[c].to_numpy(dtype=float) for c in curves.columns}
+        if hasattr(curves, "columns") else
+        {k: np.asarray(v, dtype=float) for k, v in dict(curves).items()})
+
+    columns = (["zone", "top", "base", "gross"]
+               + (["net", "ntg"] if net else [])
+               + (["pay", "ptg"] if pay else [])
+               + [f"mean_{c}" for c in curves]
+               + ([f"net_mean_{c}" for c in curves] if net else [])
+               + ["n_samples"] + (["net_coverage"] if net else [])
+               + (["pay_coverage"] if pay else []))
+    if labels.size == 0:
+        return pd.DataFrame(columns=columns)
+
+    thickness = _sample_thickness(depth)
+    net_pass, net_logged = (_criteria_masks(net, curves, labels.size) if net
+                            else (None, None))
+    pay_pass, pay_logged = (_criteria_masks(pay, curves, labels.size) if pay
+                            else (None, None))
+
+    def average(values, where):
+        """Thickness-weighted mean over the samples where the curve exists."""
+        use = where & np.isfinite(values)
+        if not use.any():
+            return float("nan")
+        if thickness[use].sum() <= 0:        # a single sample has no thickness
+            return float(values[use].mean())
+        return float(np.average(values[use], weights=thickness[use]))
+
+    names = [n for n in dict.fromkeys(labels.astype(str))
+             if include_unzoned or n != str(unzoned)]
+    rows = []
+    for name in names:
+        here = labels.astype(str) == name
+        gross = float(thickness[here].sum())
+        row = {"zone": name,
+               "top": float(depth[here].min()),
+               "base": float(depth[here].max()),
+               "gross": gross}
+        if net is not None:
+            in_net = here & net_pass
+            row["net"] = float(thickness[in_net].sum())
+            row["ntg"] = row["net"] / gross if gross > 0 else float("nan")
+        if pay is not None:
+            row["pay"] = float(thickness[here & pay_pass].sum())
+            row["ptg"] = row["pay"] / gross if gross > 0 else float("nan")
+        for curve, values in curves.items():
+            row[f"mean_{curve}"] = average(values, here)
+        if net is not None:
+            for curve, values in curves.items():
+                row[f"net_mean_{curve}"] = average(values, here & net_pass)
+        row["n_samples"] = int(here.sum())
+        for column, logged in (("net_coverage", net_logged),
+                               ("pay_coverage", pay_logged)):
+            if logged is not None:
+                covered = float(thickness[here & logged].sum())
+                row[column] = covered / gross if gross > 0 else float("nan")
+        rows.append(row)
+
+    frame = pd.DataFrame(rows, columns=columns)
+    return frame.sort_values("top").reset_index(drop=True)
+
+
+def zone_event_summary(events, zone_columns="zone", class_column="avo_class",
+                       deviation_column=None, depth_column=None):
+    """What the picked reflectors say about each zone.
+
+    The log side of a zone summary describes the rock; this is the seismic
+    side — how many events fall in the zone, what AVO classes they are, and
+    which one departs furthest below the background trend.  ``deviation_column``
+    is signed and negative below the trend, so the *minimum* is the strongest
+    candidate anomaly.
+
+    ``zone_columns`` may name **both sides** of the event, ``("zone",
+    "zone_below")``, and usually should.  A reservoir top has its upper lobe in
+    the seal, so counting only the upper side files the most interesting event
+    a reservoir has under the shale above it — and leaves the reservoir looking
+    like it has nothing but weak internal reflections.  An event counted on
+    either side appears in both zones, which is the honest reading of a
+    boundary: it belongs to the pair.
+    """
+    import pandas as pd
+
+    columns = ([zone_columns] if isinstance(zone_columns, str)
+               else [c for c in zone_columns])
+    if events is None or not len(events):
+        columns = []
+    else:
+        columns = [c for c in columns if c in events]
+    if not columns:
+        return pd.DataFrame(columns=["zone", "n_events", "top_class", "class_mix"])
+
+    sides = [events[c].astype(str) for c in columns]
+    order = dict.fromkeys(pd.concat(sides, ignore_index=True))
+
+    rows = []
+    for name in order:
+        here = sides[0] == name
+        for side in sides[1:]:
+            here = here | (side == name)
+        inside = events[here.to_numpy()]
+        row = {"zone": name, "n_events": int(len(inside))}
+        if class_column in inside:
+            counts = inside[class_column].astype(str).value_counts()
+            row["top_class"] = str(counts.index[0])
+            row["class_mix"] = ", ".join(f"{k}×{v}" for k, v in counts.items())
+        else:
+            row["top_class"] = ""
+            row["class_mix"] = ""
+        if deviation_column and deviation_column in inside:
+            values = pd.to_numeric(inside[deviation_column], errors="coerce")
+            if values.notna().any():
+                worst = values.idxmin()
+                row["min_deviation"] = float(values.loc[worst])
+                if depth_column and depth_column in inside:
+                    row["deviation_depth"] = float(inside.loc[worst, depth_column])
+            else:
+                row["min_deviation"] = float("nan")
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def zone_of_lobe(zone_labels, bounds, samples=None, unzoned=UNZONED):

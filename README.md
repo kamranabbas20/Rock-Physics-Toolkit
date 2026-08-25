@@ -197,9 +197,8 @@ lands in that one-sample gap, so the older test went quiet and stopped meaning
 anything. The lobe is the event's zone of influence, which is the right
 question to ask of a reflector.
 
- Codes map to names through
-the sidebar; an unmapped code stands in as its own name, so a zonation with no
-legend is still usable. A tops list — names and depths, from a dict or a
+Codes map to names through the sidebar; an unmapped code stands in as its own
+name, so a zonation with no legend is still usable. A tops list — names and depths, from a dict or a
 DataFrame — works too.
 
 Zone codes are labels, not measurements, so intervals are built from where the
@@ -209,6 +208,37 @@ stays a separate interval instead of merging with its earlier occurrence.
 The sidebar filters every page by zone, and each reflector carries the zone
 above it, the zone below, and whether it **is** a zone boundary — usually the
 reflector that matters most.
+
+### Zone summary
+
+A zonation that only filters is half a zonation. The **Zone summary** on the
+AVO Classification page turns it into an answer: per zone, gross thickness,
+net and pay against VSH / porosity / Sw cutoffs, thickness-weighted log
+averages over both the zone and its net interval, and — from the events picked
+on the trace — how many fall in the zone, their class mix, and the one sitting
+furthest below the background trend.
+
+Three things about it are deliberate.
+
+**It is measured in depth, not in time.** A fast layer occupies fewer time
+samples per metre, so a net-to-gross counted on the time trace would be biased
+by velocity. Thicknesses and averages come off the depth log; only the event
+side comes from the trace.
+
+**Missing curves lower coverage rather than net.** A sample with no Sw cannot
+pass an Sw cutoff, but it is not demonstrably non-pay either. `net_coverage`
+and `pay_coverage` say how much of the zone could be judged at all, so a zone
+with no Sw curve reads as *unknown* pay instead of as zero pay — which matters
+on a well like 15/9-19-A, logged for Sw over half its length.
+
+**An event is counted on either side.** A reservoir top has its upper lobe in
+the seal, so counting only the upper side would file the best event a
+reservoir has under the shale above it. A boundary event belongs to the pair
+and appears in both.
+
+A zone that recurs down the well sums the rock it occupies rather than
+spanning from its first sample to its last — the same reasoning that keeps two
+occurrences of a zone as separate intervals.
 
 ## Fluid cases
 

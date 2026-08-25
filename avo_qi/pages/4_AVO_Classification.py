@@ -24,7 +24,12 @@ from avo_qi.core.blocking import (  # noqa: E402
     lobe_windows,
 )
 from avo_qi.core.lithology import interface_lithology, lobe_lithology  # noqa: E402
-from avo_qi.core.zones import zone_of_interface, zone_of_lobe  # noqa: E402
+from avo_qi.core.zones import (  # noqa: E402
+    zone_event_summary,
+    zone_of_interface,
+    zone_of_lobe,
+    zone_statistics,
+)
 from avo_qi.core.tuning import (  # noqa: E402
     apparent_period,
     tuned_amplitudes,
@@ -63,6 +68,7 @@ from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     ab_crossplot,
     lithology_labels,
+    vsh_series,
     detail_log_tracks,
     wavelet_spectrum_figure,
     apply_zone_filter,
@@ -439,6 +445,153 @@ with right:
         st.metric("Largest negative deviation", f"{dev.min():+.4f}", label)
     else:
         st.info("Not enough reflectors to fit a background trend.")
+
+# ------------------------------------------------------------ zone summary --
+# The zonation has so far been a filter and a column. This is the zone as an
+# *answer*: thickness, net-to-gross, log averages, and what the events inside
+# it are doing. It sits after the crossplot because the strongest anomaly per
+# zone is measured against the background trend fitted just above.
+zone_intervals = well_zones(well, settings)
+zone_summary = None
+if zone_intervals is not None and len(zone_intervals):
+    st.divider()
+    st.subheader("Zone summary")
+    st.caption(
+        "Zonation turned into an answer rather than a filter. **Thicknesses "
+        "and averages are computed on the depth log, not on the time trace** — "
+        "a fast layer occupies fewer time samples per metre, so a net-to-gross "
+        "counted in time would be biased by velocity."
+    )
+
+    zone_frame = well.df
+    zone_per_depth = zone_labels(zone_frame, well, settings)
+    zone_curves = {}
+    zone_vsh, zone_vsh_source = vsh_series(zone_frame, settings)
+    if zone_vsh_source is not None:
+        zone_curves["VSH"] = zone_vsh
+    for _curve in ("PHI", "SW"):
+        if _curve in zone_frame.columns:
+            zone_curves[_curve] = zone_frame[_curve].to_numpy(float)
+
+    net_cuts, pay_cuts = {}, {}
+    cut_cols = st.columns(3)
+    if "VSH" in zone_curves:
+        net_cuts["VSH"] = {"max": cut_cols[0].slider(
+            "Net: VSH ≤", 0.0, 1.0,
+            float(settings.vsh_cutoffs.get("silty sand", 0.35)), 0.05,
+            key="zone_vsh_cut",
+            help="The same shale-volume cut the lithology classes use.")}
+    if "PHI" in zone_curves:
+        net_cuts["PHI"] = {"min": cut_cols[1].slider(
+            "Net: PHI ≥", 0.0, 0.40, 0.08, 0.01, key="zone_phi_cut")}
+    if "SW" in zone_curves and net_cuts:
+        pay_cuts = dict(net_cuts)
+        pay_cuts["SW"] = {"max": cut_cols[2].slider(
+            "Pay: SW ≤", 0.0, 1.0, 0.50, 0.05, key="zone_sw_cut",
+            help="Pay is net that also passes this saturation cut.")}
+
+    zone_stats = zone_statistics(
+        zone_per_depth, zone_frame["DEPTH"].to_numpy(float), zone_curves,
+        net=net_cuts or None, pay=pay_cuts or None)
+    zone_events = zone_event_summary(
+        table,
+        # Both sides, as the zone filter already counts them: a reservoir top
+        # has its upper lobe in the seal, so counting only the upper side would
+        # file the best event a reservoir has under the shale above it.
+        zone_columns=("zone", "zone_below"),
+        deviation_column=("background_deviation"
+                          if "background_deviation" in table.columns else None),
+        depth_column="depth" if "depth" in table.columns else None)
+    zone_summary = zone_stats.merge(zone_events, on="zone", how="left")
+    if "n_events" in zone_summary.columns:
+        zone_summary["n_events"] = zone_summary["n_events"].fillna(0).astype(int)
+
+    if zone_summary.empty:
+        st.info("No sample of the well falls in a named zone.")
+    else:
+        _display = zone_summary.copy()
+        _numeric = _display.select_dtypes("number").columns
+        _display[_numeric] = _display[_numeric].round(3)
+        for _col in ("top", "base", "gross", "net", "pay"):
+            if _col in _display.columns:
+                _display[_col] = _display[_col].round(1)
+
+        # Nineteen columns run the class mix and the anomaly off the right of
+        # the screen, which are the two the seismic side is here for. Show the
+        # answer columns; the rest stay one click away and in the CSV. The
+        # coverage pair earns its place only when it is not a column of ones.
+        _key = ["zone", "top", "base", "gross", "net", "ntg", "pay", "ptg"]
+        for _col in ("net_coverage", "pay_coverage"):
+            if _col in _display.columns and (zone_summary[_col] < 0.999).any():
+                _key.append(_col)
+        _key += [c for c in _display.columns if c.startswith("mean_")]
+        # `deviation_depth` earns its place beside `min_deviation`: two zones
+        # sharing a boundary event show the same deviation, and so do two
+        # different events that happen to agree once rounded. The depth is what
+        # tells those apart.
+        _key += [c for c in ("n_events", "class_mix", "min_deviation",
+                             "deviation_depth") if c in _display.columns]
+        st.dataframe(_display[_key], use_container_width=True, hide_index=True)
+        with st.expander("Every column"):
+            st.dataframe(_display, use_container_width=True, hide_index=True)
+            st.caption(
+                "`net_mean_*` averages each curve over the net interval alone "
+                "rather than the whole zone, `net_coverage` and `pay_coverage` "
+                "are how much of the zone those cutoffs could be judged over, "
+                "and `top_class` is the commonest class among the events."
+            )
+        st.download_button(
+            "Download zone summary (CSV)",
+            zone_summary.to_csv(index=False).encode(),
+            file_name=f"{well.name}_zone_summary.csv", mime="text/csv")
+
+        _notes = []
+        if net_cuts:
+            _notes.append("net is " + " and ".join(
+                f"{c} ≤ {b['max']:.2f}" if "max" in b else f"{c} ≥ {b['min']:.2f}"
+                for c, b in net_cuts.items()))
+        if pay_cuts:
+            _notes.append(f"pay adds SW ≤ {pay_cuts['SW']['max']:.2f}")
+        if _notes:
+            st.caption("Cutoffs: " + "; ".join(_notes) + ". `ntg` and `ptg` are "
+                       "those thicknesses over gross.")
+        for _coverage, _what in (("net_coverage", "Net"), ("pay_coverage", "Pay")):
+            if _coverage not in zone_summary.columns:
+                continue
+            _thin = zone_summary[zone_summary[_coverage] < 0.95]
+            if len(_thin):
+                st.caption(
+                    f"{_what} cutoffs could only be judged over part of "
+                    + ", ".join(f"**{r.zone}** ({getattr(r, _coverage):.0%})"
+                                for r in _thin.itertuples())
+                    + " — a sample with a missing curve cannot pass a cutoff, "
+                      f"so those {_what.lower()} figures are a floor rather "
+                      "than a measurement."
+                )
+        st.caption(
+            "`n_events` and the class mix count an event in a zone when "
+            "**either side** of it lies there, so a reservoir top is counted "
+            "in both the seal and the reservoir — it is the boundary between "
+            "them, and it is the best event either one has. `min_deviation` is "
+            "the furthest any of them sits below the background trend."
+        )
+        _recurring = zone_summary[(zone_summary["base"] - zone_summary["top"])
+                                  > zone_summary["gross"] * 1.05]
+        if len(_recurring):
+            st.caption(
+                ", ".join(f"**{z}**" for z in _recurring["zone"])
+                + (" occurs" if len(_recurring) == 1 else " occur")
+                + " more than once down the well, so `gross` is the rock each "
+                  "one occupies rather than the span from its shallowest "
+                  "sample to its deepest."
+            )
+        _named = set(zone_summary["zone"])
+        _outside = int((~table["zone"].astype(str).isin(_named)
+                        & ~table["zone_below"].astype(str).isin(_named)).sum())
+        if _outside:
+            st.caption(f"{_outside} of {len(table)} events sit above the "
+                       "shallowest top or below the deepest, so they are in no "
+                       "named zone and are not counted above.")
 
 # ---------------------------------------------------- class confidence -----
 st.divider()
@@ -1260,8 +1413,9 @@ if st.button("Build report", type="primary"):
             _filters.append(("Interface pairs kept", ", ".join(_pairs_kept)))
 
         # The intervals behind the `zone` column, whether they came from a
-        # ZONE curve or from hand-entered tops.
-        _zone_intervals = well_zones(well, settings)
+        # ZONE curve or from hand-entered tops, and the per-zone answer built
+        # from them further up the page.
+        _zone_intervals = zone_intervals
 
         _counts = table["avo_class"].value_counts()
         _class_rows = pd.DataFrame({
@@ -1317,9 +1471,15 @@ if st.button("Build report", type="primary"):
                 blocks=[report.frame_html(tuning_table, max_rows=40)]),
         ]
         if _zone_intervals is not None and len(_zone_intervals):
+            _zone_blocks = [report.frame_html(_zone_intervals.round(2))]
+            if zone_summary is not None and len(zone_summary):
+                _zone_blocks.append(report.frame_html(zone_summary.round(3)))
             _sections.insert(1, report.Section(
-                "Zonation", lead=f"{len(_zone_intervals)} interval(s).",
-                blocks=[report.frame_html(_zone_intervals.round(2))]))
+                "Zonation", lead=f"{len(_zone_intervals)} interval(s). Zone "
+                                 "thicknesses and averages are measured on the "
+                                 "depth log; a net-to-gross counted in time "
+                                 "would be biased by velocity.",
+                blocks=_zone_blocks))
 
         _document = report.report_html(
             f"AVO analysis — {well.name}",

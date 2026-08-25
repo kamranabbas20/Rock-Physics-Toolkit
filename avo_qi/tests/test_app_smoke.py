@@ -1563,3 +1563,101 @@ class TestZonationAndMixingInTheApp:
                         if m.label == "Minerals")
         assert set(minerals.value) == {"quartz", "clay"}
         assert "calcite" in minerals.options
+
+
+class TestZoneSummaryOnTheAvoPage:
+    """The zonation as an answer: thickness, net-to-gross, and the events in it.
+
+    The demo well is built with a gas sand, a brine sand and a cemented streak
+    in shale, so the summary has a right answer to be checked against — a clean
+    sand should read as all net, and only the gas sand should read as pay.
+    """
+
+    @staticmethod
+    def _summary(page):
+        """The widest zone-summary frame on the page.
+
+        The page shows the answer columns first and every column behind an
+        expander, so there are two; the tests want the complete one.
+        """
+        found = [e.value for e in page.dataframe
+                 if hasattr(e.value, "columns")
+                 and {"zone", "gross", "ntg"} <= set(e.value.columns)]
+        if not found:
+            raise AssertionError("no zone summary on the page")
+        return max(found, key=lambda f: len(f.columns))
+
+    def test_every_zone_of_the_well_is_reported(self, avo_page):
+        summary = self._summary(avo_page)
+        assert {"Shale", "Gas Sand", "Brine Sand", "Cemented Streak"} == set(summary["zone"])
+        assert (summary["gross"] > 0).all()
+
+    def test_a_clean_sand_reads_as_all_net(self, avo_page):
+        gas = self._summary(avo_page).set_index("zone").loc["Gas Sand"]
+        assert gas["ntg"] == pytest.approx(1.0)
+        assert gas["gross"] == pytest.approx(30.0, abs=0.2)
+        assert self._summary(avo_page).set_index("zone").loc["Shale", "ntg"] == 0.0
+
+    def test_only_the_hydrocarbon_sand_reads_as_pay(self, avo_page):
+        """Both sands are net; the brine sand is at Sw = 1 and is not pay."""
+        summary = self._summary(avo_page).set_index("zone")
+        assert summary.loc["Gas Sand", "ptg"] == pytest.approx(1.0)
+        assert summary.loc["Brine Sand", "ntg"] == pytest.approx(1.0)
+        assert summary.loc["Brine Sand", "ptg"] == 0.0
+
+    def test_a_zone_that_recurs_sums_its_thickness(self, avo_page):
+        """Shale appears four times over 2000-2160 m. Its thickness is the rock
+        it occupies, not the span from its first sample to its last."""
+        shale = self._summary(avo_page).set_index("zone").loc["Shale"]
+        assert shale["gross"] == pytest.approx(105.2, abs=0.5)
+        assert shale["base"] - shale["top"] > 150
+
+    def test_the_events_inside_each_zone_are_counted_and_classed(self, avo_page):
+        summary = self._summary(avo_page)
+        assert "n_events" in summary.columns and "class_mix" in summary.columns
+        assert summary["n_events"].sum() > 0
+
+    def test_a_reservoir_top_is_counted_in_the_reservoir(self, avo_page):
+        """The reason events are counted on both sides.
+
+        The gas sand's top has its upper lobe in the shale above, so counting
+        only the upper side files the best event the reservoir has under the
+        seal — and leaves the reservoir reading as nothing but weak internal
+        reflections.
+        """
+        gas = self._summary(avo_page).set_index("zone").loc["Gas Sand"]
+        assert "III" in str(gas["class_mix"])
+        assert gas["min_deviation"] < 0
+
+    def test_the_strongest_anomaly_per_zone_is_reported(self, avo_page):
+        summary = self._summary(avo_page)
+        if "min_deviation" not in summary.columns:
+            pytest.skip("no background trend was fitted")
+        deepest = summary.set_index("zone")["min_deviation"]
+        # Signed distance from the background trend: negative is the side
+        # hydrocarbon responses fall on, and every zone with an event has one.
+        assert deepest.notna().sum() >= 3
+        assert (deepest.min() < 0)
+
+    def test_the_summary_is_measured_in_depth_not_time(self, avo_page):
+        """The thickness of a zone is a length of rock. Counting time samples
+        would make a fast layer read thin, so this is stated on the page."""
+        captions = " ".join(c.value for c in avo_page.caption)
+        assert "computed on the depth log, not on the time trace" in captions
+
+    def test_it_can_be_downloaded(self, avo_page):
+        labels = [b.label for b in avo_page.get("download_button")]
+        assert "Download zone summary (CSV)" in labels
+
+    def test_a_well_with_no_zonation_simply_has_no_summary(self):
+        """No zone curve and no tops is not an error; there is nothing to say."""
+        well, raw, units = demo_well()
+        well.df = well.df.drop(columns=["ZONE"])
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=180)
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = raw
+        at.session_state["raw_units"] = units
+        at.run()
+        assert not at.exception
+        assert "Zone summary" not in {s.value for s in at.subheader}

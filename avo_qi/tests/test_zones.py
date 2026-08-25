@@ -13,7 +13,9 @@ from avo_qi.core.zones import (
     zone_of_interface,
     zones_from_curve,
     zones_from_tops,
+    zone_event_summary,
     zone_of_lobe,
+    zone_statistics,
 )
 
 STEP = 0.1524
@@ -273,3 +275,199 @@ class TestZoneOfLobe:
     def test_no_labels_at_all_is_not_an_error(self):
         found = zone_of_lobe(np.array([], dtype=object), self._bounds((0, 1), (1, 2)))
         assert found["zone"].size == 0
+
+
+class TestZoneStatistics:
+    """Gross, net and averages per zone — the zonation turned into an answer."""
+
+    @staticmethod
+    def _well():
+        """Two 10 m zones on a 0.5 m step, the lower one half clean sand."""
+        depth = np.arange(2000.0, 2020.0, 0.5)
+        labels = np.where(depth < 2010, "Shale A", "Sand A").astype(object)
+        vsh = np.where(depth < 2010, 0.8, np.where(depth < 2015, 0.1, 0.5))
+        phi = np.where(depth < 2010, 0.05, np.where(depth < 2015, 0.25, 0.12))
+        sw = np.where(depth < 2012.5, 0.9, 0.3)
+        return depth, labels, {"VSH": vsh, "PHI": phi, "SW": sw}
+
+    def test_gross_thickness_matches_the_interval(self):
+        depth, labels, curves = self._well()
+        stats = zone_statistics(labels, depth, curves)
+        assert list(stats["zone"]) == ["Shale A", "Sand A"]
+        assert stats["gross"].to_numpy() == pytest.approx([10.0, 10.0])
+        assert list(stats["n_samples"]) == [20, 20]
+
+    def test_net_to_gross_comes_from_the_cutoff(self):
+        depth, labels, curves = self._well()
+        stats = zone_statistics(labels, depth, curves, net={"VSH": {"max": 0.35}})
+        sand = stats.set_index("zone").loc["Sand A"]
+        assert sand["net"] == pytest.approx(5.0)          # 2010-2015
+        assert sand["ntg"] == pytest.approx(0.5)
+        assert stats.set_index("zone").loc["Shale A", "ntg"] == pytest.approx(0.0)
+
+    def test_pay_is_stricter_than_net(self):
+        depth, labels, curves = self._well()
+        stats = zone_statistics(labels, depth, curves,
+                                net={"VSH": {"max": 0.35}},
+                                pay={"VSH": {"max": 0.35}, "SW": {"max": 0.5}})
+        sand = stats.set_index("zone").loc["Sand A"]
+        # Net is 2010-2015; Sw only drops below 0.5 at 2012.5, so pay is half.
+        assert sand["pay"] == pytest.approx(2.5)
+        assert sand["ptg"] == pytest.approx(0.25)
+        assert sand["pay"] <= sand["net"]
+
+    def test_averages_are_over_the_zone_and_over_the_net(self):
+        depth, labels, curves = self._well()
+        stats = zone_statistics(labels, depth, curves, net={"VSH": {"max": 0.35}})
+        sand = stats.set_index("zone").loc["Sand A"]
+        assert sand["mean_PHI"] == pytest.approx(0.185)    # half 0.25, half 0.12
+        assert sand["net_mean_PHI"] == pytest.approx(0.25)  # the clean half only
+
+    def test_a_missing_curve_lowers_coverage_rather_than_the_average(self):
+        """A sample with no VSH is not net, but it is not demonstrably non-net
+        either, so the summary says how much of the zone could be judged."""
+        depth, labels, curves = self._well()
+        curves = dict(curves)
+        curves["VSH"] = curves["VSH"].copy()
+        curves["VSH"][20:30] = np.nan                      # top half of the sand
+        stats = zone_statistics(labels, depth, curves, net={"VSH": {"max": 0.35}})
+        sand = stats.set_index("zone").loc["Sand A"]
+        assert sand["net_coverage"] == pytest.approx(0.5)
+        assert sand["net"] == pytest.approx(0.0)           # the clean half is gone
+        assert np.isfinite(sand["mean_VSH"])               # averages skip the nulls
+
+    def test_a_zone_with_no_saturation_curve_reads_as_unknown_pay(self):
+        """Zero pay and no Sw curve are different statements, and the second
+        one has to be visible: 15/9-19-A logs Sw over half its length."""
+        depth, labels, curves = self._well()
+        curves = dict(curves)
+        curves["SW"] = np.where(depth < 2010, curves["SW"], np.nan)
+        stats = zone_statistics(labels, depth, curves,
+                                net={"VSH": {"max": 0.35}},
+                                pay={"VSH": {"max": 0.35}, "SW": {"max": 0.5}})
+        sand = stats.set_index("zone").loc["Sand A"]
+        assert sand["pay"] == 0.0
+        assert sand["pay_coverage"] == 0.0        # ...but nothing was judged
+        assert sand["net_coverage"] == pytest.approx(1.0)
+
+    def test_unzoned_samples_are_left_out_unless_asked_for(self):
+        depth, labels, curves = self._well()
+        labels = labels.copy()
+        labels[:4] = UNZONED
+        assert UNZONED not in set(zone_statistics(labels, depth, curves)["zone"])
+        with_it = zone_statistics(labels, depth, curves, include_unzoned=True)
+        assert UNZONED in set(with_it["zone"])
+
+    def test_a_zone_that_reappears_deeper_sums_rather_than_spans(self):
+        """Its thickness is the rock it occupies, not top-to-base across the
+        zone that sits in between."""
+        depth = np.arange(2000.0, 2030.0, 0.5)
+        labels = np.where((depth < 2010) | (depth >= 2020), "Sand A",
+                          "Shale A").astype(object)
+        stats = zone_statistics(labels, depth, {}).set_index("zone")
+        assert stats.loc["Sand A", "gross"] == pytest.approx(20.0)
+        assert stats.loc["Sand A", "base"] - stats.loc["Sand A", "top"] > 25
+
+    def test_irregular_sampling_is_weighted_by_thickness(self):
+        """Ten metres of coarse sampling should not average like ten samples."""
+        depth = np.array([2000.0, 2001.0, 2002.0, 2012.0])
+        labels = np.array(["A"] * 4, dtype=object)
+        stats = zone_statistics(labels, depth, {"PHI": [0.1, 0.1, 0.1, 0.3]})
+        # The last sample stands for most of the interval, so it dominates.
+        assert stats["mean_PHI"][0] > 0.2
+
+    def test_an_empty_well_is_not_an_error(self):
+        stats = zone_statistics(np.array([], dtype=object), [], {"PHI": []})
+        assert stats.empty and "gross" in stats.columns
+
+    def test_a_cutoff_on_a_curve_that_is_not_there_says_so(self):
+        depth, labels, curves = self._well()
+        with pytest.raises(ValueError, match="PERM"):
+            zone_statistics(labels, depth, curves, net={"PERM": (1.0, None)})
+
+    def test_mismatched_lengths_are_rejected(self):
+        with pytest.raises(ValueError, match="same length"):
+            zone_statistics(np.array(["A", "B"], dtype=object), [2000.0])
+
+    def test_it_takes_a_dataframe_of_curves(self):
+        depth, labels, curves = self._well()
+        frame = pd.DataFrame(curves)
+        assert zone_statistics(labels, depth, frame)["mean_PHI"].notna().all()
+
+    def test_the_depth_frame_is_what_net_to_gross_needs(self):
+        """Counting in time would bias N/G by velocity: a fast layer occupies
+        fewer time samples per metre, so its share of the zone shrinks."""
+        depth = np.arange(2000.0, 2020.0, 0.5)
+        labels = np.full(depth.size, "A", dtype=object)
+        vsh = np.where(depth < 2010, 0.1, 0.8)           # clean half on top
+        # The clean half is twice as fast, so it takes half as many time samples.
+        twt = np.concatenate([np.linspace(2.0, 2.01, 20),
+                              np.linspace(2.01, 2.03, 20)])
+        in_depth = zone_statistics(labels, depth, {"VSH": vsh},
+                                   net={"VSH": {"max": 0.35}})["ntg"][0]
+        in_time = zone_statistics(labels, twt, {"VSH": vsh},
+                                  net={"VSH": {"max": 0.35}})["ntg"][0]
+        assert in_depth == pytest.approx(0.5, abs=0.02)
+        assert in_time < 0.4
+
+
+class TestZoneEventSummary:
+    """The seismic side of a zone: what the picked reflectors say about it."""
+
+    @staticmethod
+    def _events():
+        return pd.DataFrame({
+            "zone": ["Shale A", "Sand A", "Sand A", "Sand A"],
+            "zone_below": ["Shale A", "Sand A", "Sand A", "Sand A"],
+            "avo_class": ["I", "III", "III", "II"],
+            "background_deviation": [0.01, -0.05, -0.02, 0.00],
+            "depth": [2005.0, 2011.0, 2013.0, 2018.0],
+        })
+
+    def test_it_counts_and_ranks_the_classes(self):
+        summary = zone_event_summary(self._events()).set_index("zone")
+        assert summary.loc["Sand A", "n_events"] == 3
+        assert summary.loc["Sand A", "top_class"] == "III"
+        assert summary.loc["Sand A", "class_mix"].startswith("III×2")
+
+    def test_the_strongest_anomaly_is_the_most_negative_deviation(self):
+        summary = zone_event_summary(self._events(),
+                                     deviation_column="background_deviation",
+                                     depth_column="depth").set_index("zone")
+        assert summary.loc["Sand A", "min_deviation"] == pytest.approx(-0.05)
+        assert summary.loc["Sand A", "deviation_depth"] == pytest.approx(2011.0)
+
+    def test_a_boundary_event_counts_in_both_zones(self):
+        """A reservoir top has its upper lobe in the seal.  Counting only the
+        upper side files the best event the reservoir has under the shale above
+        it, and leaves the reservoir looking barren."""
+        events = pd.DataFrame({
+            "zone": ["Shale A"],
+            "zone_below": ["Sand A"],
+            "avo_class": ["III"],
+        })
+        one_sided = zone_event_summary(events).set_index("zone")
+        assert "Sand A" not in one_sided.index
+
+        both = zone_event_summary(events, zone_columns=("zone", "zone_below"))
+        both = both.set_index("zone")
+        assert both.loc["Sand A", "n_events"] == 1
+        assert both.loc["Shale A", "n_events"] == 1
+        assert both.loc["Sand A", "top_class"] == "III"
+
+    def test_an_event_is_not_double_counted_within_one_zone(self):
+        """Both sides in the same zone is one event, not two."""
+        events = pd.DataFrame({"zone": ["Sand A"], "zone_below": ["Sand A"],
+                               "avo_class": ["II"]})
+        summary = zone_event_summary(events, zone_columns=("zone", "zone_below"))
+        assert summary["n_events"][0] == 1
+
+    def test_a_missing_side_column_is_simply_not_used(self):
+        events = pd.DataFrame({"zone": ["Sand A"], "avo_class": ["II"]})
+        summary = zone_event_summary(events, zone_columns=("zone", "zone_below"))
+        assert summary["n_events"][0] == 1
+
+    def test_no_events_is_not_an_error(self):
+        assert zone_event_summary(pd.DataFrame()).empty
+        assert zone_event_summary(None).empty
+        assert zone_event_summary(pd.DataFrame({"a": [1]})).empty
