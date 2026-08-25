@@ -60,6 +60,7 @@ avo_qi/
 │   ├── misfit.py               # bounds checks and predicted-vs-measured residuals
 │   ├── uncertainty.py          # Monte Carlo priors, bands and AVO class odds
 │   ├── zones.py                # zonation from a LAS curve or a tops list
+│   ├── depth.py                # minimum curvature, TVD, TVDSS, TVDBML
 │   ├── qc.py                   # nulls, ranges, spikes, elastic consistency
 │   └── tuning.py               # tuned vs untuned AVO, wedge model, apparent thickness
 ├── pages/                      # the five Streamlit pages
@@ -178,6 +179,50 @@ scan that does not exclude script *bodies* finds those strings and calls a
 perfectly self-contained file external. Nothing in a report draws a map, so
 none of it is ever fetched — but a `<script src=...>` pointing elsewhere would
 genuinely break offline, so that is still checked on its own and never excused.
+
+## Depth references
+
+Measured depth runs along the hole from a rig floor, so it is neither
+comparable between wells nor the depth anything in the earth responds to. The
+toolkit carries four references and each event in the reflector table gets all
+of them:
+
+| Reference | Measured from | What it is for |
+|---|---|---|
+| MD | drilling datum, along hole | where a sample sits in *this* well |
+| TVD | drilling datum, vertically | removing the hole's deviation |
+| TVDSS | mean sea level | comparing two wells at all |
+| TVDBML | seabed | compaction — and so porosity and velocity — trends |
+
+All four increase downwards: TVDSS is positive below sea level, not a negative
+elevation. Software that plots subsea depth on a negative axis is using the
+opposite sign.
+
+*3 · Depth reference* on the Load & QC page resolves them, in this order:
+
+1. **Curves in the file win.** A TVD or TVDSS the file already carries was made
+   with the survey and the datum the well was actually drilled on, and nothing
+   reconstructed here beats that.
+2. **A deviation survey**, uploaded as a CSV of measured depth, inclination and
+   azimuth, gives TVD by **minimum curvature** — a circular arc between
+   stations rather than a straight line. Log samples are placed inside a survey
+   interval by interpolating the hole's attitude and taking one curvature step
+   from the station above, not by interpolating TVD linearly between stations.
+3. **A declared vertical well** takes TVD = MD. This is offered as an explicit
+   choice rather than a default, because a 30° hole at 4000 m MD is about
+   200 m shallower than its measured depth.
+
+TVDSS then needs the height of the drilling datum above mean sea level, and
+TVDBML additionally the water depth. Both are read from the LAS header where it
+carries them (`EKB`, `KB`, `WD` and their usual aliases) and asked for where it
+does not — which is most of the time: 15/9-19-A has `EKB`, `EGL`, `KB` and `GL`
+entries and every one of them is empty.
+
+What cannot be resolved is left out. A reference with no datum behind it is
+**removed rather than written as a column of nulls**, so "no TVDSS here" reads
+as an absent curve everywhere downstream instead of a curve that is somehow all
+blank. A plausible-looking subsea depth built on an assumed rig-floor height is
+worse than none.
 
 ## Zonation
 
@@ -536,7 +581,7 @@ never converts.
 |----------|-----------|-------------------|
 | Velocity | m/s | ft/s, km/s, and sonic slowness (µs/ft, µs/m) |
 | Density | g/cc | kg/m³ |
-| Depth | m | ft |
+| Depth | m | ft (MD, TVD, TVDSS and TVDBML alike) |
 | Time | TWT s | integrated from Vp when only MD is given |
 | Angle | degrees | — |
 

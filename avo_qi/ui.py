@@ -27,7 +27,9 @@ from avo_qi.core.lithology import (
 from avo_qi.core.wavelet import bandpass_ormsby, load_wavelet, ricker
 from avo_qi.core.zones import (UNZONED, assign_zones, zones_from_curve,
                                zones_from_tops)
-from avo_qi.io.loader import depth_to_twt, read_well, resample_to_time, standardise
+from avo_qi.core.depth import depth_references, survey_from_table
+from avo_qi.io.loader import (CANONICAL, depth_to_twt, read_las_header,
+                              read_well, resample_to_time, standardise)
 
 DEMO_WELL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data", "demo_well.las")
 
@@ -88,6 +90,14 @@ class Settings:
     #: Formation tops entered by hand, for a well whose LAS carries no
     #: discrete zone curve: a list of ``{"zone": name, "top": depth_md}``.
     zone_tops: list = field(default_factory=list)
+    #: Depth reference, all of it belonging to the loaded well: the height of
+    #: the drilling datum above mean sea level, the water depth, a deviation
+    #: survey as ``[{"md": .., "inc": .., "azi": ..}, ...]``, and whether the
+    #: hole was declared vertical.
+    kb_elevation: float = None
+    water_depth: float = None
+    deviation_survey: list = field(default_factory=list)
+    vertical_well: bool = False
     vsh_cutoffs: dict = field(default_factory=lambda: dict(DEFAULT_VSH_CUTOFFS))
     lithologies: list = field(default_factory=lambda: list(LITHOLOGIES) + [UNDEFINED])
     gr_method: str = "linear"
@@ -124,6 +134,11 @@ def set_well(well, raw=None, units=None):
     st.session_state["raw_units"] = units or {}
     st.session_state.pop("time_well_cache", None)
     st.session_state.pop("zone_cache", None)
+    st.session_state.pop("las_header", None)
+    # Which depth references this file supplied, recorded before anything is
+    # computed into the same columns.
+    st.session_state["file_depth_curves"] = set() if well is None else {
+        c for c in ("TVD", "TVDSS", "TVDBML") if c in well.df.columns}
     settings = st.session_state.get("settings")
     if settings is not None:
         settings.case = well.active_case if well is not None else None
@@ -133,6 +148,13 @@ def set_well(well, raw=None, units=None):
         # same: they are depths in *this* well and mean nothing in the next.
         settings.zones = []
         settings.zone_tops = []
+        # Same reasoning for the depth reference: a rig floor height, a water
+        # depth and a survey are facts about one well, and carrying them into
+        # the next would put the new well at the old one's datum.
+        settings.kb_elevation = None
+        settings.water_depth = None
+        settings.deviation_survey = []
+        settings.vertical_well = False
 
 
 def load_demo_well():
@@ -161,9 +183,16 @@ def load_uploaded_well(uploaded, mapping=None, depth_unit="m"):
     suffix = os.path.splitext(uploaded.name)[1].lower()
     buffer = _stdlib_io.BytesIO(uploaded.getvalue())
     df, units = read_well(buffer, suffix=suffix)
+    header = {}
+    if suffix == ".las":
+        try:
+            header = read_las_header(_stdlib_io.BytesIO(uploaded.getvalue()))
+        except Exception:      # a header is a convenience, never a blocker
+            header = {}
     well = standardise(df, mapping=mapping, units=units, depth_unit=depth_unit,
                        name=os.path.splitext(uploaded.name)[0])
     set_well(well, raw=df, units=units)
+    st.session_state["las_header"] = header
     return well
 
 
@@ -1116,6 +1145,67 @@ def lithology_crossplot(frame, labels, x, y, title=None, height=520, size=4):
         legend=dict(orientation="v", yanchor="top", y=1.0, x=1.02),
     )
     return fig
+
+
+#: The depth references, in the order they are resolved and displayed.
+DEPTH_REFERENCES = ("TVD", "TVDSS", "TVDBML")
+
+
+def file_depth_curves():
+    """Which depth references came out of the loaded file.
+
+    Once a computed TVD has been written into the well it is indistinguishable
+    from one the file carried, and :func:`depth_references` gives a file curve
+    priority over everything.  Without this, a well first declared vertical
+    would keep TVD = MD forever, silently ignoring a survey uploaded a minute
+    later.
+    """
+    return set(st.session_state.get("file_depth_curves") or ())
+
+
+def well_depth_references(well, settings):
+    """Resolve MD, TVD, TVDSS and TVDBML for this well without writing them."""
+    frame = well.df
+    from_file = file_depth_curves()
+
+    def supplied(name):
+        return (frame[name].to_numpy(float)
+                if name in from_file and name in frame.columns else None)
+
+    survey = None
+    if settings.deviation_survey:
+        survey = survey_from_table(pd.DataFrame(settings.deviation_survey))
+
+    return depth_references(
+        frame["DEPTH"].to_numpy(float),
+        tvd=supplied("TVD"), tvd_ss=supplied("TVDSS"),
+        tvd_bml=supplied("TVDBML"), survey=survey,
+        kb_elevation=settings.kb_elevation, water_depth=settings.water_depth,
+        vertical=settings.vertical_well,
+    )
+
+
+def apply_depth_references(well, settings):
+    """Write the resolved references into the well and invalidate the caches.
+
+    A reference that cannot be resolved is *removed* rather than written as a
+    column of nulls, so "no TVDSS here" reads as an absent curve everywhere
+    downstream instead of as a curve that is somehow all blank.
+    """
+    resolved = well_depth_references(well, settings)
+    from_file = file_depth_curves()
+    for name in DEPTH_REFERENCES:
+        values = resolved[name]
+        if np.isfinite(values).any():
+            well.df[name] = values
+        elif name in well.df.columns and name not in from_file:
+            well.df.drop(columns=[name], inplace=True)
+
+    ordered = [c for c in CANONICAL if c in well.df.columns]
+    well.df = well.df[ordered + [c for c in well.df.columns if c not in ordered]]
+    # The time frame is interpolated from these columns, so it is now stale.
+    st.session_state.pop("time_well_cache", None)
+    return resolved
 
 
 def well_zones(well, settings):

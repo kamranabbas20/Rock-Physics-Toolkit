@@ -219,6 +219,16 @@ if samples.size:
     table["polarity"] = np.where(events["polarity"] > 0, "peak", "trough")
     table["lobe_samples"] = (
         np.asarray(blocked["n_upper"]) + np.asarray(blocked["n_lower"]))
+    # True vertical depth per event, where the well has a datum. MD is hole
+    # length and is not comparable between wells; a class-against-depth trend
+    # needs TVDSS, and a compaction trend needs TVDBML.
+    for _reference in ("TVD", "TVDSS", "TVDBML"):
+        if _reference in tw.columns:
+            table[_reference.lower()] = tw[_reference].to_numpy(float)[samples]
+    if "depth" in table.columns:
+        _lead = ["sample", "depth", "tvd", "tvdss", "tvdbml", "twt"]
+        _lead = [c for c in _lead if c in table.columns]
+        table = table[_lead + [c for c in table.columns if c not in _lead]]
     table["A_fixed"] = fixed_table["A_shuey"].to_numpy()
     table["class_fixed"] = fixed_table["avo_class"].to_numpy()
     table["dA_blocking"] = table["A_shuey"] - table["A_fixed"]
@@ -747,8 +757,9 @@ if probabilities is not None:
         show[col] = show[col].astype(float).round(3)
 if "twt" in show.columns:
     show["twt"] = show["twt"].round(4)
-if "depth" in show.columns:
-    show["depth"] = show["depth"].round(2)
+for col in ("depth", "tvd", "tvdss", "tvdbml"):
+    if col in show.columns:
+        show[col] = show[col].round(2)
 for col in ("R0", "A_shuey", "B_shuey", "A_ar", "B_ar", "dA", "dB", "background_deviation"):
     if col in show.columns:
         show[col] = show[col].round(5)

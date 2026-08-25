@@ -1661,3 +1661,84 @@ class TestZoneSummaryOnTheAvoPage:
         at.run()
         assert not at.exception
         assert "Zone summary" not in {s.value for s in at.subheader}
+
+
+class TestDepthReferenceOnThePage:
+    """MD is hole length from a rig floor. TVDSS and TVDBML are what make a
+    depth mean the same thing in two wells, so the page asks for what it needs
+    to get there and refuses to guess."""
+
+    @staticmethod
+    def _page():
+        return run_page(os.path.join(PAGES, "1_Load_and_QC.py"), timeout=180)
+
+    @staticmethod
+    def _apply(at, kb=25.0, water=90.0, choice="Vertical well (TVD = MD)"):
+        next(n for n in at.number_input
+             if n.label.startswith("Drilling datum")).set_value(kb).run()
+        next(n for n in at.number_input
+             if n.label.startswith("Water depth")).set_value(water).run()
+        next(r for r in at.radio
+             if r.label == "True vertical depth").set_value(choice).run()
+        next(b for b in at.button
+             if b.label == "Apply depth reference").click().run()
+        return at
+
+    def test_the_page_asks_for_the_datum_and_the_hole(self, qc_page):
+        assert "3 · Depth reference" in {s.value for s in qc_page.subheader}
+        labels = {n.label for n in qc_page.number_input}
+        assert "Drilling datum above MSL (m)" in labels
+        assert "Water depth (m)" in labels
+        choices = next(r for r in qc_page.radio if r.label == "True vertical depth")
+        assert set(choices.options) == {"Not known", "Vertical well (TVD = MD)",
+                                        "From a deviation survey"}
+
+    def test_nothing_is_invented_before_it_is_told(self, qc_page):
+        """The demo LAS carries no TVD curve and no elevation header, so the
+        page must say it has no vertical reference rather than assume one."""
+        well = qc_page.session_state["well"]
+        assert not {"TVD", "TVDSS", "TVDBML"} & set(well.df.columns)
+        assert any("No vertical reference" in i.value for i in qc_page.info)
+
+    def test_applying_a_datum_writes_all_three_references(self):
+        at = self._apply(self._page())
+        assert not at.exception
+        frame = at.session_state["well"].df
+        md = frame["DEPTH"].to_numpy(float)
+        assert frame["TVD"].to_numpy(float) == pytest.approx(md)
+        assert frame["TVDSS"].to_numpy(float) == pytest.approx(md - 25.0)
+        assert frame["TVDBML"].to_numpy(float) == pytest.approx(md - 115.0)
+
+    def test_a_survey_overrides_an_earlier_vertical_assumption(self):
+        """The trap this guards: once a computed TVD sits in the well it looks
+        exactly like one the file supplied, and a file curve wins over
+        everything — so a well first called vertical would keep TVD = MD for
+        good, quietly ignoring the survey."""
+        at = self._apply(self._page())
+        vertical = at.session_state["well"].df["TVD"].to_numpy(float).copy()
+
+        at.session_state["settings"].deviation_survey = [
+            {"md": 0.0, "inc": 0.0, "azi": 0.0},
+            {"md": 1000.0, "inc": 40.0, "azi": 90.0},
+            {"md": 3000.0, "inc": 40.0, "azi": 90.0},
+        ]
+        self._apply(at, choice="From a deviation survey")
+        deviated = at.session_state["well"].df["TVD"].to_numpy(float)
+        assert (deviated < vertical - 100.0).all()
+
+    def test_clearing_the_reference_removes_the_columns_rather_than_nulling_them(self):
+        """'No TVDSS here' should read as an absent curve everywhere else, not
+        as a curve that is somehow all blank."""
+        at = self._apply(self._page())
+        assert "TVDSS" in at.session_state["well"].df.columns
+        self._apply(at, kb=None, water=None, choice="Not known")
+        assert not {"TVD", "TVDSS", "TVDBML"} & set(
+            at.session_state["well"].df.columns)
+
+    def test_a_new_well_does_not_inherit_the_previous_ones_datum(self):
+        at = self._apply(self._page())
+        assert at.session_state["settings"].kb_elevation == 25.0
+        next(b for b in at.button if b.label == "Load demo well").click().run()
+        settings = at.session_state["settings"]
+        assert settings.kb_elevation is None and settings.water_depth is None
+        assert not settings.vertical_well and not settings.deviation_survey

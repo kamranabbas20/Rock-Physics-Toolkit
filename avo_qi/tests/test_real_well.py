@@ -464,3 +464,74 @@ class TestZoneSummaryOnARealWell:
         table = reflector_table(zoned)
         assert summary["n_events"].sum() >= len(table)   # boundaries count twice
         assert summary["class_mix"].notna().any()
+
+
+class TestDepthReferenceOnARealWell:
+    """15/9-19-A carries no TVD curve, and its EKB, EGL, KB and GL header
+    entries are all empty — which is the normal case, and why the toolkit asks
+    instead of reading. The datum below is invented for the test.
+    """
+
+    KB = 25.0
+    WATER = 90.0
+
+    def test_the_file_offers_nothing_to_start_from(self):
+        from avo_qi.io.loader import read_las_header
+
+        well = load()[0]
+        assert not {"TVD", "TVDSS", "TVDBML"} & set(well.df.columns)
+        assert read_las_header(WELL) == {"kb_elevation": None,
+                                         "ground_level": None,
+                                         "water_depth": None}
+
+    @staticmethod
+    def _zoned(vertical=True, survey=None):
+        """The AVO page on a well whose depth reference has been resolved."""
+        from avo_qi.core.depth import depth_references
+
+        well, raw, units = load()
+        resolved = depth_references(
+            well.df["DEPTH"].to_numpy(float), vertical=vertical, survey=survey,
+            kb_elevation=TestDepthReferenceOnARealWell.KB,
+            water_depth=TestDepthReferenceOnARealWell.WATER)
+        for name in ("TVD", "TVDSS", "TVDBML"):
+            well.df[name] = resolved[name]
+
+        at = AppTest.from_file(os.path.join(PAGES, "4_AVO_Classification.py"),
+                               default_timeout=300)
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = raw
+        at.session_state["raw_units"] = units
+        from avo_qi.ui import Settings
+
+        at.session_state["settings"] = Settings()
+        at.run()
+        assert not at.exception
+        return at
+
+    def test_every_event_carries_its_true_vertical_depth(self):
+        table = reflector_table(self._zoned())
+        for column in ("depth", "tvd", "tvdss", "tvdbml"):
+            assert column in table.columns, column
+        md = table["depth"].to_numpy(float)
+        assert table["tvdss"].to_numpy(float) == pytest.approx(md - self.KB,
+                                                               abs=0.01)
+        assert table["tvdbml"].to_numpy(float) == pytest.approx(
+            md - self.KB - self.WATER, abs=0.01)
+
+    def test_a_deviated_hole_moves_every_event_up(self):
+        """The reason MD will not do: this well's events are hundreds of metres
+        shallower in TVD once the hole is deviated, and an AVO-class-against-
+        depth trend built on MD would put them all too deep."""
+        survey = ([0.0, 1000.0, 4200.0], [0.0, 0.0, 50.0], [0.0, 120.0, 120.0])
+        straight = reflector_table(self._zoned())
+        bent = reflector_table(self._zoned(vertical=False, survey=survey))
+        assert (bent["tvdss"].to_numpy() < straight["tvdss"].to_numpy()).all()
+        assert (straight["tvdss"] - bent["tvdss"]).min() > 100.0
+
+    def test_the_references_survive_the_trip_through_the_time_axis(self):
+        """They are interpolated onto the time grid with every other curve, so
+        an event's TVDSS is read at the same sample as its amplitude."""
+        table = reflector_table(self._zoned())
+        assert (np.diff(table["tvdss"].to_numpy(float)) > 0).all()
+        assert table["tvdss"].notna().all()

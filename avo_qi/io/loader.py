@@ -28,6 +28,8 @@ __all__ = [
     "standardise",
     "depth_to_twt",
     "resample_to_time",
+    "read_las_header",
+    "ELEVATION_MNEMONICS",
     "WellData",
     "FLUID_CASES",
     "FLUID_CASE_ALIASES",
@@ -37,12 +39,21 @@ __all__ = [
 ]
 
 #: The curves ``core/`` needs, plus the optional ones the crossplots colour by.
-CANONICAL = ["DEPTH", "VP", "VS", "RHOB", "GR", "VSH", "PHI", "SW", "FACIES", "ZONE"]
+#: ``DEPTH`` is measured depth; the three vertical references beside it are
+#: what make one well comparable with another (see ``core/depth.py``).
+CANONICAL = ["DEPTH", "TVD", "TVDSS", "TVDBML", "VP", "VS", "RHOB", "GR",
+             "VSH", "PHI", "SW", "FACIES", "ZONE"]
 
 #: Candidate source mnemonics for each canonical curve, in priority order.
 #: Sonic mnemonics are listed too: they are converted to velocity on load.
+#: ``TVDSS`` and ``TVDBML`` are resolved before ``TVD``: matching is by prefix
+#: as well as exactly, so a bare ``TVD`` entry would otherwise swallow every
+#: subsea curve in the file.
 MNEMONIC_MAP = {
     "DEPTH": ["DEPT", "DEPTH", "MD", "TVD", "TVDSS"],
+    "TVDSS": ["TVDSS", "TVDMSL", "SSTVD", "SUBSEA", "TVD_SS"],
+    "TVDBML": ["TVDBML", "TVDML", "TVDSF", "TVD_BML"],
+    "TVD": ["TVD", "TVDKB", "TVDRT", "TVDDF"],
     "VP": ["VP", "P_VEL", "PVEL", "VEL", "VELP", "DT", "DTC", "DTCO", "AC", "SONIC"],
     "VS": ["VS", "S_VEL", "SVEL", "VELS", "DTS", "DTSM", "DTSH", "ACS"],
     "RHOB": ["RHOB", "RHO", "DEN", "DENS", "RHOZ", "DENB"],
@@ -54,6 +65,9 @@ MNEMONIC_MAP = {
     "ZONE": ["ZONE", "ZONES", "ZONELOG", "FORMATION", "FORM", "FM", "MARKER",
              "MARKERS", "UNIT", "STRAT", "HORIZON"],
 }
+
+#: Curves measured in depth, and so converted from feet with ``depth_unit``.
+_DEPTH_CURVES = {"DEPTH", "TVD", "TVDSS", "TVDBML"}
 
 #: Mnemonics that carry slowness rather than velocity.
 SONIC_MNEMONICS = {"DT", "DTC", "DTCO", "AC", "SONIC", "DTS", "DTSM", "DTSH", "ACS"}
@@ -218,6 +232,52 @@ def read_las(source):
     df = las.df().reset_index()
     units = {c.mnemonic: (c.unit or "") for c in las.curves}
     return df, units
+
+
+#: LAS header mnemonics for the two heights that turn TVD into a datum depth.
+#: ``EKB``/``KB`` is the drilling datum above mean sea level; ``WD`` is the
+#: water depth.  Wells carry these under half a dozen names and often not at
+#: all, which is why the UI asks rather than relies on them.
+ELEVATION_MNEMONICS = {
+    "kb_elevation": ["EKB", "KB", "EDF", "DF", "APD", "EREF", "ELEV", "EPD"],
+    "ground_level": ["EGL", "GL", "GLE"],
+    "water_depth": ["WD", "WATERDEPTH", "WDEP", "EWD", "WATER"],
+}
+
+
+def read_las_header(source):
+    """Elevations and water depth from a LAS ``~Well``/``~Params`` section.
+
+    Returns ``{"kb_elevation": .., "ground_level": .., "water_depth": ..}``
+    with ``None`` where the header is silent — which it very often is: these
+    fields are optional in the standard and routinely left blank, as in the
+    bundled 15/9-19-A, whose ``EKB`` and ``GL`` entries exist but are empty.
+    """
+    import lasio
+
+    las = lasio.read(io.StringIO(_as_text(source)))
+    found = {}
+    for section in (las.params, las.well):
+        for item in section:
+            key = _norm(getattr(item, "mnemonic", ""))
+            value = getattr(item, "value", None)
+            if key and key not in found:
+                found[key] = value
+
+    out = {}
+    for role, candidates in ELEVATION_MNEMONICS.items():
+        out[role] = None
+        for candidate in candidates:
+            if candidate not in found:
+                continue
+            try:
+                value = float(str(found[candidate]).strip())
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value):
+                out[role] = value
+                break
+    return out
 
 
 def read_table(source, suffix=None):
@@ -503,10 +563,10 @@ def standardise(df, mapping=None, units=None, depth_unit="m", name="well", case=
                 notes.append(f"{label}: converted {source} from {unit} to g/cc")
             return values, "g/cc"
 
-        if canonical == "DEPTH":
+        if canonical in _DEPTH_CURVES:
             if str(depth_unit).lower().startswith("f"):
                 values = values / _FT_PER_M
-                notes.append("DEPTH: converted from ft to m")
+                notes.append(f"{canonical}: converted from ft to m")
             return values, "m"
 
         return values, declared
