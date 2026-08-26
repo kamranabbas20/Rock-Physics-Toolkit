@@ -101,8 +101,8 @@ def reflector_analysis(well, settings, case=None, block_method="backus",
         than two angles are configured. Both are conditions a caller has to
         show rather than paper over.
     """
-    from avo_qi.ui import (build_wavelet, lithology_labels, time_well,
-                           zone_labels)
+    from avo_qi.ui import (VS_PREDICTED, build_wavelet, lithology_labels,
+                           time_well, zone_labels)
 
     angles = settings.angles
     if angles.size < 2:
@@ -228,6 +228,18 @@ def reflector_analysis(well, settings, case=None, block_method="backus",
 
     if attributes:
         table = table.assign(**_avo_attributes(table, blocked, settings))
+
+    # What share of each reflector's own lobe had its Vs invented rather than
+    # measured. Predicting Vs is accurate to a few per cent and still moves
+    # 42% of the classes on a well we have the real log for, so an event
+    # blocked entirely over predicted rock is a different kind of answer from
+    # one blocked over measured rock — and nothing about A and B says so.
+    if bounds is not None and VS_PREDICTED in tw.columns:
+        share = lobe_property(tw[VS_PREDICTED].to_numpy(float), bounds,
+                              samples=samples, statistic="mean")
+        table = table.assign(
+            vs_predicted=np.clip(np.nanmax(
+                np.vstack([share["upper"], share["lower"]]), axis=0), 0.0, 1.0))
 
     out.update({"table": table, "blocked": blocked, "lobe_bounds": bounds,
                 "fixed_table": fixed_table})

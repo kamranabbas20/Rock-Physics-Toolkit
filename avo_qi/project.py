@@ -48,9 +48,11 @@ __all__ = [
     "WIDGET_KEYS",
 ]
 
-#: Bumped whenever the meaning of a field changes.  A file from the future is
-#: refused rather than half-read.
-SCHEMA = 1
+#: Bumped whenever the format grows.  A file from the future is refused rather
+#: than half-read; an older one is accepted and its missing parts left alone.
+#: 2 added the optional ``library`` block, so one file can carry the per-well
+#: setup of every well that was open — five wells used to mean five files.
+SCHEMA = 2
 
 #: The extension the app suggests.  Doubly suffixed so it is obvious in a
 #: folder what the file is and that it is readable text.
@@ -86,41 +88,112 @@ EXCLUDED = {
                     "wavelet file instead.",
 }
 
-#: Widget keys that mirror a saved setting.  Streamlit gives a keyed widget's
-#: own state priority over its ``value=`` argument, so writing a setting is not
-#: enough to move the control that shows it — the stale widget simply writes
-#: its old value back on the next run, and applying a setup appears to do
-#: nothing.  Forgetting these keys makes each widget re-read the setting it is
-#: derived from.  Listed by setting so the reason for each is visible, and a
-#: test asserts every key still exists in the app.
-WIDGET_KEYS = {
-    "kb_elevation": ("kb_elevation_input",),
-    "water_depth": ("water_depth_input",),
-    "vertical_well": ("tvd_source",),
-    "petrophysics": ("petro_mode", "petro_vsh_method", "petro_phi_method",
-                     "petro_sw_method", "petro_dn_method", "petro_gr_clean",
-                     "petro_gr_shale", "petro_rho_matrix", "petro_rho_fluid",
-                     "petro_rw", "petro_m", "petro_n", "petro_a",
-                     "petro_r_shale", "petro_shale_correct", "petro_phi_shale"),
-    "vs_prediction": ("vs_model", "vs_degree"),
-    "vsh_cutoffs": ("cut_sand", "cut_silty", "cut_silt"),
-    "net_cutoffs": ("net_vsh_cut", "net_phi_cut", "net_sw_cut"),
-    "net_pay": ("net_pay_toggle",),
-    "fluid_model": ("fluid_brine_preset", "fluid_oil_preset",
-                    "fluid_gas_preset", "fluid_in_situ", "fluid_hc_sw",
-                    "fluid_mixing", "fluid_k_mineral", "fluid_datum",
-                    "fluid_p_grad", "fluid_t_grad", "fluid_t_surface",
-                    "fluid_reservoir_only"),
+#: How a saved setting reaches the control that shows it.
+#:
+#: Streamlit gives a keyed widget's own state priority over the ``value=`` it
+#: is created with, and the browser re-sends that state on every rerun — so
+#: writing ``settings.kb_elevation = 31`` moves nothing on screen, and the
+#: stale control writes its old value straight back the next time its section
+#: is applied.  Clearing the key server-side is not enough either, for the same
+#: reason.  The control has to be **assigned** its new value.
+#:
+#: Each entry maps a saved setting to the widget keys that display it, with a
+#: function from the settings object to each key's value.  Listed here rather
+#: than in the page so the mapping is testable without Streamlit, and so a
+#: renamed widget is caught by a test instead of silently doing nothing.
+def _tvd_choice(settings):
+    if getattr(settings, "deviation_survey", None):
+        return "From a deviation survey"
+    if getattr(settings, "vertical_well", False):
+        return "Vertical well (TVD = MD)"
+    return "Not known"
+
+
+def _from_dict(field, key, default=None, cast=None):
+    def read(settings):
+        value = dict(getattr(settings, field, None) or {}).get(key, default)
+        if value is None or cast is None:
+            return value
+        try:
+            return cast(value)
+        except (TypeError, ValueError):                # pragma: no cover
+            return default
+    return read
+
+
+WIDGET_VALUES = {
+    "kb_elevation": {"kb_elevation_input": lambda s: s.kb_elevation},
+    "water_depth": {"water_depth_input": lambda s: s.water_depth},
+    "vertical_well": {"tvd_source": _tvd_choice},
+    "deviation_survey": {"tvd_source": _tvd_choice},
+    "net_pay": {"net_pay_toggle": lambda s: bool(s.net_pay)},
+    "vsh_cutoffs": {
+        "cut_sand": _from_dict("vsh_cutoffs", "sand", 0.15, float),
+        "cut_silty": _from_dict("vsh_cutoffs", "silty sand", 0.35, float),
+        "cut_silt": _from_dict("vsh_cutoffs", "silt", 0.60, float),
+    },
+    "net_cutoffs": {
+        "net_vsh_cut": _from_dict("net_cutoffs", "vsh", 0.35, float),
+        "net_phi_cut": _from_dict("net_cutoffs", "phi", 0.08, float),
+        "net_sw_cut": _from_dict("net_cutoffs", "sw", 0.70, float),
+    },
+    "vs_prediction": {
+        "vs_model": _from_dict("vs_prediction", "model", "file"),
+        "vs_degree": _from_dict("vs_prediction", "degree", 1, int),
+    },
+    "petrophysics": {
+        "petro_mode": _from_dict("petrophysics", "mode", "file"),
+        "petro_vsh_method": _from_dict("petrophysics", "vsh_method"),
+        "petro_phi_method": _from_dict("petrophysics", "phi_method"),
+        "petro_sw_method": _from_dict("petrophysics", "sw_method"),
+        "petro_dn_method": _from_dict("petrophysics", "dn_method"),
+        "petro_gr_clean": _from_dict("petrophysics", "gr_clean", None, float),
+        "petro_gr_shale": _from_dict("petrophysics", "gr_shale", None, float),
+        "petro_rho_matrix": _from_dict("petrophysics", "rho_matrix", None, float),
+        "petro_rho_fluid": _from_dict("petrophysics", "rho_fluid", None, float),
+        "petro_shale_correct": _from_dict("petrophysics", "shale_correct",
+                                          False, bool),
+        "petro_phi_shale": _from_dict("petrophysics", "phi_shale", None, float),
+        "petro_rw": _from_dict("petrophysics", "rw", None, float),
+        "petro_m": _from_dict("petrophysics", "m", None, float),
+        "petro_n": _from_dict("petrophysics", "n", None, float),
+        "petro_a": _from_dict("petrophysics", "a", None, float),
+        "petro_r_shale": _from_dict("petrophysics", "r_shale", None, float),
+    },
+    "fluid_model": {
+        "fluid_brine_preset": _from_dict("fluid_model", "brine_preset"),
+        "fluid_oil_preset": _from_dict("fluid_model", "oil_preset"),
+        "fluid_gas_preset": _from_dict("fluid_model", "gas_preset"),
+        "fluid_in_situ": _from_dict("fluid_model", "in_situ"),
+        "fluid_hc_sw": _from_dict("fluid_model", "hc_sw", None, float),
+        "fluid_mixing": _from_dict("fluid_model", "mixing"),
+        "fluid_k_mineral": _from_dict("fluid_model", "k_mineral", None, float),
+        "fluid_datum": _from_dict("fluid_model", "datum", None, float),
+        "fluid_p_grad": _from_dict("fluid_model", "p_grad", None, float),
+        "fluid_t_grad": _from_dict("fluid_model", "t_grad", None, float),
+        "fluid_t_surface": _from_dict("fluid_model", "t_surface", None, float),
+    },
 }
 
+#: Just the keys, for the tests and for anything that only needs the names.
+WIDGET_KEYS = {name: tuple(mapping) for name, mapping in WIDGET_VALUES.items()}
 
-def stale_widget_keys(changed):
-    """Widget keys to forget after applying a setup, for the settings that
-    actually changed."""
-    keys = []
+
+def widget_updates(settings, changed):
+    """``{widget_key: value}`` for the settings that actually changed.
+
+    Only the changed ones: assigning every key on every apply would overwrite
+    controls the setup never touched.  A value of ``None`` is dropped rather
+    than assigned — a Streamlit widget with no value in its options refuses to
+    take one, and a number input is happier left to its own placeholder.
+    """
+    updates = {}
     for name in changed or ():
-        keys.extend(WIDGET_KEYS.get(name, ()))
-    return keys
+        for key, read in WIDGET_VALUES.get(name, {}).items():
+            value = read(settings)
+            if value is not None:
+                updates[key] = value
+    return updates
 
 
 #: Curves whose *names* are recorded in the fingerprint. Never their values.
@@ -229,6 +302,71 @@ def build_setup(well, settings, note=None):
         "settings": {name: _plain(getattr(settings, name, None))
                      for name in SAVED},
     }
+
+
+def add_library(setup, records, wells=None):
+    """Attach every other well's per-well setup to a file built for one.
+
+    ``records`` is the app's ``well_state`` — ``{name: {"settings": {...}}}``,
+    the state put aside when each well was last active.  Only the per-well
+    fields go in: the shared ones already sit at the top level and would
+    otherwise be stored once per well and disagree with themselves.
+
+    ``wells`` supplies the live library so each entry can carry a fingerprint
+    of its own, which is what lets a reload tell "this is that well" from
+    "this is a well with the same name".
+    """
+    library = {}
+    for name, record in (records or {}).items():
+        stored = dict((record or {}).get("settings") or {})
+        entry = {"settings": {k: _plain(v) for k, v in stored.items()
+                              if k in PER_WELL}}
+        found = (wells or {}).get(name)
+        if found is not None:
+            entry["well"] = fingerprint(found)
+        library[str(name)] = entry
+    if library:
+        setup = dict(setup)
+        setup["library"] = library
+    return setup
+
+
+def library_names(setup):
+    """The wells a setup file carries a per-well section for, active one first."""
+    names = []
+    active = ((setup or {}).get("well") or {}).get("well")
+    if active is not None:
+        names.append(str(active))
+    for name in ((setup or {}).get("library") or {}):
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def apply_library(setup, records, wells=None):
+    """Write a file's per-well sections into the app's ``well_state``.
+
+    Returns ``{"restored": [...], "skipped": [...]}``.  A well the file
+    carries but the session has not loaded is **skipped and named** rather
+    than invented: a setup is what you decided about a well, and there is
+    nothing to decide it about until the LAS is back.
+    """
+    library = dict((setup or {}).get("library") or {})
+    restored, skipped = [], []
+    for name, entry in library.items():
+        if wells is not None and name not in wells:
+            skipped.append(name)
+            continue
+        stored = {k: _restore(v)
+                  for k, v in dict((entry or {}).get("settings") or {}).items()
+                  if k in PER_WELL}
+        if not stored:
+            continue
+        record = dict(records.get(name) or {})
+        record["settings"] = {**dict(record.get("settings") or {}), **stored}
+        records[name] = record
+        restored.append(name)
+    return {"restored": sorted(restored), "skipped": sorted(skipped)}
 
 
 def dumps(setup):

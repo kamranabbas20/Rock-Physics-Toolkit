@@ -490,6 +490,17 @@ def sidebar(show_wavelet=True, show_angles=True, show_classifier=True):
             if _computed:
                 st.caption(f"{', '.join(_computed)} computed on the Load & QC "
                            "page, not read from the file.")
+            # Vs is the one that matters most: predicting it moves 42% of the
+            # AVO classes on a well we have measured it on. It belongs beside
+            # the well's name, not only on the page that predicted it.
+            _mask = vs_predicted_mask()
+            if vs_source() in ("computed", "filled") and _mask is not None \
+                    and _mask.any():
+                st.caption(
+                    ":orange[**Vs predicted** on %d of %d samples (%.0f%%)] — "
+                    "every class on this well is provisional."
+                    % (int(_mask.sum()), _mask.size,
+                       100.0 * _mask.sum() / max(_mask.size, 1)))
         if st.button("Load demo well", use_container_width=True):
             load_demo_well()
             st.rerun()
@@ -2399,6 +2410,12 @@ def apply_petrophysics(well, settings):
     return notes
 
 
+#: Column carrying, per sample, whether Vs was predicted rather than measured.
+#: Deliberately not in ``CANONICAL``: it is provenance, not a log, and the
+#: curve pickers enumerate ``CANONICAL`` so it never appears as something to
+#: plot.
+VS_PREDICTED = "VS_PREDICTED"
+
 #: How a Vs prediction can be made, in the order the panel offers them.
 VS_MODELS = {
     "greenberg_castagna": (
@@ -2526,6 +2543,7 @@ def apply_vs_prediction(well, settings):
         st.session_state["vs_source"] = (
             "file" if np.isfinite(measured).any() else None)
         st.session_state["vs_predicted"] = np.zeros(len(frame), dtype=bool)
+        frame.drop(columns=[VS_PREDICTED], inplace=True, errors="ignore")
         return ["Using the shear sonic the file carries."]
 
     report = vs_prediction_report(well, settings)
@@ -2540,6 +2558,12 @@ def apply_vs_prediction(well, settings):
     well.df = frame[ordered + [c for c in frame.columns if c not in ordered]]
 
     count = int(merged["is_predicted"].sum())
+    # Carried on the well as an ordinary 0/1 curve, so it resamples onto the
+    # time grid with everything else and every reflector can be asked what
+    # share of its own lobe was invented. It is not a canonical curve, so the
+    # curve pickers — which enumerate CANONICAL — never show it.
+    frame[VS_PREDICTED] = merged["is_predicted"].astype(float)
+    well.df = frame
     st.session_state["vs_predicted"] = merged["is_predicted"]
     st.session_state["vs_source"] = (
         "computed" if not np.isfinite(measured).any()

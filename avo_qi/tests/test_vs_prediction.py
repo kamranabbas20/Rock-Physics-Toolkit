@@ -251,3 +251,112 @@ class TestScoringAPrediction:
     def test_mismatched_lengths_are_refused(self):
         with pytest.raises(ValueError, match="same length"):
             prediction_quality(np.zeros(3), np.zeros(2))
+
+
+class TestTheProvenanceTravels:
+    """A predicted Vs has to say so wherever it is used, not only where it was
+    made. Predicting it is accurate to a few per cent on 15/9-19-A and still
+    moves 42% of the AVO classes, so "which of these reflectors rest on an
+    invented curve" is the question the rest of the toolkit needs answered.
+    """
+
+    @staticmethod
+    def predicted(partial_above=None):
+        """The real well with its shear sonic removed — all of it, or only
+        above a depth — then predicted through the page."""
+        import os
+
+        from streamlit.testing.v1 import AppTest
+
+        from avo_qi.ui import Settings
+        from test_app_smoke import PAGES
+        from test_multi_well import second_well
+
+        well, raw, units = second_well()
+        if partial_above is None:
+            well.df = well.df.drop(columns=["VS"])
+        else:
+            vs = well.df["VS"].to_numpy(float).copy()
+            vs[well.df["DEPTH"].to_numpy(float) < partial_above] = np.nan
+            well.df["VS"] = vs
+
+        at = AppTest.from_file(os.path.join(PAGES, "1_Load_and_QC.py"),
+                               default_timeout=300)
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = raw
+        at.session_state["raw_units"] = units
+        at.session_state["settings"] = Settings()
+        at.run()
+        next(r for r in at.radio
+             if "Where Vs comes from" in r.label).set_value(
+                 "greenberg_castagna").run()
+        next(b for b in at.button if "Apply shear sonic" in b.label).click().run()
+        return at
+
+    def test_the_well_carries_the_mask_as_a_curve(self):
+        """On the well rather than in session state, so it resamples onto the
+        time grid with everything else and works for a well that is not the
+        active one."""
+        from avo_qi.ui import VS_PREDICTED
+
+        at = self.predicted()
+        frame = at.session_state["well"].df
+        assert VS_PREDICTED in frame.columns
+        assert set(np.unique(frame[VS_PREDICTED].to_numpy(float))) <= {0.0, 1.0}
+
+    def test_it_is_not_offered_as_something_to_plot(self):
+        """Provenance, not a log. The curve pickers enumerate CANONICAL."""
+        from avo_qi.io.loader import CANONICAL
+        from avo_qi.ui import VS_PREDICTED
+
+        assert VS_PREDICTED not in CANONICAL
+
+    def test_every_reflector_says_how_much_of_it_was_invented(self):
+        from avo_qi.analysis import reflector_analysis
+
+        at = self.predicted()
+        table = reflector_analysis(at.session_state["well"],
+                                   at.session_state["settings"])["table"]
+        assert "vs_predicted" in table.columns
+        # No measured Vs anywhere, so every event rests entirely on the model.
+        assert (table["vs_predicted"] > 0.99).all()
+
+    def test_a_partly_logged_well_separates_the_two(self):
+        """The case the column exists for: some reflectors sit on measured
+        rock and some on invented rock, in one table."""
+        from avo_qi.analysis import reflector_analysis
+
+        at = self.predicted(partial_above=3850.0)
+        table = reflector_analysis(at.session_state["well"],
+                                   at.session_state["settings"])["table"]
+        share = table["vs_predicted"].to_numpy(float)
+        assert (share > 0.99).any()          # shallow: predicted
+        assert (share < 0.01).any()          # deep: measured
+        # And they are the right way round.
+        shallow = table.loc[table["depth"] < 3850.0, "vs_predicted"]
+        deep = table.loc[table["depth"] > 3900.0, "vs_predicted"]
+        assert (shallow > 0.99).all() and (deep < 0.01).all()
+
+    def test_a_fully_logged_well_carries_no_such_column(self):
+        """Absence is the honest answer where nothing was predicted, rather
+        than a column of zeros implying the question was asked."""
+        import sys, os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from avo_qi.analysis import reflector_analysis
+        from avo_qi.ui import Settings
+        from test_app_smoke import demo_well
+
+        table = reflector_analysis(demo_well()[0], Settings())["table"]
+        assert "vs_predicted" not in table.columns
+
+    def test_choosing_the_file_again_removes_the_mask(self):
+        """Reverting to the measured curve must not leave the provenance of a
+        prediction that is no longer there."""
+        from avo_qi.ui import VS_PREDICTED
+
+        at = self.predicted(partial_above=3850.0)
+        assert VS_PREDICTED in at.session_state["well"].df.columns
+        next(r for r in at.radio
+             if "Where Vs comes from" in r.label).set_value("file").run()
+        next(b for b in at.button if "Apply shear sonic" in b.label).click().run()
+        assert VS_PREDICTED not in at.session_state["well"].df.columns

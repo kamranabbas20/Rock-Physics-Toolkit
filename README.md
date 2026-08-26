@@ -242,6 +242,14 @@ shear-sonic model, the fluid parameters, the cutoffs. On a real well that is
 twenty minutes of re-entry a session, and there is no way to hand a setup to a
 colleague. *10 · Setup file* saves it.
 
+**One file, every well.** The active well's setup sits at the top level and
+every other loaded well's per-well state goes in a section of its own, so a
+library of five wells is one file rather than five. The shared settings — the
+sample rate, the angles, the wavelet, the cutoffs — are stored once, never per
+well, because five copies could disagree with each other and a comparison would
+then be made on two sets of physics. A well the file carries but the session
+has not loaded is **named and skipped**, not invented.
+
 **It carries your interpretation, not your logs.** Names, depths, parameters
 and choices — a couple of kilobytes of readable JSON with **no curve values in
 it at all**, which is what makes it safe to keep beside the project, commit, or
@@ -276,19 +284,21 @@ to your Desktop — convenient, and worth understanding: it writes to the machin
 localhost. Deploy it for a team and that is the server's disk. The download is
 the one that always does what it looks like.
 
-### What is not finished
+### Putting it back on screen
 
-Applying a setup restores the **settings**, and everything read straight from
-them follows at once — the zonation, the lithology and net cutoffs, the
-classifier, the fluid case. The numeric boxes in the sections that have their
-own *Apply* button do **not** yet repopulate. Streamlit gives a keyed widget's
-own state priority over the value it is created with, and the browser re-sends
-that state on every rerun, so clearing it server-side is not enough; each
-control has to be assigned its new value explicitly, which needs a per-widget
-mapping that is not written yet. Until it is, the datum, the petrophysics
-parameters and the fluid-model fields need re-entering and re-applying. The
-file carries them correctly — this is the last mile of putting them back on
-screen, and the page says so rather than letting you assume otherwise.
+Applying a setup restores the settings *and* the controls that show them. That
+took two goes and is worth recording, because the obvious approaches both fail
+silently. Streamlit gives a keyed widget's own state priority over the value it
+is created with, and the browser re-sends that state on every rerun — so
+writing the setting moves nothing, and clearing the widget's key server-side
+does not help either. The control has to be **assigned** its new value. But a
+widget's key cannot be assigned once the widget exists in that run, and the
+setup section sits at the bottom of the page. So applying a setup stashes the
+new control values and reruns, and they are written at the *top* of the next
+run, ahead of the sidebar and every section below it.
+
+Sections with their own *Apply* button get their inputs back; press each one to
+recompute the curves from them.
 
 ### One trap worth recording
 
@@ -335,6 +345,22 @@ shale-rich upper half and extrapolated into the sandier lower half — *exactly*
 what you do when the shear sonic starts partway down the well — it collapses to
 **11%, low by 11%**, because it is predicting shale velocities for sand. It is
 a check and a fallback, not a default, and the scoreboard says so on screen.
+
+### Where the provenance goes
+
+A predicted Vs is named wherever the well is, not only on the page that
+predicted it. The sidebar says so beside the well's name — *Vs predicted on
+2 812 of 3 905 samples (72%) — every class on this well is provisional* — and
+every reflector in the table carries `vs_predicted`, the share of **its own
+lobe** whose Vs was invented rather than measured. An event blocked entirely
+over predicted rock is a different kind of answer from one blocked over
+measured rock, and nothing about A and B says so on its own.
+
+That share is computed by carrying the per-sample mask on the well as an
+ordinary 0/1 curve, so it resamples onto the time grid with everything else and
+works for a well that is not the active one. It is deliberately not a canonical
+curve, so the curve pickers — which enumerate `CANONICAL` — never offer it as
+something to plot. Choosing *keep only what the file carries* removes it again.
 
 ### The part that is easy to miss
 

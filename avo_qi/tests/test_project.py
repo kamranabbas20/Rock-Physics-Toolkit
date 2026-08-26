@@ -440,16 +440,44 @@ class TestApplyingASetupMovesTheControls:
 
         assert set(WIDGET_KEYS) <= set(SAVED)
 
-    def test_only_the_changed_settings_forget_their_widgets(self):
-        """Clearing every key on every apply would throw away controls the
-        setup did not touch."""
-        from avo_qi.project import stale_widget_keys
+    def test_only_the_changed_settings_move_their_widgets(self):
+        """Assigning every key on every apply would overwrite controls the
+        setup never touched."""
+        from avo_qi.project import widget_updates
+        from avo_qi.ui import Settings
 
-        assert stale_widget_keys(["kb_elevation"]) == ["kb_elevation_input"]
-        assert stale_widget_keys([]) == []
-        assert "cut_sand" in stale_widget_keys(["vsh_cutoffs"])
+        s = Settings()
+        s.kb_elevation = 31.0
+        s.vsh_cutoffs = {"sand": 0.12, "silty sand": 0.3, "silt": 0.55}
+
+        assert widget_updates(s, ["kb_elevation"]) == {
+            "kb_elevation_input": 31.0}
+        assert widget_updates(s, []) == {}
+        assert widget_updates(s, ["vsh_cutoffs"])["cut_sand"] == 0.12
         # A setting with no widget behind it contributes nothing.
-        assert stale_widget_keys(["zone_tops"]) == []
+        assert widget_updates(s, ["zone_tops"]) == {}
+
+    def test_a_value_the_widget_cannot_take_is_left_alone(self):
+        """A number input with nothing set keeps its placeholder rather than
+        being handed a None it would refuse."""
+        from avo_qi.project import widget_updates
+        from avo_qi.ui import Settings
+
+        assert widget_updates(Settings(), ["kb_elevation"]) == {}
+
+    def test_the_depth_radio_reads_the_pair_of_settings_behind_it(self):
+        """One control, two settings: a survey wins over the vertical-well
+        flag, because that is the order the page resolves them in."""
+        from avo_qi.project import widget_updates
+        from avo_qi.ui import Settings
+
+        s = Settings()
+        s.vertical_well = True
+        assert widget_updates(s, ["vertical_well"])["tvd_source"] == \
+            "Vertical well (TVD = MD)"
+        s.deviation_survey = [{"md": 0.0, "inc": 0.0, "azi": 0.0}]
+        assert widget_updates(s, ["vertical_well"])["tvd_source"] == \
+            "From a deviation survey"
 
     def test_the_datum_control_reads_the_setting_it_mirrors(self):
         """Forgetting the key only helps if the widget's default comes from
@@ -462,3 +490,103 @@ class TestApplyingASetupMovesTheControls:
             source = handle.read()
         assert "_kb_default = (settings.kb_elevation" in source
         assert "_wd_default = (settings.water_depth" in source
+
+
+class TestOneFileForTheWholeLibrary:
+    """Five wells open used to mean five setup files.
+
+    The shared settings stay at the top level and the per-well ones go in a
+    section per well, so the file cannot end up holding five disagreeing copies
+    of the same sample rate.
+    """
+
+    @staticmethod
+    def records():
+        return {
+            "15/9-19-A": {"settings": {"kb_elevation": 25.0,
+                                       "zone_tops": [{"zone": "Brent",
+                                                      "top": 3800.0}],
+                                       "dt": 0.004}},          # shared: ignored
+            "OTHER-2": {"settings": {"kb_elevation": 12.0,
+                                     "vertical_well": True}},
+        }
+
+    def test_it_carries_a_section_per_well(self, well):
+        from avo_qi.project import add_library, library_names
+
+        setup = add_library(build_setup(well, configured()), self.records())
+        assert set(setup["library"]) == {"15/9-19-A", "OTHER-2"}
+        # The active well leads, then the rest.
+        assert library_names(setup)[0] == "15/9-19-A"
+        assert "OTHER-2" in library_names(setup)
+
+    def test_shared_settings_are_not_repeated_per_well(self):
+        """They live once at the top. Stored per well they could disagree with
+        themselves, and a comparison would be made on two sets of physics."""
+        from avo_qi.project import add_library
+
+        setup = add_library({"kind": "avo-qi-setup"}, self.records())
+        for entry in setup["library"].values():
+            assert "dt" not in entry["settings"]
+            assert set(entry["settings"]) <= set(PER_WELL)
+
+    def test_it_restores_the_wells_the_session_has(self, well):
+        from avo_qi.project import add_library, apply_library
+
+        setup = loads(dumps(add_library(build_setup(well, configured()),
+                                        self.records())))
+        records = {}
+        found = apply_library(setup, records,
+                              wells={"15/9-19-A": well, "OTHER-2": well})
+        assert found["restored"] == ["15/9-19-A", "OTHER-2"]
+        assert records["OTHER-2"]["settings"]["kb_elevation"] == 12.0
+        assert records["15/9-19-A"]["settings"]["zone_tops"][0]["zone"] == "Brent"
+
+    def test_a_well_the_session_has_not_loaded_is_named_not_invented(self, well):
+        """A setup is what you decided about a well; there is nothing to decide
+        it about until the LAS is back."""
+        from avo_qi.project import add_library, apply_library
+
+        setup = loads(dumps(add_library(build_setup(well, configured()),
+                                        self.records())))
+        records = {}
+        found = apply_library(setup, records, wells={"15/9-19-A": well})
+        assert found["restored"] == ["15/9-19-A"]
+        assert found["skipped"] == ["OTHER-2"]
+        assert "OTHER-2" not in records
+
+    def test_it_does_not_clobber_state_it_was_not_asked_about(self, well):
+        from avo_qi.project import add_library, apply_library
+
+        setup = loads(dumps(add_library(build_setup(well, configured()),
+                                        self.records())))
+        records = {"OTHER-2": {"settings": {"water_depth": 400.0},
+                               "session": {"raw_df": "kept"}}}
+        apply_library(setup, records, wells={"OTHER-2": well})
+        assert records["OTHER-2"]["settings"]["water_depth"] == 400.0
+        assert records["OTHER-2"]["settings"]["kb_elevation"] == 12.0
+        assert records["OTHER-2"]["session"] == {"raw_df": "kept"}
+
+    def test_each_entry_carries_its_own_fingerprint(self, well):
+        from avo_qi.project import add_library
+
+        setup = add_library(build_setup(well, configured()), self.records(),
+                            wells={"15/9-19-A": well})
+        assert setup["library"]["15/9-19-A"]["well"]["samples"] == 3905
+        assert "well" not in setup["library"]["OTHER-2"]     # not loaded
+
+    def test_a_file_with_no_library_still_reads(self, well):
+        """Schema 1 files predate the block entirely."""
+        from avo_qi.project import apply_library, library_names
+
+        setup = loads(dumps(build_setup(well, configured())))
+        assert library_names(setup) == ["15/9-19-A"]
+        assert apply_library(setup, {}, wells={}) == {"restored": [],
+                                                      "skipped": []}
+
+    def test_a_library_file_is_still_small(self, well):
+        from avo_qi.project import add_library
+
+        payload = dumps(add_library(build_setup(well, configured()),
+                                    self.records()))
+        assert len(payload) < 12_000

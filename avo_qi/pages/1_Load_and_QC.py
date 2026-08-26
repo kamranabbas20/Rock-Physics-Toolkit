@@ -77,6 +77,16 @@ from avo_qi.ui import (  # noqa: E402
 )
 
 page_setup("Load & QC", icon=":mag:")
+
+# A control's value can only be written *before* the control is built, and a
+# widget's key cannot be assigned at all once it exists in this run. So
+# applying a setup stashes the new control values and reruns, and they are
+# written here — ahead of the sidebar and of every section below, which is the
+# only moment they will be read.
+for _key, _value in (st.session_state.pop("setup_pending_widgets", None)
+                     or {}).items():
+    st.session_state[_key] = _value
+
 settings = sidebar(show_wavelet=False, show_angles=False, show_classifier=False)
 
 # ------------------------------------------------------------------ load ---
@@ -1188,15 +1198,24 @@ with _save_col:
         placeholder="what this setup is, e.g. after the well tie",
         help="Stored in the file and shown before it is applied.")
     _setup = project.build_setup(well, settings, note=_setup_note)
+    # Every other loaded well's own state goes in too, so a library of five
+    # wells is one file rather than five.
+    _setup = project.add_library(_setup, st.session_state.get("well_state") or {},
+                                 wells=wells())
     _payload = project.dumps(_setup)
+    _covered = project.library_names(_setup)
     st.download_button(
         "Download setup file", _payload,
         file_name=project.suggested_name(well),
         mime="application/json", type="primary", key="setup_download")
     st.caption(
-        "%d fields, %.1f kB. Your browser decides where it lands — normally "
-        "your downloads folder, or wherever its Save dialog puts it."
-        % (len(project.SAVED), len(_payload) / 1000.0))
+        "%d fields for **%s**%s, %.1f kB. Your browser decides where it lands "
+        "— normally your downloads folder, or wherever its Save dialog puts it."
+        % (len(project.SAVED), well.name,
+           ("" if len(_covered) < 2 else
+            " plus the per-well setup of %d other well(s) in the library"
+            % (len(_covered) - 1)),
+           len(_payload) / 1000.0))
 
     with st.expander("Write a copy to a folder instead"):
         st.caption(
@@ -1254,15 +1273,38 @@ with _load_col:
                     icon=":material/warning:")
             if st.button("Apply this setup", type="primary", key="setup_apply"):
                 _changed = project.apply_setup(_incoming, settings)
-                # Writing the setting is not enough: a keyed widget's own state
-                # outranks its value= argument, so a stale control would write
-                # its old value straight back and the setup would look inert.
-                for _key in project.stale_widget_keys(_changed):
-                    st.session_state.pop(_key, None)
+                # Streamlit gives a keyed widget's own state priority over the
+                # value it is created with, and refuses an assignment to that
+                # key once the widget exists — which it does, several sections
+                # above this one. So the new control values are stashed and
+                # written at the top of the next run, before anything is built.
+                st.session_state["setup_pending_widgets"] = \
+                    project.widget_updates(settings, _changed)
+                _library = project.apply_library(
+                    _incoming,
+                    st.session_state.setdefault("well_state", {}),
+                    wells=wells())
+                st.session_state["setup_library"] = _library
                 st.session_state.pop("time_well_cache", None)
                 st.session_state.pop("zone_cache", None)
                 st.session_state["setup_applied"] = _changed
                 st.rerun()
+
+_library_note = st.session_state.get("setup_library") or {}
+if _library_note.get("restored"):
+    st.success(
+        "Also restored the setup of %s — switch to one in the sidebar and it "
+        "arrives with its own tops, datum and fluid model."
+        % ", ".join("**%s**" % n for n in _library_note["restored"]),
+        icon=":material/inventory_2:")
+if _library_note.get("skipped"):
+    st.info(
+        "This file also carries a setup for %s, which %s not loaded here. Load "
+        "the LAS and apply the file again — a setup is what you decided about "
+        "a well, and there is nothing to decide it about until the well is back."
+        % (", ".join("**%s**" % n for n in _library_note["skipped"]),
+           "is" if len(_library_note["skipped"]) == 1 else "are"),
+        icon=":material/info:")
 
 _applied = st.session_state.get("setup_applied")
 if _applied is not None:
@@ -1271,18 +1313,12 @@ if _applied is not None:
             "Applied — %d setting(s) changed: %s."
             % (len(_applied), ", ".join(sorted(_applied))),
             icon=":material/settings_backup_restore:")
-        st.warning(
-            "**Known limitation.** The settings are restored, and anything "
-            "read straight from them — the zonation, the lithology and net "
-            "cutoffs, the classifier — follows immediately. The numeric boxes "
-            "in the sections with their own **Apply** button do *not* yet "
-            "repopulate: Streamlit gives a control's own state priority and "
-            "the browser re-sends it on every rerun, so the datum, the "
-            "petrophysics parameters and the fluid-model fields still read "
-            "empty even though the setup carries them. Re-enter those and "
-            "press the section's Apply button. The file itself is complete — "
-            "this is the last mile of putting it back on screen.",
-            icon=":material/warning:")
+        st.caption(
+            "The controls above now show them. Sections with their own "
+            "**Apply** button — the depth reference, the petrophysics, the "
+            "shear sonic, the fluid cases — have their *inputs* back; press "
+            "each one to recompute the curves from them."
+        )
     else:
         st.info("That setup matched the settings already in use; nothing "
                 "changed.", icon=":material/info:")
