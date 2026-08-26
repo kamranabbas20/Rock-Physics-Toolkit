@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import html as _stdlib_html
 import io as _stdlib_io
 import os
 import sys
@@ -31,6 +32,10 @@ from avo_qi.core.wavelet import bandpass_ormsby, load_wavelet, ricker
 from avo_qi.core.zones import (UNZONED, assign_zones, zones_from_curve,
                                zones_from_tops)
 from avo_qi.core.depth import depth_references, survey_from_table
+from avo_qi.report import PanelReport
+
+#: Panel notes are rendered as HTML, so anything from a well travels escaped.
+_html_escape = _stdlib_html.escape
 from avo_qi.io.loader import (CANONICAL, add_standard_cases, depth_to_twt,
                               detect_fluid_cases, read_las_header, read_well,
                               resample_to_time, standardise)
@@ -1574,14 +1579,19 @@ def class_depth_panel(table, key, split_column=None, default=None):
     Deliberately the plainest thing on the page — no statistics, no ranking,
     no fitting. Everything else here reduces the reflectors to a number; this
     just shows them where they are.
+
+    Returns a :class:`avo_qi.report.PanelReport` of what was drawn, so the
+    HTML report can carry the same figure the reader is looking at rather
+    than a differently-configured one built from defaults.
     """
+    panel = PanelReport()
     axes = {c: label for c, label in CLASS_DEPTH_AXES.items()
             if c in table.columns and table[c].notna().any()}
     if not axes:
         st.info(
             "Nothing to plot against: the reflector table carries no depth or "
             "time column.", icon=":material/info:")
-        return
+        return panel
     options = class_panel_options(table)
 
     left, right = st.columns([1, 3])
@@ -1603,11 +1613,24 @@ def class_depth_panel(table, key, split_column=None, default=None):
                                 split_column=split_column)
     if figure is None:
         st.info("Nothing to draw.", icon=":material/info:")
-        return
+        return panel
     st.plotly_chart(figure, use_container_width=True)
+    panel.lead = (
+        "Every panel shares the "
+        f"{_html_escape(axes[depth_column])} axis, so a horizontal line "
+        "across the figure is one reflector. The class is on the first "
+        "panel's own axis as well as in the colour, so the figure survives "
+        "being printed.")
+    panel.figure(figure, height=max(520, 150 * (len(chosen) + 1)))
 
     missing = getattr(figure, "_avo_qi_missing", [])
     if missing:
+        panel.note(
+            ", ".join(f"<strong>{_html_escape(n)}</strong>" for n in missing)
+            + (" has" if len(missing) == 1 else " have")
+            + f" no {_html_escape(axes[depth_column])} and "
+            + ("is" if len(missing) == 1 else "are") + " left out.",
+            kind="warn")
         st.caption(
             ", ".join(f"**{n}**" for n in missing)
             + (" has" if len(missing) == 1 else " have")
@@ -1620,6 +1643,7 @@ def class_depth_panel(table, key, split_column=None, default=None):
             + " at the wrong depth in the earth. Set the datum on the "
               "**Load & QC** page, or switch the reference above to depth (MD)."
         )
+    return panel
 
 
 def class_depth_figure(table, columns=(), depth_column=None, depth_label=None,
@@ -1773,14 +1797,17 @@ def avo_attribute_panel(table, trend, key, split_column=None):
 
     ``trend`` is whatever background the caller fitted, so the ranking is
     against the same line the crossplot above it drew.
+
+    Returns a :class:`avo_qi.report.PanelReport` of what was drawn.
     """
     from avo_qi.core.avo_attributes import anomaly_ranking
 
+    panel = PanelReport()
     available = {c: v for c, v in ANOMALY_ATTRIBUTES.items()
                  if c in table.columns and table[c].notna().any()}
     if not available:
         st.info("No attribute to rank on yet.", icon=":material/info:")
-        return
+        return panel
 
     st.markdown("**Which reflectors are unusual?**")
     left, right = st.columns([3, 1])
@@ -1805,20 +1832,34 @@ def avo_attribute_panel(table, trend, key, split_column=None):
             "Every reflector sits the same distance from the reference, so "
             "none is unusual relative to the others — there is no scatter to "
             "measure against.", icon=":material/info:")
+        panel.note(
+            "Every reflector sits the same distance from the reference, so "
+            "none is unusual relative to the others.", kind="warn")
     else:
-        st.plotly_chart(_anomaly_figure(scored, column, ranked, top_n,
-                                        split_column=split_column),
-                        use_container_width=True)
+        figure = _anomaly_figure(scored, column, ranked, top_n,
+                                 split_column=split_column)
+        st.plotly_chart(figure, use_container_width=True)
         show = [c for c in ("well", "depth", "tvdss", "avo_class", "litho_pair",
                             "zone", column, f"{column}_z", "rank")
                 if c in scored.columns]
         listing = scored.loc[scored["rank"].between(1, top_n), show]
         listing = listing.sort_values("rank")
         numeric = listing.select_dtypes("number").columns
-        st.dataframe(listing.assign(**{c: listing[c].round(4) for c in numeric}),
-                     use_container_width=True, hide_index=True)
+        rounded = listing.assign(**{c: listing[c].round(4) for c in numeric})
+        st.dataframe(rounded, use_container_width=True, hide_index=True)
         whose = ("each well's" if isinstance(ranked["scale"], dict)
                  else "this well's")
+        panel.lead = (
+            f"Ranked on {_html_escape(available[column][0])}, scored in units "
+            f"of {whose} own scatter about the reference — so the answer "
+            "survives being carried to a noisier hole.")
+        panel.figure(figure, height=520)
+        panel.frame(rounded, caption=f"The {len(rounded)} most unusual "
+                                     "reflectors, by that score.")
+        panel.note(
+            "The scale is only as good as the events behind it: on a few dozen "
+            "reflectors read a z of 3 as <em>the strongest thing here</em>, "
+            "not as a probability.")
         st.caption(
             f"Scored in units of {whose} **own** scatter — "
             + _scale_phrase(ranked["scale"]) + " over "
@@ -1835,7 +1876,8 @@ def avo_attribute_panel(table, trend, key, split_column=None):
 
     st.divider()
     st.markdown("**Which direction in the A–B plane is the fluid?**")
-    _chi_sweep_block(table, trend, key)
+    _chi_sweep_block(table, trend, key, panel)
+    return panel
 
 
 def _scale_phrase(scale):
@@ -1918,8 +1960,12 @@ def _anomaly_figure(scored, column, ranked, top_n, split_column=None,
     return fig
 
 
-def _chi_sweep_block(table, trend, key):
-    """Rotate the A-B plane to the angle best correlated with a property."""
+def _chi_sweep_block(table, trend, key, panel=None):
+    """Rotate the A-B plane to the angle best correlated with a property.
+
+    ``panel`` collects the sweep for the HTML report; the block draws the same
+    thing either way.
+    """
     from avo_qi.core.avo_attributes import chi_rotation, chi_sweep, trend_chi
 
     options = {c: label for c, label in property_options(table).items()
@@ -1944,6 +1990,9 @@ def _chi_sweep_block(table, trend, key):
                       table[target].to_numpy(float))
     if found.get("reason"):
         st.info(f"No sweep: {found['reason']}.", icon=":material/info:")
+        if panel is not None:
+            panel.note("No χ sweep: "
+                       + _html_escape(str(found["reason"])) + ".", kind="warn")
         return
 
     angles = trend_chi(trend.slope if trend is not None else np.nan)
@@ -1974,15 +2023,28 @@ def _chi_sweep_block(table, trend, key):
                            table["B_shuey"].to_numpy(float), found["best_chi"])
     axis = (f"A·cos({found['best_chi']:.0f}°) + "
             f"B·sin({found['best_chi']:.0f}°)")
-    st.plotly_chart(
-        crossplot(pd.DataFrame({axis: rotated,
-                                options[target]: table[target].to_numpy(float)}),
-                  x=axis, y=options[target], size=9,
-                  title="The winning rotation against the property it was "
-                        "chosen for", height=460),
-        use_container_width=True)
+    winner = crossplot(
+        pd.DataFrame({axis: rotated,
+                      options[target]: table[target].to_numpy(float)}),
+        x=axis, y=options[target], size=9,
+        title="The winning rotation against the property it was chosen for",
+        height=460)
+    st.plotly_chart(winner, use_container_width=True)
 
     named = _nearest_named_chi(found["best_chi"])
+    if panel is not None:
+        panel.note(
+            "<strong>Which direction in the A–B plane is the fluid?</strong> "
+            f"Strongest at <strong>χ = {found['best_chi']:.0f}°</strong> "
+            f"(Spearman ρ = {found['best_correlation']:+.2f} over "
+            f"{found['n']} reflectors, against "
+            f"{_html_escape(options[target])})"
+            + _html_escape(named) + ". Rather than naming a direction in "
+            "advance, this asks the well which direction its own property "
+            "points in; with a few dozen reflectors treat a broad, flat peak "
+            "as a range of directions rather than one angle.")
+        panel.figure(fig, height=420)
+        panel.figure(winner, height=440)
     st.caption(
         f"Strongest at **χ = {found['best_chi']:.0f}°** "
         f"(Spearman ρ = {found['best_correlation']:+.2f} over {found['n']} "
@@ -2047,11 +2109,12 @@ def class_property_panel(table, key, split_column=None, default=None):
     the same way and cannot come to different answers about the same
     reflectors.
 
-    Returns the column plotted, or None where the table offers nothing to plot
-    against.
+    Returns a :class:`avo_qi.report.PanelReport` of what was drawn — empty
+    where the table offers nothing to plot against.
     """
     from avo_qi.core.properties import class_dependence, class_property_summary
 
+    panel = PanelReport()
     options = property_options(table)
     if not options:
         st.info(
@@ -2060,7 +2123,7 @@ def class_property_panel(table, key, split_column=None, default=None):
             "VSH, PHI or SW on the well — assign or compute them on the "
             "**Load & QC** page — or a vertical depth reference for the "
             "depth trends.", icon=":material/info:")
-        return None
+        return panel
 
     minimum = int(st.number_input(
         "Minimum events per class", 2, 20, 3, 1, key=f"{key}_min",
@@ -2079,12 +2142,24 @@ def class_property_panel(table, key, split_column=None, default=None):
             "many reflectors this well produced, not about the rock — lower "
             "the minimum, or compare wells. The plot below still shows every "
             "event.", icon=":material/info:")
+        panel.note(
+            f"Nothing could be tested: no property has {minimum} or more "
+            "events in at least two classes. That is a statement about how "
+            "many reflectors this well produced, not about the rock.",
+            kind="warn")
     else:
         display = ranking.rename(columns={"eps2": "ε²", "p_adj": "p (adj)"})
-        st.dataframe(
-            display[["property", "ε²", "p", "p (adj)", "events", "classes"]]
-            .round({"ε²": 3, "p": 4, "p (adj)": 4}),
-            use_container_width=True, hide_index=True)
+        ranked_shown = (display[["property", "ε²", "p", "p (adj)",
+                                 "events", "classes"]]
+                        .round({"ε²": 3, "p": 4, "p (adj)": 4}))
+        st.dataframe(ranked_shown, use_container_width=True, hide_index=True)
+        panel.lead = (
+            f"{len(tested)} propert{'y' if len(tested) == 1 else 'ies'} "
+            "tested, ranked by <strong>effect size</strong> rather than by "
+            "p — with a few dozen reflectors the p-value mostly reports how "
+            "many events a property survives on. <code>p (adj)</code> is "
+            "Bonferroni over the properties tested.")
+        panel.frame(ranked_shown)
         st.caption(
             f"{len(tested)} propert{'y' if len(tested) == 1 else 'ies'} tested, "
             "ranked by **effect size** rather than by p — with a few dozen "
@@ -2110,10 +2185,10 @@ def class_property_panel(table, key, split_column=None, default=None):
                           key=f"{key}_property")
 
     label = options[column]
-    st.plotly_chart(
-        class_property_figure(table, column, split_column=split_column,
-                              label=property_options(table, axis=True)[column]),
-        use_container_width=True)
+    figure = class_property_figure(
+        table, column, split_column=split_column,
+        label=property_options(table, axis=True)[column])
+    st.plotly_chart(figure, use_container_width=True)
 
     rows = class_property_summary(table["avo_class"].to_numpy(dtype=object),
                                   table[column].to_numpy(float),
@@ -2129,7 +2204,11 @@ def class_property_panel(table, key, split_column=None, default=None):
     row = ranking[ranking["column"] == column]
     adjusted = float(row["p_adj"].iloc[0]) if len(row) else np.nan
     _dependence_readout(found, label, adjusted=adjusted)
-    return column
+
+    panel.figure(figure, height=500)
+    panel.frame(summary, caption=f"{_html_escape(label)} per class.")
+    panel.note(_dependence_sentence(found, label, adjusted=adjusted))
+    return panel
 
 
 #: How much of a property's rank variance the class label has to account for
@@ -2146,8 +2225,6 @@ def _dependence_readout(found, label, adjusted=np.nan):
         return
 
     epsilon = found["epsilon_squared"]
-    strength = next((word for cut, word in DEPENDENCE_BANDS if epsilon >= cut),
-                    "essentially none")
     c1, c2, c3 = st.columns(3)
     c1.metric("Effect size ε²", f"{epsilon:.3f}", help=(
         "The fraction of this property's rank variance the class label "
@@ -2160,18 +2237,39 @@ def _dependence_readout(found, label, adjusted=np.nan):
                    "worth given that it was chosen as the best of many.")
     c3.metric("Events tested", f"{found['n']} in {found['k']} classes")
 
-    st.caption(
-        f"Kruskal-Wallis across the classes on **{label}**: {strength} "
+    st.caption(_dependence_sentence(found, label, adjusted=adjusted,
+                                    emphasis="**"))
+
+
+def _dependence_sentence(found, label, adjusted=np.nan, emphasis="strong"):
+    """The dependence result as one sentence, for a caption or the report.
+
+    ``emphasis`` is ``'**'`` for Streamlit markdown and an HTML tag name for
+    the report, so the same words reach both without either owning the other's
+    markup.
+    """
+    def strong(text):
+        return (f"**{text}**" if emphasis == "**"
+                else f"<{emphasis}>{text}</{emphasis}>")
+
+    if found.get("reason"):
+        return f"No dependence test: {found['reason']}."
+
+    epsilon = found["epsilon_squared"]
+    strength = next((word for cut, word in DEPENDENCE_BANDS if epsilon >= cut),
+                    "essentially none")
+    return (
+        f"Kruskal-Wallis across the classes on {strong(label)}: {strength} "
         f"(ε² = {epsilon:.3f}, H = {found['h']:.2f}, p = {found['p']:.4g}"
         + (f", {adjusted:.3g} adjusted" if np.isfinite(adjusted) else "") + "). "
-        + (", ".join(f"**{c}**" for c in found["dropped"])
+        + (", ".join(strong(c) for c in found["dropped"])
            + " had too few events to test and "
            + ("was" if len(found["dropped"]) == 1 else "were")
            + " left out. " if found["dropped"] else "")
-        + "Picked reflectors are **not independent samples** — neighbouring "
-          "events see overlapping rock and one thick sand can produce several "
-          "of them — so read the p-value as a ranking of which properties "
-          "separate the classes best, not as a significance test."
+        + "Picked reflectors are " + strong("not independent samples")
+        + " — neighbouring events see overlapping rock and one thick sand can "
+          "produce several of them — so read the p-value as a ranking of which "
+          "properties separate the classes best, not as a significance test."
     )
 
 

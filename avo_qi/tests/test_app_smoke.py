@@ -190,6 +190,95 @@ class TestAvoClassificationPage:
         assert at.warning
 
 
+@pytest.fixture(scope="module")
+def built_report():
+    """The real HTML document, captured on its way to the download button.
+
+    ``download_button.value`` is the *click state*, not the payload, so the
+    only way to see what the page actually produced is to watch it being
+    assembled. Building it is slow enough to be worth doing once.
+    """
+    import avo_qi.report as report
+
+    captured = {}
+    original = report.report_html
+
+    def spy(title, sections, **kwargs):
+        document = original(title, sections, **kwargs)
+        captured["document"] = document
+        captured["titles"] = [s.title for s in sections]
+        return document
+
+    report.report_html = spy
+    try:
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"), timeout=300)
+        next(b for b in at.button if b.label == "Build report").click().run(
+            timeout=600)
+    finally:
+        report.report_html = original
+    assert "document" in captured, "the page never built a report"
+    captured["page"] = at
+    return captured
+
+
+class TestTheHtmlReport:
+    """What leaves the tool is the document, not the screen.
+
+    The report used to cover seven of the page's sections and none of the
+    interpretation: it knew the reflector table and the wavelet, and nothing
+    about where the classes were, what they depended on, or whether the fluid
+    moved them. These hold the document to the page.
+    """
+
+    def test_it_carries_the_interpretation_and_not_just_the_numbers(
+            self, built_report):
+        titles = built_report["titles"]
+        for expected in ("How this was produced", "Wavelet", "Events",
+                         "Intercept and gradient", "Where the classes are",
+                         "AVO attributes", "Class against property",
+                         "Reflector table", "Tuning", "Wedge model",
+                         "Fluid case comparison"):
+            assert expected in titles, f"{expected} missing from {titles}"
+
+    def test_every_section_reaches_the_document(self, built_report):
+        import re
+
+        headings = re.findall(r"<h2>(.*?)</h2>", built_report["document"])
+        assert headings == built_report["titles"]
+
+    def test_the_plotting_library_is_inlined_exactly_once(self, built_report):
+        """The failure this guards against is invisible on screen: two
+        sections each believing they are first doubles a five-megabyte file,
+        and neither believing it leaves a document that draws nothing."""
+        document = built_report["document"]
+        assert document.count("Plotly.newPlot") >= 8, "figures went missing"
+        # Each of these is written once at the head of the bundle, so its count
+        # is the number of copies. All three are checked because any single one
+        # could move between plotly versions.
+        for marker in ("window.PlotlyConfig", "plotly.js v", "Plotly.register"):
+            assert document.count(marker) == 1, f"{marker} is not unique"
+
+    def test_the_document_stays_about_the_size_of_the_bundle(self, built_report):
+        """Ten figures cost about what two did: the megabytes are the library,
+        and each further figure is only its own JSON."""
+        assert 4e6 < len(built_report["document"]) < 8e6
+
+    def test_it_still_opens_with_no_network(self, built_report):
+        from avo_qi.report import no_external_references
+
+        assert no_external_references(built_report["document"])
+
+    def test_the_page_lists_the_sections_it_built(self, built_report):
+        """The caption is where a reader checks that the panel they configured
+        actually reached the file."""
+        captions = [c.value for c in built_report["page"].caption]
+        listing = next(c for c in captions if " sections: " in c)
+        assert listing.startswith(f"{len(built_report['titles'])} sections: ")
+        for title in built_report["titles"]:
+            assert title in listing
+
+
+
 class TestRockPhysicsPage:
     def test_runs_clean(self, rock_physics_page):
         assert not rock_physics_page.exception

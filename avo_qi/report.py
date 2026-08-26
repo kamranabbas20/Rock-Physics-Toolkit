@@ -30,6 +30,8 @@ import re
 from dataclasses import dataclass, field
 
 __all__ = [
+    "Figures",
+    "PanelReport",
     "Section",
     "figure_html",
     "frame_html",
@@ -172,6 +174,90 @@ def figure_html(fig, first=False, height=None):
     return fig.to_html(full_html=False,
                        include_plotlyjs="inline" if first else False,
                        config={"displaylogo": False})
+
+
+class Figures:
+    """Hands out figure HTML, inlining the plotting library exactly once.
+
+    ``figure_html(first=True)`` has to be called for one figure per document
+    and no more: the bundle is several megabytes, so repeating it multiplies
+    that by the figure count, and omitting it leaves a document that draws
+    nothing at all offline.  While the report had six sections a caller could
+    remember which figure came first.  With a dozen — several of them
+    conditional, so *which* figure is first depends on the well — remembering
+    is a bug waiting to happen.  This makes it the allocator's job:
+
+    >>> emit = Figures()
+    >>> blocks = [emit(fig) for fig in figures]   # doctest: +SKIP
+
+    A section that draws nothing costs nothing and does not consume the
+    bundle, which is what lets sections be conditional.
+    """
+
+    def __init__(self):
+        self.first = True
+
+    def __call__(self, fig, height=None):
+        html = figure_html(fig, first=self.first, height=height)
+        if html:
+            self.first = False
+        return html
+
+
+@dataclass
+class PanelReport:
+    """What an on-screen panel drew, in a form this module can re-render.
+
+    The page and the report have to agree, and the only way to guarantee that
+    is to hand the report the same figures and frames the screen was handed.
+    Recomputing them here would produce a document that quietly disagrees with
+    the page that made it: the reader chose a depth reference and four panels,
+    and a report showing a different four is worse than one showing none.
+
+    Blocks keep the order they were added in, because that order is the
+    argument the panel was making.
+    """
+
+    lead: str = ""
+    items: list = field(default_factory=list)
+
+    def figure(self, fig, height=None):
+        if fig is not None:
+            self.items.append(("figure", fig, {"height": height}))
+        return self
+
+    def frame(self, frame, max_rows=None, caption=None):
+        if frame is not None and len(frame):
+            self.items.append(("frame", frame,
+                               {"max_rows": max_rows, "caption": caption}))
+        return self
+
+    def note(self, text, kind="note"):
+        if text:
+            self.items.append(("note", text, {"kind": kind}))
+        return self
+
+    def section(self, title, emit, lead=None):
+        """This panel as a :class:`Section`, or ``None`` if it drew nothing.
+
+        Returning ``None`` rather than an empty section is deliberate: a
+        heading with nothing under it reads as something having gone wrong,
+        and on a well without petrophysics half of these panels legitimately
+        have nothing to say.
+        """
+        if not self.items:
+            return None
+        blocks = []
+        for kind, payload, extra in self.items:
+            if kind == "figure":
+                blocks.append(emit(payload, height=extra["height"]))
+            elif kind == "frame":
+                if extra["caption"]:
+                    blocks.append(f'<p class="lead">{extra["caption"]}</p>')
+                blocks.append(frame_html(payload, max_rows=extra["max_rows"]))
+            else:
+                blocks.append(paragraph_html(payload, kind=extra["kind"]))
+        return Section(title, blocks=blocks, lead=lead or self.lead)
 
 
 def report_html(title, sections, subtitle=None, generated=None, footer=None):

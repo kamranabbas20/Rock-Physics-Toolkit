@@ -7,6 +7,8 @@ import pandas as pd
 import pytest
 
 from avo_qi.report import (
+    Figures,
+    PanelReport,
     Section,
     frame_html,
     key_values_html,
@@ -155,3 +157,82 @@ class TestFigureEmbedding:
         from avo_qi.report import figure_html
 
         assert figure_html(None) == ""
+
+
+def _figure(y=(1, 2, 3)):
+    """A figure with as little in it as a figure can have."""
+    go = pytest.importorskip("plotly.graph_objects")
+    return go.Figure(go.Scatter(y=list(y)))
+
+
+class TestTheFigureAllocator:
+    """The bundle has to be inlined exactly once per document.
+
+    Twice and the file grows by several megabytes for nothing; not at all and
+    it draws nothing offline, which is the one thing the report promises. With
+    a dozen sections — several of them conditional on what the well carries —
+    *which* figure comes first is not something a caller can be asked to know.
+    """
+
+    def test_only_the_first_figure_carries_the_bundle(self):
+        emit = Figures()
+        first, second, third = (emit(_figure()) for _ in range(3))
+        assert "Plotly.newPlot" in first and "Plotly.newPlot" in second
+        # The bundle is what makes the first block enormous.
+        assert len(first) > 10 * len(second)
+        assert len(third) < len(first)
+
+    def test_a_section_that_draws_nothing_does_not_consume_it(self):
+        """The reason this is an allocator and not a counter: on a well with
+        no petrophysics the first two sections drop out entirely, and the
+        bundle has to move to whichever figure actually gets drawn."""
+        emit = Figures()
+        assert emit(None) == ""
+        assert emit.first is True
+        assert len(emit(_figure())) > 100_000
+        assert emit.first is False
+
+    def test_the_height_still_gets_through(self):
+        assert '"height":333' in Figures()(_figure(), height=333).replace(" ", "")
+
+
+class TestPanelReport:
+    """A panel hands the report what it drew, rather than the report
+    rebuilding it from defaults and quietly disagreeing with the screen."""
+
+    def test_blocks_keep_the_order_they_were_added_in(self):
+        panel = (PanelReport()
+                 .note("first")
+                 .frame(pd.DataFrame({"a": [1]}))
+                 .note("last"))
+        html = panel.section("T", Figures()).render()
+        assert html.index("first") < html.index("<table") < html.index("last")
+
+    def test_an_empty_panel_makes_no_section(self):
+        """A heading with nothing under it reads as a failure. On a well with
+        no petrophysics that is the honest outcome for half of these."""
+        assert PanelReport().section("Nothing", Figures()) is None
+
+    def test_nothing_is_added_for_an_empty_frame_or_a_missing_figure(self):
+        panel = (PanelReport()
+                 .figure(None)
+                 .frame(None)
+                 .frame(pd.DataFrame({"a": []})))
+        assert panel.section("T", Figures()) is None
+
+    def test_a_warn_note_is_called_out(self):
+        rendered = PanelReport().note("careful", kind="warn").section(
+            "T", Figures()).render()
+        assert 'class="note warn"' in rendered
+
+    def test_the_lead_can_come_from_the_panel_or_the_caller(self):
+        panel = PanelReport(lead="from the panel").note("x")
+        assert "from the panel" in panel.section("T", Figures()).render()
+        assert "from the caller" in panel.section(
+            "T", Figures(), lead="from the caller").render()
+
+    def test_a_frame_caption_precedes_its_table(self):
+        rendered = PanelReport().frame(
+            pd.DataFrame({"a": [1]}), caption="what this is").section(
+            "T", Figures()).render()
+        assert rendered.index("what this is") < rendered.index("<table")

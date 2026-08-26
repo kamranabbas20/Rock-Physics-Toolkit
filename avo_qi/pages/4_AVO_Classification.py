@@ -513,7 +513,10 @@ st.caption(
     "so the figure still works printed, or for a reader who cannot separate "
     "the reds from the greens."
 )
-class_depth_panel(table, key="avo_class_depth")
+# Captured rather than just drawn: the HTML report at the foot of the page
+# re-renders exactly what the reader configured here, so the document and the
+# screen cannot disagree about which panels were chosen.
+_depth_panel = class_depth_panel(table, key="avo_class_depth")
 
 # -------------------------------------------------------- AVO attributes ----
 # A and B are a coordinate system, not an answer. This reads a point in that
@@ -529,8 +532,8 @@ st.caption(
     "The **pseudo-shear reflectivity** and the **fluid factor** are in the "
     "reflector table and the CSV alongside A and B."
 )
-avo_attribute_panel(table, trend if trend.n_points >= 2 else None,
-                    key="avo_attributes")
+_attribute_panel = avo_attribute_panel(
+    table, trend if trend.n_points >= 2 else None, key="avo_attributes")
 
 # ------------------------------------------------- class against property ---
 # The classification so far says what the seismic does. This asks whether it
@@ -547,7 +550,7 @@ st.caption(
     "sand base carries its reservoir above and setting every class against "
     "\"the layer below\" would put half the reflectors against their seal."
 )
-class_property_panel(table, key="avo_property")
+_property_panel = class_property_panel(table, key="avo_property")
 
 # ---------------------------------------------------- class confidence -----
 st.divider()
@@ -575,6 +578,7 @@ pct_vs = q3.slider("Vs ± (%)", 0.0, 15.0, 2.0, 0.25, disabled=not confidence_on
 pct_rho = q4.slider("RHOB ± (%)", 0.0, 10.0, 1.0, 0.25, disabled=not confidence_on)
 
 probabilities = None
+_confidence_panel = report.PanelReport()
 if confidence_on and len(table):
     reflector_samples = table["sample"].to_numpy()
     # Bounds are per-reflector and were built before any filter, so they have to
@@ -652,6 +656,21 @@ if confidence_on and len(table):
         margin=dict(l=60, r=20, t=40, b=50),
         legend=dict(orientation="h", yanchor="bottom", y=1.02))
     st.plotly_chart(bars, use_container_width=True)
+
+    _confidence_panel.lead = (
+        f"{int(n_draws)} realisations of the logs at Vp ±{pct_vp:.2f}%, "
+        f"Vs ±{pct_vs:.2f}%, RHOB ±{pct_rho:.2f}%, reclassified on the same "
+        "lobe windows the labels use. A class label reads as a fact; it is "
+        "really the answer to <em>where do the intercept and gradient "
+        "land</em>, and both come from logs with a measurement error.")
+    _confidence_panel.figure(bars, height=430)
+    _confidence_panel.note(
+        f"Median confidence <strong>{merged['confidence'].median():.0%}</strong>, "
+        f"least confident <strong>{merged['confidence'].min():.0%}</strong>. "
+        f"<strong>{int(ambiguous.sum())}</strong> of {len(merged)} reflectors "
+        "hold their class in fewer than half the realisations, and the modal "
+        f"class differs from the label on <strong>{int((~agree).sum())}</strong>.",
+        kind="warn" if (ambiguous.any() or (~agree).any()) else "note")
 
     if ambiguous.any():
         worst = merged.loc[ambiguous].sort_values("confidence")
@@ -1186,6 +1205,7 @@ else:
               float(blocked_props["vs_lower"][wedge_p + 1]),
               float(blocked_props["rho_lower"][wedge_p + 1]))
 
+_wedge_panel = report.PanelReport()
 if not all(np.isfinite(v) for v in _up + _lo + _below):
     st.warning("The selected reflector has a non-finite blocked layer, so it "
                "cannot seed a wedge. Pick another one above.")
@@ -1266,6 +1286,18 @@ else:
                        legend=dict(orientation="h", yanchor="bottom", y=1.06))
     st.plotly_chart(wfig, use_container_width=True)
 
+    _wedge_panel.lead = (
+        "One reservoir thinned from thick to nothing, seeded from the "
+        f"reflector at {wedge_row['depth']:.1f} m (class "
+        f"{wedge_row['avo_class']}). Left: the picked top amplitude at "
+        f"{angles[int(wedge_angle_idx)]:.0f}°, with the thick-bed value it "
+        "should return to. Right: what an interpreter would measure off the "
+        "section against what is really there.")
+    _wedge_panel.figure(wfig, height=430)
+    _wedge_panel.note(
+        f"Tuning thickness {_fmt(_tuning_ms)}; amplitude peaks at "
+        f"{_fmt(_peak_ms)}; tuning brightening {_brightening:.2f}×.")
+
     # Does this bed change AVO class purely by getting thinner?
     _cls = classify_array(wedge["A_top"], wedge["B_top"], a_tol=settings.a_tol)
     _known = np.array([c is not None and str(c) != "nan" for c in _cls])
@@ -1273,6 +1305,12 @@ else:
     _thick_class = str(_cls[_valid][-1]) if _valid.any() else None
     _moved = _valid & (_cls != _thick_class)
     if _thick_class is not None and _moved.any():
+        _wedge_panel.note(
+            f"Thick, this bed is class <strong>{_thick_class}</strong>. "
+            f"Thinner than about <strong>{_fmt(float(np.nanmax(_twt_ms[_moved])))}"
+            "</strong> it reads as a different class — the same rock, the same "
+            "fluid, a different answer purely because of thickness.",
+            kind="warn")
         # The thickest bed that still misreads: below this the label moves.
         _first = float(np.nanmax(_twt_ms[_moved]))
         _classes_seen = [c for c in dict.fromkeys(_cls[_valid].tolist())]
@@ -1312,6 +1350,148 @@ st.plotly_chart(gather_figure(gather, angles, twt, mode=mode, markers=markers),
 st.caption("Triangles on the left edge mark classified reflectors.")
 
 
+# ---------------------------------------------------- fluid-case compare ----
+_fluid_panel = report.PanelReport()
+if well.has_fluid_cases:
+    st.divider()
+    st.header("Fluid case comparison")
+    st.caption(
+        "Every case is fitted at the **same** interfaces, on a time axis "
+        f"integrated once from the *{well.active_case}* case. Without that, each "
+        "case would carry its own time axis and the reflectors would not line up."
+    )
+
+    reference = st.selectbox(
+        "Reference case", list(well.cases),
+        index=well.cases.index("brine") if "brine" in well.cases else 0,
+        help="The fluid vectors are drawn from this case to each of the others.",
+    )
+
+    case_tables = {}
+    failed = []
+    for case_name in well.cases:
+        try:
+            frame = time_well(well, settings, case_name)
+        except ValueError:
+            failed.append(case_name)
+            continue
+        case_rc = reflectivity_series(
+            frame["VP"].to_numpy(float), frame["VS"].to_numpy(float),
+            frame["RHOB"].to_numpy(float), angles, method=settings.method,
+        )
+        case_tables[case_name] = reflector_avo(
+            case_rc, angles=angles, method=settings.method,
+            depth=frame["DEPTH"].to_numpy(float) if "DEPTH" in frame.columns else None,
+            twt=frame["TWT"].to_numpy(float),
+            samples=table["sample"].to_numpy(), a_tol=settings.a_tol,
+        )
+    if failed:
+        st.warning(f"Skipped case(s) with no usable samples: {', '.join(failed)}.")
+
+    comparison = compare_cases(case_tables, reference=reference, a_tol=settings.a_tol)
+    targets = [c for c in well.cases if c != reference and c in case_tables]
+
+    changed = int(comparison["class_changed"].sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Reflectors compared", len(comparison))
+    c2.metric("Change class with fluid", changed,
+              f"{changed / max(len(comparison), 1):.0%} of reflectors")
+    c3.metric("Largest fluid vector", f"{comparison['fluid_vector'].max():.4f}")
+
+    _fluid_fig = fluid_vector_crossplot(comparison, reference, targets,
+                                        a_tol=settings.a_tol)
+    st.plotly_chart(_fluid_fig, use_container_width=True)
+    st.caption(
+        f"Circles are the **{reference}** case; diamonds are the substituted cases, "
+        "with an arrow along each reflector's fluid vector. A long arrow crossing a "
+        "class boundary is a reflector whose AVO signature depends on what is in the "
+        "pore space — the ones worth trusting a fluid interpretation on."
+    )
+
+    show_cmp = comparison.copy()
+    for col in show_cmp.columns:
+        if show_cmp[col].dtype.kind == "f":
+            show_cmp[col] = show_cmp[col].round(4)
+    st.dataframe(show_cmp, use_container_width=True, height=320)
+
+    _fluid_panel.lead = (
+        f"Every reflector fitted in all {len(case_tables)} case(s) at the "
+        "<strong>same</strong> interfaces, on a time axis integrated once "
+        f"from the <em>{well.active_case}</em> case — without that, each case "
+        "would carry its own time axis and the reflectors would not line up. "
+        f"Fluid vectors are drawn from <strong>{reference}</strong>.")
+    _fluid_panel.note(
+        f"<strong>{changed}</strong> of {len(comparison)} reflectors "
+        f"({changed / max(len(comparison), 1):.0%}) change AVO class with "
+        "fluid; the largest fluid vector is "
+        f"{comparison['fluid_vector'].max():.4f}. Those are the reflectors a "
+        "fluid interpretation can actually be hung on.",
+        kind="note" if changed else "warn")
+    _fluid_panel.figure(_fluid_fig, height=560)
+    _fluid_panel.frame(show_cmp, max_rows=60)
+    st.download_button(
+        "Download fluid comparison (CSV)", show_cmp.to_csv(index=False).encode(),
+        file_name=f"{well.name}_fluid_case_comparison.csv", mime="text/csv",
+    )
+
+    # Read the class path in fluid order — brine to oil to gas — with the
+    # in-situ case noted at the end rather than interleaved.
+    fluid_order = [c for c in ("brine", "oil", "gas") if c in case_tables]
+    fluid_order += [c for c in case_tables if c not in fluid_order]
+
+    movers = comparison[comparison["class_changed"]]
+    if len(movers):
+        st.subheader("Reflectors that change class")
+        for _, row in movers.iterrows():
+            where = (f"{row['depth']:.1f} m" if "depth" in comparison.columns
+                     else f"sample {int(row['sample'])}")
+            path = "  →  ".join(
+                f"**{c}** {row[f'class_{c}']}" for c in fluid_order if c != "in situ"
+            )
+            if "in situ" in case_tables:
+                path += f"   (in situ: {row['class_in situ']})"
+            st.write(f"- {where} · {path}")
+        _fluid_panel.frame(
+            movers[[c for c in movers.columns
+                    if c in ("depth", "sample", "tvdss")
+                    or c.startswith("class_")]],
+            caption="The reflectors whose class depends on what is in the "
+                    "pore space.")
+    else:
+        st.info("No reflector changes AVO class across the fluid cases.")
+        _fluid_panel.note("No reflector changes AVO class across the fluid "
+                          "cases: on this well the classification is not "
+                          "telling you about fluid.", kind="warn")
+
+    st.subheader("Amplitude vs angle, by fluid case")
+    # This dropdown's labels are volatile too, but nothing reads its key before
+    # the widget is created, so Streamlit's own validation repairs a value it
+    # no longer recognises. The detail dropdown above is the one that needs
+    # help, precisely because the page reads it first.
+    pick_cmp = st.selectbox(
+        "Reflector", range(len(comparison)),
+        format_func=lambda i: (
+            f"{comparison.iloc[i]['depth']:.1f} m"
+            if "depth" in comparison.columns else f"sample {int(comparison.iloc[i]['sample'])}"
+        ) + (" — class changes" if comparison.iloc[i]["class_changed"] else ""),
+        key="fluid_reflector",
+    )
+    row_cmp = comparison.iloc[pick_cmp]
+    fig = go.Figure()
+    for case_name in fluid_order:
+        a_c, b_c = row_cmp[f"A_{case_name}"], row_cmp[f"B_{case_name}"]
+        fig.add_trace(go.Scatter(
+            x=fine, y=a_c + b_c * sin2_fine, mode="lines",
+            name=f"{case_name} — class {row_cmp[f'class_{case_name}']}",
+            line=dict(width=2.4, color=case_colour(case_name)),
+        ))
+    fig.add_hline(y=0, line=dict(color="#bbb", width=1))
+    fig.update_layout(xaxis_title="Incidence angle (deg)", yaxis_title="Rpp",
+                      height=440, margin=dict(l=60, r=20, t=30, b=45),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # ------------------------------------------------------------- report -------
 st.divider()
 st.subheader("Report")
@@ -1319,8 +1499,11 @@ st.caption(
     "The CSVs above carry the numbers and none of the context: six months on, "
     "nothing in them says which wavelet was used, what the amplitude cut was, "
     "or which events a filter removed. This builds a single **self-contained "
-    "HTML** — settings first, then the figures and the table — that opens with "
-    "no network and can be emailed or archived as it is."
+    "HTML** — settings first, then everything on this page — that opens with "
+    "no network and can be emailed or archived as it is. It sits at the foot "
+    "of the page because it reports on all of it: the panels above are carried "
+    "into the document **as you configured them**, so the file and the screen "
+    "cannot disagree about which depth reference or which property was chosen."
 )
 
 if st.button("Build report", type="primary"):
@@ -1380,6 +1563,11 @@ if st.button("Build report", type="primary"):
             "events": [int(_counts.get(c, 0)) for c in CLASS_COLOURS],
         })
 
+        # One allocator for the document: it inlines the plotting library on
+        # whichever figure happens to come first, so sections can be added
+        # and left out without anyone tracking which one that is.
+        _emit = report.Figures()
+
         _sections = [
             report.Section(
                 "How this was produced",
@@ -1393,7 +1581,7 @@ if st.button("Build report", type="primary"):
                 lead="The bandwidth sets the lobe each event is blocked on, the "
                      "thickness at which a bed tunes, and whether two "
                      "interfaces are separable at all.",
-                blocks=[report.figure_html(_wavelet_fig, first=True, height=320)]),
+                blocks=[_emit(_wavelet_fig, height=320)]),
             report.Section(
                 "Events",
                 lead=f"{len(table)} event(s) picked from the full stack — every "
@@ -1413,9 +1601,23 @@ if st.button("Build report", type="primary"):
                       f"{trend.n_points} events."
                       if np.isfinite(trend.slope) else
                       "Too few events to fit a background trend."),
-                blocks=[report.figure_html(
-                    ab_crossplot(table, trend=trend, a_tol=settings.a_tol),
-                    height=520)]),
+                blocks=[_emit(ab_crossplot(table, trend=trend,
+                                           a_tol=settings.a_tol),
+                              height=520)]),
+        ]
+
+        # The interpretive panels, exactly as the reader configured them on
+        # screen rather than rebuilt here from defaults. Each returns None
+        # where it drew nothing, so a well with no petrophysics gets a shorter
+        # report instead of a run of empty headings.
+        _sections += [s for s in (
+            _depth_panel.section("Where the classes are", _emit),
+            _attribute_panel.section("AVO attributes", _emit),
+            _property_panel.section("Class against property", _emit),
+            _confidence_panel.section("How sure is each class?", _emit),
+        ) if s is not None]
+
+        _sections += [
             report.Section(
                 "Reflector table",
                 lead="Every picked event, with the layers it was fitted on.",
@@ -1427,6 +1629,11 @@ if st.button("Build report", type="primary"):
                      "interface response they would give if thick.",
                 blocks=[report.frame_html(tuning_table, max_rows=40)]),
         ]
+
+        _sections += [s for s in (
+            _wedge_panel.section("Wedge model", _emit),
+            _fluid_panel.section("Fluid case comparison", _emit),
+        ) if s is not None]
         if _zone_intervals is not None and len(_zone_intervals):
             _zone_blocks = [report.frame_html(_zone_intervals.round(2))]
             if zone_summary is not None and len(zone_summary):
@@ -1444,6 +1651,10 @@ if st.button("Build report", type="primary"):
             subtitle=f"{len(table)} events · "
                      f"{settings.method.replace('_', '-')} · {_wavelet_name}")
 
+    st.caption(
+        f"{len(_sections)} sections: "
+        + ", ".join(_s.title for _s in _sections) + ".")
+
     if not report.no_external_references(_document):
         st.warning(
             "The report references something outside itself, so it will not "
@@ -1458,119 +1669,3 @@ if st.button("Build report", type="primary"):
         "embedded once so the figures stay interactive with no network."
     )
 
-
-# ---------------------------------------------------- fluid-case compare ----
-if well.has_fluid_cases:
-    st.divider()
-    st.header("Fluid case comparison")
-    st.caption(
-        "Every case is fitted at the **same** interfaces, on a time axis "
-        f"integrated once from the *{well.active_case}* case. Without that, each "
-        "case would carry its own time axis and the reflectors would not line up."
-    )
-
-    reference = st.selectbox(
-        "Reference case", list(well.cases),
-        index=well.cases.index("brine") if "brine" in well.cases else 0,
-        help="The fluid vectors are drawn from this case to each of the others.",
-    )
-
-    case_tables = {}
-    failed = []
-    for case_name in well.cases:
-        try:
-            frame = time_well(well, settings, case_name)
-        except ValueError:
-            failed.append(case_name)
-            continue
-        case_rc = reflectivity_series(
-            frame["VP"].to_numpy(float), frame["VS"].to_numpy(float),
-            frame["RHOB"].to_numpy(float), angles, method=settings.method,
-        )
-        case_tables[case_name] = reflector_avo(
-            case_rc, angles=angles, method=settings.method,
-            depth=frame["DEPTH"].to_numpy(float) if "DEPTH" in frame.columns else None,
-            twt=frame["TWT"].to_numpy(float),
-            samples=table["sample"].to_numpy(), a_tol=settings.a_tol,
-        )
-    if failed:
-        st.warning(f"Skipped case(s) with no usable samples: {', '.join(failed)}.")
-
-    comparison = compare_cases(case_tables, reference=reference, a_tol=settings.a_tol)
-    targets = [c for c in well.cases if c != reference and c in case_tables]
-
-    changed = int(comparison["class_changed"].sum())
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Reflectors compared", len(comparison))
-    c2.metric("Change class with fluid", changed,
-              f"{changed / max(len(comparison), 1):.0%} of reflectors")
-    c3.metric("Largest fluid vector", f"{comparison['fluid_vector'].max():.4f}")
-
-    st.plotly_chart(
-        fluid_vector_crossplot(comparison, reference, targets, a_tol=settings.a_tol),
-        use_container_width=True,
-    )
-    st.caption(
-        f"Circles are the **{reference}** case; diamonds are the substituted cases, "
-        "with an arrow along each reflector's fluid vector. A long arrow crossing a "
-        "class boundary is a reflector whose AVO signature depends on what is in the "
-        "pore space — the ones worth trusting a fluid interpretation on."
-    )
-
-    show_cmp = comparison.copy()
-    for col in show_cmp.columns:
-        if show_cmp[col].dtype.kind == "f":
-            show_cmp[col] = show_cmp[col].round(4)
-    st.dataframe(show_cmp, use_container_width=True, height=320)
-    st.download_button(
-        "Download fluid comparison (CSV)", show_cmp.to_csv(index=False).encode(),
-        file_name=f"{well.name}_fluid_case_comparison.csv", mime="text/csv",
-    )
-
-    # Read the class path in fluid order — brine to oil to gas — with the
-    # in-situ case noted at the end rather than interleaved.
-    fluid_order = [c for c in ("brine", "oil", "gas") if c in case_tables]
-    fluid_order += [c for c in case_tables if c not in fluid_order]
-
-    movers = comparison[comparison["class_changed"]]
-    if len(movers):
-        st.subheader("Reflectors that change class")
-        for _, row in movers.iterrows():
-            where = (f"{row['depth']:.1f} m" if "depth" in comparison.columns
-                     else f"sample {int(row['sample'])}")
-            path = "  →  ".join(
-                f"**{c}** {row[f'class_{c}']}" for c in fluid_order if c != "in situ"
-            )
-            if "in situ" in case_tables:
-                path += f"   (in situ: {row['class_in situ']})"
-            st.write(f"- {where} · {path}")
-    else:
-        st.info("No reflector changes AVO class across the fluid cases.")
-
-    st.subheader("Amplitude vs angle, by fluid case")
-    # This dropdown's labels are volatile too, but nothing reads its key before
-    # the widget is created, so Streamlit's own validation repairs a value it
-    # no longer recognises. The detail dropdown above is the one that needs
-    # help, precisely because the page reads it first.
-    pick_cmp = st.selectbox(
-        "Reflector", range(len(comparison)),
-        format_func=lambda i: (
-            f"{comparison.iloc[i]['depth']:.1f} m"
-            if "depth" in comparison.columns else f"sample {int(comparison.iloc[i]['sample'])}"
-        ) + (" — class changes" if comparison.iloc[i]["class_changed"] else ""),
-        key="fluid_reflector",
-    )
-    row_cmp = comparison.iloc[pick_cmp]
-    fig = go.Figure()
-    for case_name in fluid_order:
-        a_c, b_c = row_cmp[f"A_{case_name}"], row_cmp[f"B_{case_name}"]
-        fig.add_trace(go.Scatter(
-            x=fine, y=a_c + b_c * sin2_fine, mode="lines",
-            name=f"{case_name} — class {row_cmp[f'class_{case_name}']}",
-            line=dict(width=2.4, color=case_colour(case_name)),
-        ))
-    fig.add_hline(y=0, line=dict(color="#bbb", width=1))
-    fig.update_layout(xaxis_title="Incidence angle (deg)", yaxis_title="Rpp",
-                      height=440, margin=dict(l=60, r=20, t=30, b=45),
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
-    st.plotly_chart(fig, use_container_width=True)

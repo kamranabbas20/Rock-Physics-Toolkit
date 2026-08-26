@@ -32,7 +32,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 | **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, a **shear sonic** predicted where the well has none or only part of one and scored against whatever it does have, **fluid cases** assigned where the file carries them and modelled from industry-default fluids where it does not, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on, and a **setup file** that saves every decision on the page — your interpretation, not your logs. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
-| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Then **where the classes are** — small multiples on one shared, downward depth axis, the class on an axis of its own as well as in the colour, with a panel per property. Then **AVO attributes** — pseudo-shear reflectivity and the Smith-Gidlow fluid factor at each reflector's own background Vp/Vs, an anomaly ranking scored in the well's own scatter, and a χ sweep that finds the rotation of the A–B plane best correlated with a rock property. Then **class against property** — every reflector's φ, VSH, SW and net-to-gross averaged over the same two half-lobes its intercept and gradient were fitted from, every available property ranked by how well it separates the classes, and the one you pick drawn as a box and its own events. Ends with a one-click **self-contained HTML report**. |
+| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Then **where the classes are** — small multiples on one shared, downward depth axis, the class on an axis of its own as well as in the colour, with a panel per property. Then **AVO attributes** — pseudo-shear reflectivity and the Smith-Gidlow fluid factor at each reflector's own background Vp/Vs, an anomaly ranking scored in the well's own scatter, and a χ sweep that finds the rotation of the A–B plane best correlated with a rock property. Then **class against property** — every reflector's φ, VSH, SW and net-to-gross averaged over the same two half-lobes its intercept and gradient were fitted from, every available property ranked by how well it separates the classes, and the one you pick drawn as a box and its own events. Ends with a one-click **self-contained HTML report** that carries every section above it, as configured on screen. |
 | **Rock Physics** | A **rock physics template** — constant-porosity and constant-Sw curves on the AI vs Vp/Vs crossplot, so the axes read as porosity and saturation rather than merely "softer", built by running the per-sample forward model over the grid so the template and the prediction cannot drift apart. Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus Hertz-Mindlin soft-sand, stiff-sand and critical-porosity frames — raised dry-to-saturated through Gassmann on request. Then a **forward model** driven per-sample from VSH, PHIT and SW with a misfit readout, an optional **Monte Carlo** P10–P90 band, and **fluid substitution** at Batzle-Wang reservoir conditions. |
 | **Multi-well** | Every well in the library run through the *same* reflector pipeline and set side by side: an overview of what each well contributed, the intercept–gradient crossplot with all wells on it and a background trend fitted through the lot — a trend fitted in one hole is that hole's rock, fitted across several it is the field's — a curve of your choice against TVDSS or TVDBML, every picked event on one shared depth axis with colour for the class and shape for the well, the class mix per well, and events by zone using **each well's own** tops — then the anomaly ranking and the class-against-property panel over every well at once — each well measured against its own trend and scored in its own scatter, which is where a relationship stops being one hole's coincidence and a quiet well's best event stays visible beside a noisy one's. |
 
@@ -168,16 +168,43 @@ nothing in one says which wavelet was used, what the amplitude cut was, or
 which events a filter removed.
 
 The **Build report** button at the foot of the AVO Classification page writes a
-single HTML file that answers those first — provenance and settings, then the
-wavelet and its spectrum, the event and class counts, the A–B crossplot, the
-full reflector table and the tuning summary.
+single HTML file that answers those first — provenance and settings — and then
+carries the whole page: the wavelet and its spectrum, the zonation, the event
+and class counts, the A–B crossplot, *where the classes are*, the AVO
+attributes with the anomaly ranking and the χ sweep, class against property,
+the class probabilities where they were computed, the reflector table, the
+tuning summary, the wedge model, and the fluid-case comparison. Thirteen
+sections on a well that carries everything; fewer, and no empty headings, on
+one that does not.
 
-It is genuinely self-contained: Plotly is inlined once rather than pulled from
-a CDN, so the file opens with no network and still works when a CDN version
+Two things make that work, and both are held by tests.
+
+**The document is handed what the screen was handed.** The interpretive panels
+return a `PanelReport` of the figures, tables and findings they drew, and the
+report re-renders those rather than rebuilding them from defaults. You chose a
+depth reference and four panels; the file shows those four. A report that
+quietly disagrees with the page that produced it is worse than one that shows
+less.
+
+**The plotting library is inlined exactly once**, by a `Figures` allocator
+rather than by whichever call site remembered to ask. That was fine to do by
+hand at two figures. At ten — several of them conditional on what the well
+carries, so *which* figure comes first depends on the well — it is a bug
+waiting to happen: twice and the file doubles, never and it draws nothing at
+all. Going from 2 figures to 10 cost 87 KB on a 4.9 MB file, because the
+megabytes are the library and each further figure is only its own JSON.
+
+It is genuinely self-contained: Plotly is inlined rather than pulled from a
+CDN, so the file opens with no network and still works when a CDN version
 moves on. That costs about 5 MB, which is the right trade for something meant
 to be emailed and archived, and `no_external_references` exists so a test holds
-the property rather than trusting it. Verified by opening the report in a
-browser with networking disabled: both figures render and zero requests fail.
+the property rather than trusting it. Verified by opening the report in a real
+browser: all ten figures render, and there are zero requests off the file and
+zero console errors.
+
+The report sits at the *foot* of the page rather than second-to-last, because
+it reports on everything above it — including the fluid-case comparison, which
+used to run after it and so could not be in it.
 
 That check has one subtlety worth knowing, because it read as a bug first. The
 inlined Plotly bundle carries map support, and that support has OpenStreetMap
