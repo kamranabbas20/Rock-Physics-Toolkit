@@ -32,6 +32,7 @@ from avo_qi.ui import (  # noqa: E402
     DEPTH_REFERENCES,
     active_well_name,
     avo_attribute_panel,
+    class_depth_panel,
     class_property_panel,
     page_setup,
     sidebar,
@@ -249,35 +250,22 @@ else:
                      "measured depth would put it at the wrong depth in the "
                      "earth, which is the error this reference exists to stop.")
 
-    # The events themselves against the same reference, coloured by class.
-    column = reference.lower()
-    plotted = [n for n, f in results.items() if column in f["table"].columns]
-    if plotted:
-        fig = go.Figure()
-        for name in plotted:
-            table = results[name]["table"]
-            for label, part in table.groupby("avo_class"):
-                fig.add_trace(go.Scatter(
-                    x=part["A_shuey"], y=part[column], mode="markers",
-                    name=f"{name} · {label}", legendgroup=name,
-                    marker=dict(size=10, color=CLASS_COLOURS.get(label, "#888"),
-                                symbol=["circle", "square", "diamond",
-                                        "triangle-up", "x"][
-                                    list(plotted).index(name) % 5],
-                                line=dict(width=1, color=colours[name])),
-                    hovertemplate=(f"{name}<br>A %{{x:.4f}}<br>"
-                                   f"{reference} %{{y:,.1f}} m<extra></extra>")))
-        fig.add_vline(x=0, line=dict(color="#666", width=1))
-        fig.update_yaxes(autorange="reversed", title_text=f"{reference} (m)")
-        fig.update_layout(xaxis_title="Intercept A", height=620,
-                          margin=dict(l=70, r=20, t=30, b=50), showlegend=True)
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(
-            "Every picked event at its true vertical depth, coloured by class "
-            "and shaped by well. A class that clusters at one depth across "
-            "wells is a rock property; one that appears at a different depth "
-            "in each is more likely a fluid or a facies change."
-        )
+
+# ------------------------------------------------- where the classes are ----
+# Replaces a single A-against-TVDSS plot that used to live in the depth
+# section above: the same events, the same colouring, but with the class on an
+# axis of its own and a panel per property, all sharing one depth axis.
+st.divider()
+st.subheader("Where the classes are, all wells")
+st.caption(
+    "Every panel shares the depth axis, so a horizontal line across the figure "
+    "is one reflector; colour is the class and shape is the well. A class that "
+    "clusters at one depth **across** wells is a rock property; one that "
+    "appears at a different depth in each is more likely a fluid or a facies "
+    "change. Wells with no vertical reference cannot be drawn here at all — "
+    "measured depth would put them at the wrong depth in the earth."
+)
+class_depth_panel(everything, key="multiwell_class_depth", split_column="well")
 
 # --------------------------------------------------------- class by well ---
 st.divider()

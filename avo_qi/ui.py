@@ -1509,6 +1509,223 @@ def class_property_figure(table, column, label=None, classes=None, height=520,
     return fig
 
 
+#: Depth references a class-against-depth plot can be drawn on, deepest-first
+#: convention: all four increase downwards.
+CLASS_DEPTH_AXES = {
+    "tvdss": "TVDSS (m below MSL)",
+    "tvdbml": "TVDBML (m below sea bed)",
+    "tvd": "TVD (m)",
+    "depth": "Depth (m MD)",
+    "twt": "TWT (s)",
+}
+
+#: What a class-against-depth panel can put on its x axis, beyond the class
+#: itself, in the order an interpreter reaches for them.
+CLASS_PANEL_COLUMNS = {
+    "A_shuey": "Intercept A",
+    "B_shuey": "Gradient B",
+    "fluid_factor": "Fluid factor",
+    "phi_res": "φ, reservoir side",
+    "ntg_res": "Net-to-gross, reservoir side",
+    "vsh_res": "VSH, reservoir side",
+    "sw_res": "SW, reservoir side",
+    "d_phi": "Δφ across",
+    "amplitude": "Amplitude",
+}
+
+
+def class_panel_options(table):
+    """The ``{column: label}`` a class-against-depth plot can panel on."""
+    return {c: label for c, label in CLASS_PANEL_COLUMNS.items()
+            if c in table.columns and table[c].notna().any()}
+
+
+def class_depth_axis(table):
+    """The vertical reference to draw against, best available first.
+
+    TVDSS before MD deliberately: measured depth starts at a rig floor, so a
+    class-against-depth plot drawn on it says where the classes are *in the
+    hole* rather than in the earth, and two wells cannot be read together.
+    """
+    for column, label in CLASS_DEPTH_AXES.items():
+        if column in table.columns and table[column].notna().any():
+            return column, label
+    return None, None
+
+
+def class_depth_panel(table, key, split_column=None, default=None):
+    """The *where are they* section: a depth reference, some panels, a plot.
+
+    Deliberately the plainest thing on the page — no statistics, no ranking,
+    no fitting. Everything else here reduces the reflectors to a number; this
+    just shows them where they are.
+    """
+    axes = {c: label for c, label in CLASS_DEPTH_AXES.items()
+            if c in table.columns and table[c].notna().any()}
+    if not axes:
+        st.info(
+            "Nothing to plot against: the reflector table carries no depth or "
+            "time column.", icon=":material/info:")
+        return
+    options = class_panel_options(table)
+
+    left, right = st.columns([1, 3])
+    depth_column = left.selectbox(
+        "Depth reference", list(axes), format_func=lambda c: axes[c],
+        key=f"{key}_depth_axis",
+        help="TVDSS and TVDBML put the classes where they are in the earth; "
+             "measured depth puts them where they are in the hole.")
+    chosen = right.multiselect(
+        "Panels", list(options), format_func=lambda c: options[c],
+        default=[c for c in (default or ("A_shuey", "fluid_factor", "phi_res",
+                                         "ntg_res")) if c in options],
+        key=f"{key}_panels",
+        help="Each one shares the depth axis, so a horizontal line across the "
+             "figure is a single reflector.")
+
+    figure = class_depth_figure(table, columns=chosen, depth_column=depth_column,
+                                depth_label=axes[depth_column],
+                                split_column=split_column)
+    if figure is None:
+        st.info("Nothing to draw.", icon=":material/info:")
+        return
+    st.plotly_chart(figure, use_container_width=True)
+
+    missing = getattr(figure, "_avo_qi_missing", [])
+    if missing:
+        st.caption(
+            ", ".join(f"**{n}**" for n in missing)
+            + (" has" if len(missing) == 1 else " have")
+            + f" no {axes[depth_column]} and "
+            + ("is" if len(missing) == 1 else "are")
+            + " left out — drawing "
+            + ("it" if len(missing) == 1 else "them")
+            + " at measured depth would put "
+            + ("it" if len(missing) == 1 else "them")
+            + " at the wrong depth in the earth. Set the datum on the "
+              "**Load & QC** page, or switch the reference above to depth (MD)."
+        )
+
+
+def class_depth_figure(table, columns=(), depth_column=None, depth_label=None,
+                       split_column=None, height=680, symbols=None):
+    """Where the classes are: one shared depth axis, a panel per property.
+
+    The plainest thing the classification can be asked — *where in the well
+    are the Class III events, and what is the rock doing there* — drawn as
+    small multiples rather than one crowded plot.  Every panel shares the
+    depth axis, so a horizontal line across the figure is one reflector and
+    the panels can be read against each other by eye.
+
+    The first panel puts the class on the x axis itself, so identity is
+    carried by **position as well as colour** and the figure survives being
+    printed, photocopied, or read by someone with a colour vision deficiency.
+    Class order is fixed — I, IIp, IIn, III, IV, background — not sorted by
+    count, so the same well looks the same on every rerun and two wells look
+    like each other.
+
+    ``split_column`` — the well, on the cross-well page — gives each group its
+    own marker symbol.
+    """
+    from plotly.subplots import make_subplots
+
+    classes = [c for c in CLASS_COLOURS]
+    columns = [c for c in columns if c in table.columns]
+    if depth_column is None:
+        depth_column, depth_label = class_depth_axis(table)
+    if depth_column is None:
+        return None
+    depth_label = depth_label or CLASS_DEPTH_AXES.get(depth_column, depth_column)
+
+    labels = table["avo_class"].to_numpy(dtype=object)
+    depth = table[depth_column].to_numpy(float)
+    groups = (table[split_column].to_numpy(dtype=object)
+              if split_column and split_column in table.columns else None)
+    names = list(dict.fromkeys(groups.tolist())) if groups is not None else []
+    shapes = list(symbols or ["circle", "square", "diamond", "triangle-up", "x"])
+
+    legended = set()
+    drawn = set()
+    titles = ["AVO class"] + [CLASS_PANEL_COLUMNS.get(c, c) for c in columns]
+    fig = make_subplots(rows=1, cols=len(titles), shared_yaxes=True,
+                        horizontal_spacing=0.025, subplot_titles=titles)
+
+    for panel, column in enumerate([None] + columns, start=1):
+        if column is None:
+            x_all = np.array([classes.index(c) if c in classes else np.nan
+                              for c in labels], dtype=float)
+        else:
+            x_all = table[column].to_numpy(float)
+            fig.add_vline(x=0, line=dict(color="#CCCCCC", width=1),
+                          row=1, col=panel)
+
+        for avo_class in classes:
+            here = (labels == avo_class) & np.isfinite(x_all) & np.isfinite(depth)
+            if not here.any():
+                continue
+            for name in (names or [None]):
+                picked = here & (groups == name) if name is not None else here
+                if not picked.any():
+                    continue
+                who = "" if name is None else f"{name} · "
+                # One legend entry per class, from the first panel and from
+                # whichever group happens to carry that class first. Keying it
+                # to a *named* group instead loses the whole class legend when
+                # that group has nothing on this axis — which is exactly what a
+                # well with no vertical reference does.
+                first = panel == 1 and avo_class not in legended
+                if first:
+                    legended.add(avo_class)
+                if name is not None:
+                    drawn.add(name)
+                fig.add_trace(go.Scatter(
+                    x=x_all[picked], y=depth[picked], mode="markers",
+                    name=avo_class, legendgroup=avo_class, showlegend=first,
+                    marker=dict(size=9, color=CLASS_COLOURS[avo_class],
+                                symbol=(shapes[names.index(name) % len(shapes)]
+                                        if name is not None else "circle"),
+                                # A surface-coloured ring, so overlapping
+                                # events stay countable where they stack.
+                                line=dict(width=1.5, color="#FFFFFF")),
+                    text=[f"{who}{avo_class}"] * int(picked.sum()),
+                    hovertemplate=("%{text}<br>" + (
+                        "" if column is None
+                        else CLASS_PANEL_COLUMNS.get(column, column)
+                        + " %{x:.4g}<br>")
+                        + depth_label + " %{y:,.1f}<extra></extra>")),
+                    row=1, col=panel)
+
+    # One legend entry per well, drawn off-plot, and only for a well that has
+    # something on this axis — a legend entry for a well with no points reads
+    # as "it is in here somewhere" rather than "it could not be drawn".
+    # Neutral grey deliberately: the marks are coloured by class, so a per-well
+    # colour here would be a lie.
+    for k, name in enumerate(names):
+        if name not in drawn:
+            continue
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers", name=str(name), showlegend=True,
+            marker=dict(size=9, color="#555555",
+                        symbol=shapes[k % len(shapes)])), row=1, col=1)
+
+    # "background/other" spelled out rotates into a wedge of empty space under
+    # the panel; the legend carries the full name.
+    fig.update_xaxes(tickmode="array", tickvals=list(range(len(classes))),
+                     ticktext=[c.replace("background/other", "bg")
+                               for c in classes],
+                     range=[-0.7, len(classes) - 0.3], tickangle=0, row=1, col=1)
+    fig.update_yaxes(autorange="reversed", title_text=depth_label, row=1, col=1)
+    fig.update_layout(height=height, margin=dict(l=80, r=20, t=70, b=70),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.06),
+                      hovermode="closest")
+    for note in fig.layout.annotations:               # subplot titles
+        note.font.size = 13
+    # Which groups reached the plot, so a caller can name the ones that did not.
+    fig._avo_qi_drawn = drawn
+    fig._avo_qi_missing = [n for n in names if n not in drawn]
+    return fig
+
+
 #: Attributes an anomaly can be ranked on, with what each one is measuring.
 ANOMALY_ATTRIBUTES = {
     "background_deviation": (

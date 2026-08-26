@@ -60,6 +60,7 @@ from avo_qi.ui import (  # noqa: E402
     CLASS_COLOURS,
     ab_crossplot,
     avo_attribute_panel,
+    class_depth_panel,
     class_property_panel,
     vsh_series,
     detail_log_tracks,
@@ -497,6 +498,22 @@ if zone_intervals is not None and len(zone_intervals):
             st.caption(f"{_outside} of {len(table)} events sit above the "
                        "shallowest top or below the deepest, so they are in no "
                        "named zone and are not counted above.")
+
+# --------------------------------------------------- where the classes are --
+# The plainest question the classification can be asked, and the one that gets
+# lost among the statistics below: where in the well are they, and what is the
+# rock doing there? No fitting, no ranking — just the reflectors, where they
+# are.
+st.divider()
+st.subheader("Where the classes are")
+st.caption(
+    "Every panel shares the depth axis, so a horizontal line across the "
+    "figure is one reflector and the panels can be read against each other. "
+    "The class is on the **left panel's own axis** as well as in the colour, "
+    "so the figure still works printed, or for a reader who cannot separate "
+    "the reds from the greens."
+)
+class_depth_panel(table, key="avo_class_depth")
 
 # -------------------------------------------------------- AVO attributes ----
 # A and B are a coordinate system, not an answer. This reads a point in that
