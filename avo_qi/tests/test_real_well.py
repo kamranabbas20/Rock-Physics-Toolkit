@@ -842,9 +842,10 @@ class TestAWellWithNoShearSonic:
         well, raw, units, _ = self.stripped()
         at = self.page(well, raw, units)
         assert not at.exception
-        # All nine steps are reachable; it used to stop at step two.
-        assert len(at.subheader) == 9
-        assert "5 · Shear sonic" in {s.value for s in at.subheader}
+        # Every step is reachable; it used to stop at step two.
+        headings = {s.value for s in at.subheader}
+        assert "5 · Shear sonic" in headings
+        assert "9 · Analysis window" in headings          # reached the end
 
     def test_a_missing_p_sonic_still_stops_it(self):
         """The relaxation is specific: there is no predicting a Vp or a density

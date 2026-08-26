@@ -29,7 +29,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 
 | Page | What it does |
 |------|--------------|
-| **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, a **shear sonic** predicted where the well has none or only part of one and scored against whatever it does have, **fluid cases** assigned where the file carries them and modelled from industry-default fluids where it does not, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
+| **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, a **shear sonic** predicted where the well has none or only part of one and scored against whatever it does have, **fluid cases** assigned where the file carries them and modelled from industry-default fluids where it does not, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on, and a **setup file** that saves every decision on the page — your interpretation, not your logs. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
 | **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Then **where the classes are** — small multiples on one shared, downward depth axis, the class on an axis of its own as well as in the colour, with a panel per property. Then **AVO attributes** — pseudo-shear reflectivity and the Smith-Gidlow fluid factor at each reflector's own background Vp/Vs, an anomaly ranking scored in the well's own scatter, and a χ sweep that finds the rotation of the A–B plane best correlated with a rock property. Then **class against property** — every reflector's φ, VSH, SW and net-to-gross averaged over the same two half-lobes its intercept and gradient were fitted from, every available property ranked by how well it separates the classes, and the one you pick drawn as a box and its own events. Ends with a one-click **self-contained HTML report**. |
@@ -43,6 +43,7 @@ avo_qi/
 ├── app.py                      # Streamlit entry + landing
 ├── ui.py                       # shared sidebar, session state, Plotly helpers
 ├── analysis.py                 # the reflector pipeline, shared by the pages that need it
+├── project.py                  # the setup file: what you decided, without the well data
 ├── report.py                   # the self-contained HTML report
 ├── SPEC.md                     # the build specification
 ├── io/loader.py                # LAS + CSV/Excel, mnemonic map, unit standardise
@@ -232,6 +233,73 @@ Three things keep it honest:
   petrophysics in it. Those five reflectors now report `undefined over
   undefined`, and the interface-pair filter leaves them out by default and
   says on screen that it has.
+
+## Saving what you decided
+
+Everything the Load & QC page establishes lives in the browser session, so
+closing the tab loses it: the tops, the datum, the petrophysics choice, the
+shear-sonic model, the fluid parameters, the cutoffs. On a real well that is
+twenty minutes of re-entry a session, and there is no way to hand a setup to a
+colleague. *10 · Setup file* saves it.
+
+**It carries your interpretation, not your logs.** Names, depths, parameters
+and choices — a couple of kilobytes of readable JSON with **no curve values in
+it at all**, which is what makes it safe to keep beside the project, commit, or
+mail. A test asserts that: every value of every curve in the well, checked
+against every number in the file.
+
+The consequence is deliberate — a setup cannot restore a session on its own.
+Load the LAS, then apply the setup to it. The LAS stays the system of record;
+the setup is what you decided about it.
+
+Two things keep it trustworthy as the app grows:
+
+- **Nothing is silently dropped.** `SAVED` and `EXCLUDED` between them name
+  *every* field of `Settings`, and a test fails if a new one belongs to
+  neither. A setup that quietly stopped carrying a field would restore most of
+  a session and look complete, which is the worst way for this to fail. One
+  field is excluded on purpose — an uploaded wavelet's samples, which are data
+  rather than a decision.
+- **It knows which well it came from.** Every file records the well's name,
+  sample count, depth range and curve names — never curve values, which would
+  both tie the file to one export and put a fingerprint of proprietary data in
+  a shareable file. Applying a setup to a different well is then *reported and
+  not prevented*: re-running a setup against a re-exported well is ordinary,
+  and only the person doing it knows whether it is the same well.
+
+### Where it goes
+
+The download button hands the file to your browser, which puts it wherever its
+Save dialog does. There is also a **write a copy to a folder** box, defaulting
+to your Desktop — convenient, and worth understanding: it writes to the machine
+*running the app*, which is your own only because the toolkit binds to
+localhost. Deploy it for a team and that is the server's disk. The download is
+the one that always does what it looks like.
+
+### What is not finished
+
+Applying a setup restores the **settings**, and everything read straight from
+them follows at once — the zonation, the lithology and net cutoffs, the
+classifier, the fluid case. The numeric boxes in the sections that have their
+own *Apply* button do **not** yet repopulate. Streamlit gives a keyed widget's
+own state priority over the value it is created with, and the browser re-sends
+that state on every rerun, so clearing it server-side is not enough; each
+control has to be assigned its new value explicitly, which needs a per-widget
+mapping that is not written yet. Until it is, the datum, the petrophysics
+parameters and the fluid-model fields need re-entering and re-applying. The
+file carries them correctly — this is the last mile of putting them back on
+screen, and the page says so rather than letting you assume otherwise.
+
+### One trap worth recording
+
+JSON has no integer keys. `zone_names` is keyed by the numeric code in the
+`ZONE` curve, so a plain `json.dumps` turned `{1: "Shale"}` into
+`{"1": "Shale"}` — after which every zone lookup by code missed, and a restored
+session came back showing bare codes and seven intervals where the well has
+four. The file looked perfectly correct. Dicts with non-string keys are now
+written as an explicit list of pairs, and the "what changed" report compares
+values as they really are rather than two JSON-safe copies, because comparing
+those would call the broken and the correct version equal.
 
 ## A well with no shear sonic
 
@@ -1050,6 +1118,13 @@ no VSH, PHI or SW over the top 166 m, and the resampler used to fill it with
 each curve's first valid reading — and the measured ranking of what the class
 depends on in that well, so a change to the blocking or the classifier that
 overturns it fails a test rather than leaving a confident sentence on screen.
+
+`test_project.py` covers the setup file, and two of its tests are the reason
+the feature can be trusted: one asserts that **no curve value ever reaches the
+file** — every sample of every curve checked against every number in it — and
+one asserts that every field of `Settings` is either saved or explicitly
+excluded, so a new setting cannot be silently forgotten by a file that still
+looks complete.
 
 `test_vs_prediction.py` and `TestAWellWithNoShearSonic` in `test_real_well.py`
 cover predicting a shear sonic. The interesting ones are not the algebra: they

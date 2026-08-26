@@ -17,6 +17,8 @@ if _ROOT not in sys.path:
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
+
+from avo_qi import project  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from avo_qi.core.qc import (  # noqa: E402
@@ -1162,3 +1164,125 @@ with st.expander("Expected ranges used by the checks"):
                       for k, v in DEFAULT_RANGES.items()]),
         use_container_width=True, hide_index=True,
     )
+
+# --------------------------------------------------------------- setup file --
+st.divider()
+st.subheader("10 · Setup file")
+st.caption(
+    "Everything decided on this page is held in the browser session, so closing "
+    "the tab loses it: the tops, the datum, the petrophysics choice, the "
+    "shear-sonic model, the fluid parameters, the cutoffs. A **setup file** "
+    "keeps them. It carries **your interpretation, not your logs** — names, "
+    "depths, parameters and choices, a few kilobytes of readable JSON with no "
+    "curve values in it at all, so it can go beside the project or to a "
+    "colleague without the well going with it. The LAS stays the system of "
+    "record; load the well first, then apply a setup to it."
+)
+
+_save_col, _load_col = st.columns(2)
+
+with _save_col:
+    st.markdown("**Save**")
+    _setup_note = st.text_input(
+        "Note", value="", key="setup_note",
+        placeholder="what this setup is, e.g. after the well tie",
+        help="Stored in the file and shown before it is applied.")
+    _setup = project.build_setup(well, settings, note=_setup_note)
+    _payload = project.dumps(_setup)
+    st.download_button(
+        "Download setup file", _payload,
+        file_name=project.suggested_name(well),
+        mime="application/json", type="primary", key="setup_download")
+    st.caption(
+        "%d fields, %.1f kB. Your browser decides where it lands — normally "
+        "your downloads folder, or wherever its Save dialog puts it."
+        % (len(project.SAVED), len(_payload) / 1000.0))
+
+    with st.expander("Write a copy to a folder instead"):
+        st.caption(
+            "Writes straight to disk with no Save dialog, which is convenient "
+            "when the toolkit is running on your own machine — as it is by "
+            "default, since the server binds to localhost. **It writes to the "
+            "machine running the app**, so if you have deployed this for a "
+            "team that is the server's disk and not yours. The download above "
+            "is the one that always does what it looks like."
+        )
+        _folder = st.text_input("Folder", value=project.default_folder(),
+                                key="setup_folder")
+        if st.button("Write it there", key="setup_write"):
+            _target = os.path.join(os.path.expanduser(_folder or ""),
+                                   project.suggested_name(well))
+            try:
+                with open(_target, "wb") as _handle:
+                    _handle.write(_payload)
+                st.success("Written to `%s`." % _target,
+                           icon=":material/save:")
+            except OSError as _exc:
+                st.error("Could not write it: %s" % _exc,
+                         icon=":material/error:")
+
+with _load_col:
+    st.markdown("**Load**")
+    _setup_upload = st.file_uploader(
+        "Setup file", type=["json"], key="setup_upload",
+        help="A file saved above, for this well or another one.")
+    if _setup_upload is not None:
+        try:
+            _incoming = project.loads(_setup_upload.getvalue())
+        except ValueError as _exc:
+            st.error(str(_exc), icon=":material/error:")
+        else:
+            _summary = project.describe(_incoming)
+            st.dataframe(
+                pd.DataFrame([{"built for": _summary["well"],
+                               "saved": _summary["created"],
+                               "fields": _summary["fields"],
+                               "tops": _summary["tops"],
+                               "survey stations": _summary["survey_stations"]}]),
+                use_container_width=True, hide_index=True)
+            if _summary["note"]:
+                st.caption("Note: " + _summary["note"])
+
+            _check = project.compare_fingerprint(_incoming, well)
+            if not _check["matches"]:
+                st.warning(
+                    "This setup was built for a different well — "
+                    + "; ".join(_check["differences"])
+                    + ". Applying it anyway is sometimes right (a re-exported "
+                      "well, a renamed one) and sometimes puts this well on "
+                      "another well's rig floor. Only you can tell.",
+                    icon=":material/warning:")
+            if st.button("Apply this setup", type="primary", key="setup_apply"):
+                _changed = project.apply_setup(_incoming, settings)
+                # Writing the setting is not enough: a keyed widget's own state
+                # outranks its value= argument, so a stale control would write
+                # its old value straight back and the setup would look inert.
+                for _key in project.stale_widget_keys(_changed):
+                    st.session_state.pop(_key, None)
+                st.session_state.pop("time_well_cache", None)
+                st.session_state.pop("zone_cache", None)
+                st.session_state["setup_applied"] = _changed
+                st.rerun()
+
+_applied = st.session_state.get("setup_applied")
+if _applied is not None:
+    if _applied:
+        st.success(
+            "Applied — %d setting(s) changed: %s."
+            % (len(_applied), ", ".join(sorted(_applied))),
+            icon=":material/settings_backup_restore:")
+        st.warning(
+            "**Known limitation.** The settings are restored, and anything "
+            "read straight from them — the zonation, the lithology and net "
+            "cutoffs, the classifier — follows immediately. The numeric boxes "
+            "in the sections with their own **Apply** button do *not* yet "
+            "repopulate: Streamlit gives a control's own state priority and "
+            "the browser re-sends it on every rerun, so the datum, the "
+            "petrophysics parameters and the fluid-model fields still read "
+            "empty even though the setup carries them. Re-enter those and "
+            "press the section's Apply button. The file itself is complete — "
+            "this is the last mile of putting it back on screen.",
+            icon=":material/warning:")
+    else:
+        st.info("That setup matched the settings already in use; nothing "
+                "changed.", icon=":material/info:")
