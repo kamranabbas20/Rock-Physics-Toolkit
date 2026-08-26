@@ -182,12 +182,29 @@ def detect_fluid_cases(columns):
 def guess_mnemonics(columns):
     """Best-guess mapping from canonical curve name to a column in ``columns``.
 
-    Exact matches win over prefix matches; a column is never assigned twice.
+    Exact matches win over prefix matches; a column is never assigned twice;
+    and a prefix match never claims a column that **exactly names some other
+    canonical curve**.
+
+    That last rule is not a nicety.  ``VSH`` starts with ``VS``, so a well with
+    no shear sonic used to have its *shale volume* mapped to shear velocity —
+    silently, because there was nothing left for ``VS`` to match and the prefix
+    rule was happy.  It surfaced as ``unknown velocity unit 'v/v'`` several
+    layers away, and only because that particular VSH declared a unit; one
+    without a unit would have been sniffed as a velocity instead.  Every well
+    in the test set carried a DTS, so nothing caught it.
     """
     cols = list(columns)
     upper = {_norm(c): c for c in cols}
     taken = set()
     mapping = {}
+
+    # Which canonical curve each mnemonic is the real name of. First listed
+    # wins, matching the order the map itself is resolved in.
+    owner = {}
+    for canonical, candidates in MNEMONIC_MAP.items():
+        for cand in candidates:
+            owner.setdefault(cand, canonical)
 
     for canonical, candidates in MNEMONIC_MAP.items():
         chosen = None
@@ -199,9 +216,12 @@ def guess_mnemonics(columns):
         if chosen is None:                           # then a prefix match
             for cand in candidates:
                 for key, col in upper.items():
-                    if key.startswith(cand) and col not in taken:
-                        chosen = col
-                        break
+                    if col in taken or not key.startswith(cand):
+                        continue
+                    if owner.get(key, canonical) != canonical:
+                        continue          # that column is another curve's name
+                    chosen = col
+                    break
                 if chosen is not None:
                     break
         if chosen is not None:

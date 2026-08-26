@@ -58,6 +58,12 @@ from avo_qi.ui import (  # noqa: E402
     vsh_series,
     parameter_defaults,
     petro_sources,
+    apply_vs_prediction,
+    BRAND_PETROL,
+    vs_source,
+    vs_prediction_report,
+    vs_predicted_mask,
+    VS_MODELS,
     read_uploaded_table,
     well_zones,
     load_demo_well,
@@ -202,13 +208,23 @@ else:
         except ValueError as exc:
             st.error(str(exc))
 
-missing = [c for c in ("VP", "VS", "RHOB") if c not in well.df.columns]
+# Vp and density have to be assigned; there is no way to make them up. A
+# missing *shear* sonic used to stop the page here too, which rejected a well
+# outright for the one curve the toolkit can honestly predict — see
+# **5 · Shear sonic** below, which is now allowed to be reached.
+missing = [c for c in ("VP", "RHOB") if c not in well.df.columns]
 if missing:
     st.error(
         f"Missing required curve(s): {', '.join(missing)}. Assign them above — "
-        "the rest of the toolkit cannot run without all three."
+        "there is no predicting a P sonic or a density from what is left."
     )
     st.stop()
+if "VS" not in well.df.columns:
+    st.info(
+        "No shear sonic assigned. Every page after this one needs one, so "
+        "continue to **5 · Shear sonic** below and predict it — or assign it "
+        "above if the file has a curve under a name the detector missed.",
+        icon=":material/info:")
 
 # ------------------------------------------------------- depth reference ----
 st.divider()
@@ -519,9 +535,134 @@ elif not _petro_missing and _mode == "file":
     st.caption("Nothing is being recomputed; the file's own interpretation is "
                "in use throughout.")
 
+# ------------------------------------------------------------- shear sonic --
+# After petrophysics, because the best predictor here is driven by VSH; before
+# fluid cases, because Gassmann needs Vs.
+st.divider()
+st.subheader("5 · Shear sonic")
+
+_vs_values = (well.df["VS"].to_numpy(float) if "VS" in well.df.columns
+              else np.full(len(well.df), np.nan))
+_vs_have = int(np.isfinite(_vs_values).sum())
+_vs_options = dict(settings.vs_prediction or {})
+
+st.caption(
+    "**Without Vs there is no gradient, no Vp/Vs, no Poisson and no Gassmann** "
+    "— the toolkit stops. Plenty of wells have no shear sonic, or have one over "
+    "part of the interval, so it can be predicted here. This is the largest "
+    "single modelling assumption anyone using this tool makes, so a prediction "
+    "is scored against whatever measured Vs the well does have, never "
+    "overwrites a measured sample, and is labelled *(computed)* wherever it "
+    "later appears."
+)
+
+if _vs_have == len(well.df) and _vs_have:
+    st.success(
+        f"This well carries a shear sonic on all {len(well.df):,} samples. "
+        "Nothing to predict — and a measured Vs beats any model of one.",
+        icon=":material/check_circle:")
+elif _vs_have:
+    st.warning(
+        f"Shear sonic on {_vs_have:,} of {len(well.df):,} samples "
+        f"({_vs_have / len(well.df):.0%}). The rest can be predicted, and the "
+        "logged interval is what the prediction gets marked against.",
+        icon=":material/warning:")
+else:
+    st.error(
+        "No shear sonic at all. Every page after this one needs one, so it "
+        "has to be predicted — and with nothing measured to score against, "
+        "the choice of model cannot be checked against this well.",
+        icon=":material/error:")
+
+_vs_report = vs_prediction_report(well, settings)
+if _vs_report["rows"]:
+    _scoreboard = pd.DataFrame(_vs_report["rows"]).drop(columns=["key"])
+    st.dataframe(_scoreboard.round(3), use_container_width=True, hide_index=True)
+    if _vs_report["reason"]:
+        st.caption(_vs_report["reason"].capitalize() + ".")
+    else:
+        st.caption(
+            f"Each model run over the whole well and marked against its "
+            f"{_vs_report['scored']:,} measured samples, best first. "
+            "**Bias is signed on purpose**: a prediction that is slow "
+            "everywhere can be corrected, one that scatters cannot. A "
+            "transform that reads too fast pulls Vp/Vs down and moves every "
+            "AVO gradient with it, so the sign is the part to look at."
+        )
+elif _vs_report.get("reason"):
+    st.info(_vs_report["reason"].capitalize() + ".", icon=":material/info:")
+
+_vs_choices = ["file"] + [k for k in VS_MODELS if k in _vs_report["predictions"]]
+_vs_labels = {"file": "Keep only what the file carries"}
+_vs_labels.update({k: VS_MODELS[k][0] for k in VS_MODELS})
+_vs_default = _vs_options.get("model", "file")
+_vs_model = st.radio(
+    "Where Vs comes from", _vs_choices,
+    index=_vs_choices.index(_vs_default) if _vs_default in _vs_choices else 0,
+    format_func=lambda k: _vs_labels.get(k, k), key="vs_model",
+    horizontal=False,
+)
+if _vs_model in VS_MODELS:
+    st.caption(VS_MODELS[_vs_model][1])
+if _vs_model == "well_trend":
+    _vs_options["degree"] = st.select_slider(
+        "Trend degree", options=[1, 2], value=int(_vs_options.get("degree", 1)),
+        key="vs_degree",
+        help="A quadratic curves the line; it does not teach it about "
+             "lithology.")
+    _fitted = _vs_report.get("fitted") or {}
+    if _fitted.get("reason"):
+        st.caption("No trend could be fitted: " + _fitted["reason"] + ".")
+
+if st.button("Apply shear sonic", type="primary", key="apply_vs"):
+    _vs_options["model"] = _vs_model
+    settings.vs_prediction = _vs_options
+    st.session_state["vs_notes"] = apply_vs_prediction(well, settings)
+    st.rerun()
+
+for _note in (st.session_state.get("vs_notes") or []):
+    st.success(_note, icon=":material/calculate:")
+
+if vs_source() in ("computed", "filled"):
+    st.warning(
+        "**A good Vs prediction still moves the answer.** Blind-tested on this "
+        "well — its real shear sonic removed, then predicted by "
+        "Greenberg-Castagna — the curve comes back within **4.4%** of the "
+        "measurement and essentially unbiased, which sounds harmless. It is "
+        "not: the reflector count falls from 25 to 18, and of the events found "
+        "at the same depth in both runs **42% take a different AVO class**. A "
+        "gradient is a contrast attribute, and small velocity errors move "
+        "contrasts more than they move velocities. Treat every class on a "
+        "predicted well as provisional, and prefer a well that was logged.",
+        icon=":material/warning:")
+
+_vs_mask = vs_predicted_mask()
+if _vs_mask is not None and _vs_mask.any() and "VS" in well.df.columns:
+    _fig = go.Figure()
+    _depth = well.df["DEPTH"].to_numpy(float)
+    _measured = st.session_state.get("vs_original")
+    if _measured is not None:
+        _fig.add_trace(go.Scatter(
+            x=np.asarray(_measured, float), y=_depth, mode="lines",
+            name="measured", line=dict(color="#20242A", width=1.4)))
+    _drawn = np.where(_vs_mask, well.df["VS"].to_numpy(float), np.nan)
+    _fig.add_trace(go.Scatter(
+        x=_drawn, y=_depth, mode="lines", name="predicted",
+        line=dict(color=BRAND_PETROL, width=1.4)))
+    _fig.update_yaxes(autorange="reversed", title_text="Depth (m MD)")
+    _fig.update_layout(xaxis_title="Vs (m/s)", height=460,
+                       margin=dict(l=70, r=20, t=30, b=50),
+                       legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    st.plotly_chart(_fig, use_container_width=True)
+    st.caption(
+        "The predicted interval drawn beside the measured one, so the join "
+        "between them is visible. A step at the join is the model disagreeing "
+        "with the log at the last sample it could see."
+    )
+
 # -------------------------------------------------------------- fluid cases --
 st.divider()
-st.subheader("5 · Fluid cases")
+st.subheader("6 · Fluid cases")
 st.caption(
     "A fluid case is the well as it would log with a different pore fluid, and "
     "comparing them is what separates a fluid response from a lithology one. "
@@ -765,7 +906,7 @@ else:
 
 # ---------------------------------------------------------------- zonation --
 st.divider()
-st.subheader("6 · Zonation")
+st.subheader("7 · Zonation")
 
 _has_zone_curve = "ZONE" in well.df.columns
 if _has_zone_curve:
@@ -872,7 +1013,7 @@ else:
 
 # -------------------------------------------------------------------- QC ---
 st.divider()
-st.subheader("7 · Quality control")
+st.subheader("8 · Quality control")
 
 frame = well.frame(settings.case)
 numeric = [c for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c])]
@@ -974,7 +1115,7 @@ if flagged:
 
 # ------------------------------------------------------- analysis window ---
 st.divider()
-st.subheader("8 · Analysis window")
+st.subheader("9 · Analysis window")
 
 depth = work["DEPTH"].to_numpy(float)
 lo, hi = float(np.nanmin(depth)), float(np.nanmax(depth))

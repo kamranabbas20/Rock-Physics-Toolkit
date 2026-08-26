@@ -807,3 +807,131 @@ class TestWhatTheClassDependsOnInThisWell:
         _, ranking = self.ranked()
         effect = ranking.set_index("column")["eps2"]
         assert effect["depth"] < 0.06         # below Cohen's 'moderate'
+
+
+class TestAWellWithNoShearSonic:
+    """15/9-19-A with its DTS removed — the case the toolkit used to reject.
+
+    A missing shear sonic stopped the Load & QC page dead, which threw away a
+    well for the one curve that can honestly be predicted. These tests hold
+    both halves of the fix: that such a well now runs end to end, and that the
+    result is *not* quietly treated as equivalent to a logged one.
+    """
+
+    @staticmethod
+    def stripped():
+        well, raw, units = load()
+        truth = well.df["VS"].to_numpy(float).copy()
+        well.df = well.df.drop(columns=["VS"])
+        return well, raw, units, truth
+
+    @staticmethod
+    def page(well, raw, units):
+        from avo_qi.ui import Settings
+
+        at = AppTest.from_file(os.path.join(PAGES, "1_Load_and_QC.py"),
+                               default_timeout=300)
+        at.session_state["well"] = well
+        at.session_state["raw_df"] = raw
+        at.session_state["raw_units"] = units
+        at.session_state["settings"] = Settings()
+        at.run()
+        return at
+
+    def test_the_page_no_longer_stops_dead(self):
+        well, raw, units, _ = self.stripped()
+        at = self.page(well, raw, units)
+        assert not at.exception
+        # All nine steps are reachable; it used to stop at step two.
+        assert len(at.subheader) == 9
+        assert "5 · Shear sonic" in {s.value for s in at.subheader}
+
+    def test_a_missing_p_sonic_still_stops_it(self):
+        """The relaxation is specific: there is no predicting a Vp or a density
+        from what would be left."""
+        well, raw, units, _ = self.stripped()
+        well.df = well.df.drop(columns=["VP"])
+        at = self.page(well, raw, units)
+        assert not at.exception
+        assert any("Missing required curve" in e.value for e in at.error)
+
+    def test_it_offers_the_models_the_well_can_actually_support(self):
+        well, raw, units, _ = self.stripped()
+        at = self.page(well, raw, units)
+        radio = next(r for r in at.radio if "Where Vs comes from" in r.label)
+        assert "Greenberg-Castagna, mixed by VSH" in radio.options
+        assert "Castagna mudrock line" in radio.options
+        # No measured Vs anywhere, so there is no trend of its own to fit.
+        assert "This well's own Vp-Vs trend" not in radio.options
+
+    def test_the_prediction_lands_within_a_few_per_cent_of_the_real_log(self):
+        well, raw, units, truth = self.stripped()
+        at = self.page(well, raw, units)
+        next(r for r in at.radio
+             if "Where Vs comes from" in r.label).set_value(
+                 "greenberg_castagna").run()
+        next(b for b in at.button if "Apply shear sonic" in b.label).click().run()
+        assert not at.exception
+
+        got = at.session_state["well"].df["VS"].to_numpy(float)
+        error = np.abs(got - truth) / truth
+        assert np.nanmedian(error) < 0.06
+        assert abs(np.nanmedian((got - truth) / truth)) < 0.02   # unbiased
+
+    def test_what_it_predicted_is_recorded_per_sample(self):
+        """Provenance, not a per-well flag: a partially logged well is the
+        common case and 'this curve is 72% invented' is the useful statement."""
+        well, raw, units, _ = self.stripped()
+        at = self.page(well, raw, units)
+        next(r for r in at.radio
+             if "Where Vs comes from" in r.label).set_value(
+                 "greenberg_castagna").run()
+        next(b for b in at.button if "Apply shear sonic" in b.label).click().run()
+
+        assert at.session_state["vs_source"] == "computed"
+        mask = np.asarray(at.session_state["vs_predicted"], dtype=bool)
+        # Predicted exactly where VSH allowed a prediction, nowhere else.
+        vsh = np.isfinite(load()[0].df["VSH"].to_numpy(float))
+        assert mask.sum() == int(vsh.sum())
+
+    def test_the_page_says_the_classes_will_move(self):
+        """The finding this warning exists for: 4.4% on the velocity is not
+        4.4% on the answer."""
+        well, raw, units, _ = self.stripped()
+        at = self.page(well, raw, units)
+        next(r for r in at.radio
+             if "Where Vs comes from" in r.label).set_value(
+                 "greenberg_castagna").run()
+        next(b for b in at.button if "Apply shear sonic" in b.label).click().run()
+        text = " ".join(w.value for w in at.warning)
+        assert "different AVO class" in text
+
+    def test_a_predicted_well_is_not_the_same_well(self):
+        """Measured against predicted, straight through the pipeline. This is
+        the number the warning quotes, and it must not drift away from it."""
+        from avo_qi.analysis import reflector_analysis
+        from avo_qi.core.vs_prediction import (fill_missing_vs,
+                                               lithology_fractions_from_vsh,
+                                               polynomial_vs)
+        from avo_qi.ui import Settings
+
+        measured = reflector_analysis(load()[0], Settings())["table"]
+
+        well = load()[0]
+        vp = well.df["VP"].to_numpy(float)
+        vsh = well.df["VSH"].to_numpy(float)
+        well.df["VS"] = fill_missing_vs(
+            np.full(len(well.df), np.nan),
+            polynomial_vs(vp, lithology_fractions_from_vsh(vsh)))["vs"]
+        predicted = reflector_analysis(well, Settings())["table"]
+
+        assert len(predicted) < len(measured)          # 18 against 25
+
+        paired = agreed = 0
+        for _, row in predicted.iterrows():
+            near = measured[np.abs(measured["depth"] - row["depth"]) < 3.0]
+            if len(near) == 1:
+                paired += 1
+                agreed += int(near.iloc[0]["avo_class"] == row["avo_class"])
+        assert paired >= 8
+        assert agreed / paired < 0.75      # ~58% agree; a long way from all

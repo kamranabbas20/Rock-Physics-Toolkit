@@ -13,6 +13,7 @@ from . import (
     rockphysics,
     synthetic,
     tuning,
+    vs_prediction,
     wavelet,
     zones,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "rockphysics",
     "synthetic",
     "tuning",
+    "vs_prediction",
     "wavelet",
     "zones",
 ]

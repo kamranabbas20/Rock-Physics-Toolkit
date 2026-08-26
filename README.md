@@ -29,7 +29,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 
 | Page | What it does |
 |------|--------------|
-| **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, **fluid cases** assigned where the file carries them and modelled from industry-default fluids where it does not, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
+| **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, a **shear sonic** predicted where the well has none or only part of one and scored against whatever it does have, **fluid cases** assigned where the file carries them and modelled from industry-default fluids where it does not, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
 | **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Then **where the classes are** — small multiples on one shared, downward depth axis, the class on an axis of its own as well as in the colour, with a panel per property. Then **AVO attributes** — pseudo-shear reflectivity and the Smith-Gidlow fluid factor at each reflector's own background Vp/Vs, an anomaly ranking scored in the well's own scatter, and a χ sweep that finds the rotation of the A–B plane best correlated with a rock property. Then **class against property** — every reflector's φ, VSH, SW and net-to-gross averaged over the same two half-lobes its intercept and gradient were fitted from, every available property ranked by how well it separates the classes, and the one you pick drawn as a box and its own events. Ends with a one-click **self-contained HTML report**. |
@@ -64,6 +64,7 @@ avo_qi/
 │   ├── uncertainty.py          # Monte Carlo priors, bands and AVO class odds
 │   ├── zones.py                # zonation from a LAS curve or a tops list
 │   ├── petrophysics.py         # density/neutron porosity, Archie, Simandoux
+│   ├── vs_prediction.py        # shear sonic where a well has none, and how well it went
 │   ├── properties.py           # lobe-averaged rock properties, NTG, class dependence
 │   ├── depth.py                # minimum curvature, TVD, TVDSS, TVDBML
 │   ├── qc.py                   # nulls, ranges, spikes, elastic consistency
@@ -231,6 +232,73 @@ Three things keep it honest:
   petrophysics in it. Those five reflectors now report `undefined over
   undefined`, and the interface-pair filter leaves them out by default and
   says on screen that it has.
+
+## A well with no shear sonic
+
+Without Vs there is no gradient, no Vp/Vs, no Poisson, no LMR and no Gassmann.
+The toolkit used to stop dead on a well that had none — which threw away the
+well for the one curve that can honestly be predicted, and plenty of
+exploration and older wells have no DTS at all. *5 · Shear sonic* on the Load
+& QC page now predicts it. It sits **after** the petrophysics, because the best
+predictor here is driven by VSH, and **before** the fluid cases, because
+Gassmann needs Vs.
+
+Four ways to get one, and the page **scores every one of them** against
+whatever measured Vs the well does have rather than picking a default:
+
+| Model | Knows about | On 15/9-19-A |
+|---|---|---|
+| Greenberg-Castagna, mixed by VSH | lithology | **4.4%**, unbiased, r 0.93 |
+| this well's own Vp-Vs trend | this well, if the calibration is representative | 6.2% |
+| Greenberg-Castagna, pure sandstone | nothing but Vp | 7.2%, **5.7% fast** |
+| Castagna mudrock line | nothing but Vp | 7.7% |
+
+Two of those numbers are worth dwelling on.
+
+**The lithology-aware transform wins, and it is not close.** A Vp-Vs line has
+nowhere to put shale volume, and shale volume is most of what moves Vs. Pure
+sandstone reads 5.7% *fast* because it treats every shale as a sand — and a Vs
+biased high pulls Vp/Vs down and moves every gradient with it.
+
+**Fitting this well's own trend does not win**, which is the opposite of what
+it feels like it should do. Blind-tested on a random half of 15/9-19-A the
+fitted line reaches 6.2% against the transform's 4.2%. Worse, calibrated on the
+shale-rich upper half and extrapolated into the sandier lower half — *exactly*
+what you do when the shear sonic starts partway down the well — it collapses to
+**11%, low by 11%**, because it is predicting shale velocities for sand. It is
+a check and a fallback, not a default, and the scoreboard says so on screen.
+
+### The part that is easy to miss
+
+A prediction never overwrites a measurement — it fills gaps and nothing else,
+and the mask that comes back is per sample, so "this curve is 72% invented" is
+a statement the toolkit can actually make. But the honest warning is bigger
+than that, and the page prints it:
+
+> Blind-tested on 15/9-19-A — its real shear sonic removed, then predicted —
+> the curve comes back within **4.4%** of the measurement and essentially
+> unbiased. The reflector count still falls from **25 to 18**, and of the
+> events found at the same depth in both runs **42% take a different AVO
+> class**.
+
+A gradient is a contrast attribute, and small velocity errors move contrasts
+much more than they move velocities. 4.4% on the log is not 4.4% on the answer.
+Every class on a predicted well is provisional, and `test_real_well.py` pins
+that divergence so it cannot quietly improve into a claim nobody measured.
+
+### Where another published transform goes
+
+`polynomial_vs` is general: a `{lithology: polynomial}` map in km/s, Hill-averaged
+over a mixture. Greenberg-Castagna is one parameterisation of it, and its
+coefficients are **imported** from `core/rockphysics.py` rather than retyped, so
+the trend lines the Rock Physics page draws and the curve predicted here cannot
+come from two different sets of numbers. Another published set is a dictionary
+entry in `TRANSFORMS`, not new code.
+
+Only sets whose coefficients can be checked against their source belong there.
+A transform carrying half-remembered numbers is worse than no transform,
+because every Vp/Vs, Poisson, gradient and substitution downstream inherits
+them with no mark on them.
 
 ## Where the classes are
 
@@ -857,37 +925,24 @@ everything else. There is no way to draw an interactive chart without the
 numbers reaching the renderer; the honest mitigation is controlling what else
 is running in that renderer.
 
-## Avoiding the browser entirely
+## Running it without the app
 
-If sending your logs to a browser is not acceptable, do not use the app. The
-same analysis runs from a terminal and writes results to disk — no web server,
-no WebSocket, no renderer holding your data:
+`avo_qi/core/` imports neither Streamlit nor Plotly — only numpy and scipy,
+with pandas used just to assemble the reflector table — so the whole physics
+layer is importable from a script or a notebook with no web stack loaded at
+all. `avo_qi.analysis.reflector_analysis` is the one entry point the pages
+themselves use, and it will run anywhere the two cached helpers it borrows
+from `ui.py` can be reached.
 
-```bash
-python -m avo_qi.cli WELL.las --out results/
-```
-
-It writes the QC summary and per-sample flags, the standardised and
-time-converted well, the reflector table with classes and lithology pairs, the
-gather as CSV and NPY, the angle stacks, a text report, and a PDF of figures
-drawn with Matplotlib's Agg backend — a file writer, not a display.
-
-Useful options:
-
-```bash
---case gas            # pick a fluid case
---top 2030 --base 2100  # analyse one interval
---despike             # repair spikes in Vp, Vs, RHOB
---drop-flagged        # discard samples that failed a QC check
---method aki_richards # or zoeppritz (default)
---freq 35             # Ricker peak frequency
---no-figures          # tables only, and no Matplotlib needed
-```
-
-`avo_qi/core/` imports neither Streamlit nor Plotly, which is what makes this
-possible. A test in `avo_qi/tests/test_cli.py` runs the whole workflow with
-every outbound connection blocked and asserts none is attempted, and a second
-asserts that importing the CLI does not load a web stack at all.
+There used to be a `python -m avo_qi.cli` command here. It was **removed
+rather than repaired**, because it had silently fallen a refactor behind: it
+still picked reflectors off a log-side reflectivity threshold with no blocking,
+the method the app replaced. On 15/9-19-A, at identical settings, the command
+reported **269 reflectors and 30 Class III** where the app reports **25 and 2**.
+A headless path that disagrees with the application about what a reflector *is*
+is worse than no headless path, and a second implementation of the same physics
+was always going to drift again. Anything batch should call
+`reflector_analysis` directly, so there is only ever one pipeline.
 
 ## Verifying it yourself
 
@@ -995,6 +1050,15 @@ no VSH, PHI or SW over the top 166 m, and the resampler used to fill it with
 each curve's first valid reading — and the measured ranking of what the class
 depends on in that well, so a change to the blocking or the classifier that
 overturns it fails a test rather than leaving a confident sentence on screen.
+
+`test_vs_prediction.py` and `TestAWellWithNoShearSonic` in `test_real_well.py`
+cover predicting a shear sonic. The interesting ones are not the algebra: they
+pin the *ranking* of the models measured on a real well — including that a
+trend fitted to the well loses to a lithology-aware transform, and loses badly
+when its calibration interval is a different rock from the prediction interval
+— and they pin how far a predicted well diverges from the logged one it was
+made from, so a 42% class disagreement cannot quietly become a claim that
+prediction is harmless.
 
 `test_avo_attributes.py` tests the derived attributes the strong way rather
 than against their own formulae: it builds an interface from Vp, Vs and rho,

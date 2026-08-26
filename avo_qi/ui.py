@@ -108,6 +108,9 @@ class Settings:
     #: Pore-fluid parameters and conditions for modelling the fluid cases a
     #: well does not carry: salinity, API, GOR, gas gravity, the pressure and
     #: temperature gradients, and what is in the pores now.
+    #: How a missing shear sonic is predicted: ``{"model": ..., "degree": ...}``.
+    #: Per well, because which predictor is right is a property of the rock.
+    vs_prediction: dict = field(default_factory=dict)
     fluid_model: dict = field(default_factory=dict)
     #: An explicit ``{case: {curve: column}}`` assignment, for a well whose
     #: fluid-case curves are not named the way the detector expects.
@@ -182,14 +185,15 @@ def get_settings():
 #: to another puts it on the wrong datum.
 WELL_SETTINGS = (
     "case", "zones", "zone_names", "zone_tops", "kb_elevation", "water_depth",
-    "deviation_survey", "vertical_well", "petrophysics", "fluid_model",
-    "case_mapping",
+    "deviation_survey", "vertical_well", "petrophysics", "vs_prediction",
+    "fluid_model", "case_mapping",
 )
 
 #: Session-state keys that likewise belong to the active well.
 WELL_SESSION_KEYS = (
     "raw_df", "raw_units", "las_header", "file_depth_curves", "petro_source",
-    "petro_original", "petro_notes", "fluid_case_results", "mc_result",
+    "petro_original", "petro_notes", "vs_source", "vs_original", "vs_predicted",
+    "vs_notes", "fluid_case_results", "mc_result",
     "_uploaded_name", "_tops_file", "_survey_file",
 )
 
@@ -2393,6 +2397,161 @@ def apply_petrophysics(well, settings):
                                         if v is not None}
     st.session_state.pop("time_well_cache", None)
     return notes
+
+
+#: How a Vs prediction can be made, in the order the panel offers them.
+VS_MODELS = {
+    "greenberg_castagna": (
+        "Greenberg-Castagna, mixed by VSH",
+        "A Vp-Vs polynomial per lithology, Hill-averaged over a mixture the "
+        "shale volume drives. The one that knows about lithology, and on "
+        "15/9-19-A the most accurate of these by some way."),
+    "greenberg_castagna_sand": (
+        "Greenberg-Castagna, pure sandstone",
+        "The same transform with no shale in it. For a well with no VSH — and "
+        "it reads too fast wherever the rock is shaly, which pulls Vp/Vs down "
+        "and moves every gradient with it."),
+    "mudrock": (
+        "Castagna mudrock line",
+        "One line for every clastic rock. It knows nothing about shale volume, "
+        "so it cannot separate a clean sand from the shale above it — the very "
+        "contrast an AVO gradient is made of."),
+    "well_trend": (
+        "This well's own Vp-Vs trend",
+        "A regression fitted to the interval that already has a shear sonic. "
+        "Only as good as that interval is representative: calibrated on shale "
+        "and extrapolated into sand it goes badly wrong, and the scoreboard "
+        "below will say so."),
+}
+
+
+def vs_source():
+    """``"file"``, ``"computed"`` or ``"filled"`` — where the shear sonic came
+    from, or None where the well has none at all."""
+    return st.session_state.get("vs_source")
+
+
+def vs_predicted_mask():
+    """Per-sample: True where Vs was predicted rather than measured."""
+    mask = st.session_state.get("vs_predicted")
+    return None if mask is None else np.asarray(mask, dtype=bool)
+
+
+def vs_prediction_report(well, settings):
+    """Score every model against whatever measured Vs this well has.
+
+    The panel offers a choice rather than a default because the right answer is
+    a property of the well, not of the literature — and the only way to know is
+    to mark each model against the shear sonic that does exist. A well with no
+    Vs at all cannot be scored, and the report says so rather than ranking four
+    models on nothing.
+    """
+    from avo_qi.core.vs_prediction import (apply_vp_vs_trend, fit_vp_vs_trend,
+                                           lithology_fractions_from_vsh,
+                                           mudrock_vs, polynomial_vs,
+                                           prediction_quality)
+
+    frame = well.df
+    vp = frame["VP"].to_numpy(float) if "VP" in frame.columns else None
+    if vp is None:
+        return {"rows": [], "reason": "this well has no Vp to predict from",
+                "predictions": {}, "measured": None}
+    measured = (frame["VS"].to_numpy(float) if "VS" in frame.columns
+                else np.full(len(frame), np.nan))
+    vsh, _ = vsh_series(frame, settings)
+
+    predictions = {}
+    predictions["greenberg_castagna_sand"] = polynomial_vs(vp)
+    predictions["mudrock"] = mudrock_vs(vp)
+    if vsh is not None and np.isfinite(vsh).any():
+        predictions["greenberg_castagna"] = polynomial_vs(
+            vp, lithology_fractions_from_vsh(vsh))
+    fitted = fit_vp_vs_trend(vp, measured,
+                             degree=int((settings.vs_prediction or {})
+                                        .get("degree", 1)))
+    if fitted["coefficients"] is not None:
+        predictions["well_trend"] = apply_vp_vs_trend(vp, fitted["coefficients"])
+
+    rows = []
+    for key, (label, _) in VS_MODELS.items():
+        if key not in predictions:
+            continue
+        quality = prediction_quality(measured, predictions[key])
+        rows.append({"model": label, "key": key, "scored on": quality["n"],
+                     "median error (m/s)": quality["median_absolute_error"],
+                     "median error (%)": 100.0 * quality["median_relative_error"],
+                     "bias (%)": 100.0 * quality["bias"],
+                     "correlation": quality["correlation"]})
+    rows.sort(key=lambda r: (np.inf if not np.isfinite(r["median error (%)"])
+                             else r["median error (%)"]))
+
+    scored = int(np.isfinite(measured).sum())
+    return {"rows": rows, "predictions": predictions, "measured": measured,
+            "fitted": fitted, "scored": scored,
+            "reason": (None if scored >= 2 else
+                       "this well has no measured shear sonic to score against, "
+                       "so the models below are unranked")}
+
+
+def apply_vs_prediction(well, settings):
+    """Predict Vs where the well has none, and record that it was predicted.
+
+    A measured shear sonic always wins: the prediction fills gaps and never
+    overwrites a sample. What it writes is therefore a *mixed* curve, and the
+    per-sample mask that comes back with it is the provenance every reader
+    downstream is entitled to — a well that is 28% predicted is a different
+    object from one that is fully logged, and nothing about the numbers says
+    so on their own.
+    """
+    from avo_qi.core.vs_prediction import fill_missing_vs
+
+    options = dict(settings.vs_prediction or {})
+    model = options.get("model")
+    frame = well.df
+
+    # The file's own curve, snapshotted before anything is written into the
+    # same column, so "use what the file carries" stays reachable.
+    original = st.session_state.get("vs_original")
+    if original is None and "VS" in frame.columns:
+        original = frame["VS"].to_numpy(float).copy()
+        st.session_state["vs_original"] = original
+    if original is not None:
+        frame["VS"] = original
+
+    measured = (frame["VS"].to_numpy(float) if "VS" in frame.columns
+                else np.full(len(frame), np.nan))
+    st.session_state.pop("time_well_cache", None)
+
+    if not model or model == "file":
+        st.session_state["vs_source"] = (
+            "file" if np.isfinite(measured).any() else None)
+        st.session_state["vs_predicted"] = np.zeros(len(frame), dtype=bool)
+        return ["Using the shear sonic the file carries."]
+
+    report = vs_prediction_report(well, settings)
+    predicted = report["predictions"].get(model)
+    if predicted is None:
+        return ["%s could not be built for this well." %
+                VS_MODELS.get(model, (model,))[0]]
+
+    merged = fill_missing_vs(measured, predicted)
+    frame["VS"] = merged["vs"]
+    ordered = [c for c in CANONICAL if c in frame.columns]
+    well.df = frame[ordered + [c for c in frame.columns if c not in ordered]]
+
+    count = int(merged["is_predicted"].sum())
+    st.session_state["vs_predicted"] = merged["is_predicted"]
+    st.session_state["vs_source"] = (
+        "computed" if not np.isfinite(measured).any()
+        else ("filled" if count else "file"))
+    st.session_state.pop("time_well_cache", None)
+
+    label = VS_MODELS.get(model, (model,))[0]
+    if not count:
+        return ["%s was applied, but the well already has a shear sonic on "
+                "every sample, so nothing was filled." % label]
+    return ["Vs predicted on %d of %d samples (%.0f%%) by %s."
+            % (count, len(frame), 100.0 * count / len(frame), label)]
 
 
 def file_depth_curves():

@@ -267,3 +267,56 @@ class TestOfflineInstallSupport:
             ["git", "check-ignore", "-q", "wheelhouse/"],
             cwd=REPO, capture_output=True,
         ).returncode == 0
+
+
+class TestAPrefixMatchNeverStealsAnotherCurvesName:
+    """The VSH trap, in the curve mapper this time.
+
+    ``VSH`` starts with ``VS``. A well with no shear sonic therefore had its
+    shale volume mapped to shear velocity — silently, because there was nothing
+    left for ``VS`` to match and the prefix rule was satisfied. Every well in
+    the test set carried a DTS, so nothing caught it until wells without one
+    were allowed through at all.
+    """
+
+    @staticmethod
+    def mapped(columns):
+        from avo_qi.io.loader import guess_mnemonics
+
+        return guess_mnemonics(columns)
+
+    def test_shale_volume_is_not_loaded_as_shear_velocity(self):
+        found = self.mapped(["DEPTH", "DT", "RHOB", "GR", "VSH", "PHIF", "SW"])
+        assert "VS" not in found
+        assert found["VSH"] == "VSH"
+        assert found["VP"] == "DT"
+
+    def test_a_real_shear_sonic_is_still_found_beside_it(self):
+        found = self.mapped(["DEPTH", "DT", "DTS", "RHOB", "VSH"])
+        assert found["VS"] == "DTS"
+        assert found["VSH"] == "VSH"
+
+    def test_a_subsea_depth_is_not_claimed_by_tvd(self):
+        """The same rule, and the one the map's own comment worried about."""
+        found = self.mapped(["MD", "TVDSS", "VP", "VS", "RHOB"])
+        assert found["TVDSS"] == "TVDSS"
+        assert "TVD" not in found
+
+    def test_prefix_matching_still_works_where_nothing_owns_the_name(self):
+        """The rule is narrow: it only protects a column that *is* some other
+        canonical curve's name, so loose mnemonics still resolve."""
+        found = self.mapped(["DEPTH", "DTCO", "DTSM", "RHOZ"])
+        assert found["VP"] == "DTCO"
+        assert found["VS"] == "DTSM"
+        assert found["RHOB"] == "RHOZ"
+
+    def test_the_real_well_is_unaffected(self):
+        import os
+
+        from avo_qi.io.loader import read_well
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        raw, _ = read_well(os.path.join(here, "data", "15_9_19_A.las"))
+        found = self.mapped(raw.columns)
+        assert found["VP"] == "DT" and found["VS"] == "DTS"
+        assert found["VSH"] == "VSH"

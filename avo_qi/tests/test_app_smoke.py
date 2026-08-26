@@ -1850,7 +1850,7 @@ class TestFluidCasesOnAWellThatHasThem:
         return run_page(os.path.join(PAGES, "1_Load_and_QC.py"), timeout=180)
 
     def test_the_page_lists_them_and_says_where_they_came_from(self, qc_page):
-        assert "5 · Fluid cases" in {s.value for s in qc_page.subheader}
+        assert "6 · Fluid cases" in {s.value for s in qc_page.subheader}
         listed = None
         for element in qc_page.dataframe:
             frame = element.value
