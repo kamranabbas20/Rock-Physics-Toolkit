@@ -32,7 +32,7 @@ or upload a LAS, CSV or Excel well on the *Data & Crossplots* page.
 | **Load & QC** | LAS / CSV / Excel loading, curve assignment with the units the header declares (or a magnitude sniff where it is silent), the **depth reference** — TVD from a deviation survey by minimum curvature, then TVDSS and TVDBML — a question about whether the file's own **petrophysical interpretation** should be kept or recomputed here, a **shear sonic** predicted where the well has none or only part of one and scored against whatever it does have, **fluid cases** assigned where the file carries them and modelled from industry-default fluids where it does not, zonation from a zone curve or a tops list, and QC: null sentinels, coverage, plausible-range checks, spike detection and repair, depth-axis checks, and the elastic consistency tests — Vs faster than Vp, Vp/Vs below √2, Poisson outside its bounds. Ends in a depth window that the rest of the toolkit then works on, and a **setup file** that saves every decision on the page — your interpretation, not your logs. |
 | **Data & Crossplots** | Upload, mnemonic remap and fluid-case selection, log tracks, and the QI crossplots: AI vs Vp/Vs, λρ–μρ (LMR), IP–IS, Poisson vs AI, and EEI with a χ sweep that reports the χ best correlated with Sw, Vsh or φ. |
 | **Synthetic Gather** | Ricker / Ormsby / uploaded wavelet, exact Zoeppritz or Aki-Richards reflectivity, variable-density or wiggle gather display, near / mid / far and full stacks, and CSV / NPY / SEG-Y export. |
-| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Then **where the classes are** — small multiples on one shared, downward depth axis, the class on an axis of its own as well as in the colour, with a panel per property. Then **AVO attributes** — pseudo-shear reflectivity and the Smith-Gidlow fluid factor at each reflector's own background Vp/Vs, an anomaly ranking scored in the well's own scatter, and a χ sweep that finds the rotation of the A–B plane best correlated with a rock property. Then **class against property** — every reflector's φ, VSH, SW and net-to-gross averaged over the same two half-lobes its intercept and gradient were fitted from, every available property ranked by how well it separates the classes, and the one you pick drawn as a box and its own events. Ends with a one-click **self-contained HTML report** that carries every section above it, as configured on screen. |
+| **AVO Classification** | Reflectors picked from the full stack itself — every turning point above the amplitude cut is an event — then per-reflector A and B fitted by both Shuey and Aki-Richards, class I / IIp / IIn / III / IV assignment, an optional Monte Carlo that turns each label into a probability, the A–B crossplot with shaded class regions and a robust background trend, a reflector table, a filter on the interface *pair* so only shale-over-sand tops need be kept, and a clickable trace whose extrema are coloured by class and drive the per-reflector detail. That detail panel puts VSH, Vp, Vs and RHOB and the angle gather on the trace's own two-way-time axis, draws the trace variable-area with troughs red and peaks blue, and shades the two half-lobes the selected reflector's layers were averaged over. Layer properties come from each reflector's own lobe on the full stack — the upper half of the trough or peak gives the layer above, the lower half the layer below — a tuned-versus-untuned section shows what bed thickness does to each reflector's class, and a **wedge model** seeded from the selected event thins that reservoir from thick to nothing to give the tuning curve and the apparent-versus-true thickness. Then **where the classes are** — small multiples on one shared, downward depth axis, the class on an axis of its own as well as in the colour, with a panel per property. Then **AVO attributes** — pseudo-shear reflectivity and the Smith-Gidlow fluid factor at each reflector's own background Vp/Vs, an anomaly ranking scored in the well's own scatter, and a χ sweep that finds the rotation of the A–B plane best correlated with a rock property. Then **what if the shale is anisotropic?** — Rüger's VTI form, with Thomsen's ε and δ asked for rather than assumed, showing which classes a shale fabric would move. Then **class against property** — every reflector's φ, VSH, SW and net-to-gross averaged over the same two half-lobes its intercept and gradient were fitted from, every available property ranked by how well it separates the classes, and the one you pick drawn as a box and its own events. Ends with a one-click **self-contained HTML report** that carries every section above it, as configured on screen. |
 | **Rock Physics** | A **rock physics template** — constant-porosity and constant-Sw curves on the AI vs Vp/Vs crossplot, so the axes read as porosity and saturation rather than merely "softer", built by running the per-sample forward model over the grid so the template and the prediction cannot drift apart. Diagnostic model overlays: Castagna mudrock and Greenberg-Castagna Vp–Vs trends, Gardner with a fitted exponent, velocity–porosity against Wyllie / Raymer-Hunt-Gardner and the Hashin-Shtrikman bounds, and K/μ vs porosity against the saturated bounds plus Hertz-Mindlin soft-sand, stiff-sand and critical-porosity frames — raised dry-to-saturated through Gassmann on request. Then a **forward model** driven per-sample from VSH, PHIT and SW with a misfit readout, an optional **Monte Carlo** P10–P90 band, and **fluid substitution** at Batzle-Wang reservoir conditions. |
 | **Multi-well** | Every well in the library run through the *same* reflector pipeline and set side by side: an overview of what each well contributed, the intercept–gradient crossplot with all wells on it and a background trend fitted through the lot — a trend fitted in one hole is that hole's rock, fitted across several it is the field's — a curve of your choice against TVDSS or TVDBML, every picked event on one shared depth axis with colour for the class and shape for the well, the class mix per well, and events by zone using **each well's own** tops — then the anomaly ranking and the class-against-property panel over every well at once — each well measured against its own trend and scored in its own scatter, which is where a relationship stops being one hole's coincidence and a quiet well's best event stays visible beside a noisy one's. |
 
@@ -48,7 +48,8 @@ avo_qi/
 ├── SPEC.md                     # the build specification
 ├── io/loader.py                # LAS + CSV/Excel, mnemonic map, unit standardise
 ├── core/
-│   ├── reflectivity.py         # Zoeppritz + Aki-Richards
+│   ├── reflectivity.py         # Zoeppritz + Aki-Richards + Rüger VTI
+│   ├── anisotropy.py           # Thomsen parameters, Rüger VTI, the gradient shift
 │   ├── wavelet.py              # Ricker, Ormsby, user wavelet ingest, spectrum
 │   ├── synthetic.py            # RC series + gather assembly
 │   ├── avo.py                  # A/B fits + classifier + background trend
@@ -213,6 +214,67 @@ scan that does not exclude script *bodies* finds those strings and calls a
 perfectly self-contained file external. Nothing in a report draws a map, so
 none of it is ever fetched — but a `<script src=...>` pointing elsewhere would
 genuinely break offline, so that is still checked on its own and never excused.
+
+## Is the shale anisotropic?
+
+Every gradient in the toolkit was fitted assuming the rock either side of an
+interface is isotropic. Shale is not. A bedding-parallel fabric makes it
+transversely isotropic about the vertical, and in Rüger's VTI form Thomsen's
+**δ** enters the P-P gradient directly — so a shale-over-sand top can move a
+whole AVO class on the fabric alone, with no change in the rock, the fluid or
+the logs.
+
+`core/anisotropy.py` adds that form, and *What if the shale is anisotropic?* on
+the AVO page asks the question. Three things about how it is framed:
+
+**It asks rather than assumes.** Nothing in a LAS file says what a shale's
+Thomsen parameters are. They are a measurement — walkaway VSP, cores, a local
+calibration — and inventing a plausible pair would put a number into a class
+label that nothing supports. Every default is isotropic, so an interpreter who
+never touches the panel gets exactly today's classification. The presets come
+from **Thomsen (1986)**, whose measurements put δ anywhere from slightly
+negative to about 0.2 *within the same lithology*, and they are offered as a
+range to size the question with, not as a default.
+
+**Anisotropy is a property of an interface, not of a rock.** Only the contrasts
+appear in the reflectivity, so two shales with the same strong fabric give an
+isotropic-looking reflection and an isotropic sand under an anisotropic shale
+gives the full effect. Each reflector is scaled between an isotropic sand and
+the shale end member by its **own lobe-averaged VSH** — the same lobes its
+intercept and gradient were fitted from — and a reflector with no shale volume
+on both lobes is left *unknown* rather than quietly read as isotropic.
+
+**The textbook number is not the number the class uses.** `d(δ)/2` is the whole
+of the anisotropy in the three-term gradient and it is what every reference
+quotes. But a class comes from a *two-term* fit, and over a finite angle range
+`sin²θ tan²θ` is nowhere near orthogonal to `sin²θ`, so the ε contrast in the
+third term leaks into the fitted gradient as well. Measured: on a 0–40° gather
+with a moderate shale the leak **roughly doubles** the effect (2.11×), rising
+from 1.23× at 0–20° to 3.10× at 0–50°. `fitted_gradient_shift` reports what a
+Shuey fit actually recovers — checked against a real fit to 1e-16 — and it is
+that number the panel shows.
+
+What it says about the two wells here, which is worth reporting as measured
+rather than as advertised:
+
+| | reflectors scalable | moderate shale | strong shale | largest shift |
+|---|---|---|---|---|
+| DEMO-1 | 9 of 9 | 0 change class | 0 change class | 0.111 (5.6 × a_tol) |
+| 15/9-19-A | 20 of 25 | 0 change class | **1** changes class | 0.022 (1.1 × a_tol) |
+
+The demo well is a blocky synthetic whose VSH takes two values, so its shifts
+are large but every reflector sits far from a boundary. The real well is the
+useful case: gradational VSH, modest shifts, and only the strongest shale in
+Thomsen's range moves a single reflector — 3823 m, from Class IV to Class III.
+That is a reassuring answer rather than a dramatic one, and both are pinned by
+tests, so if a later change starts reclassifying this well on anisotropy
+something has gone wrong.
+
+Selecting the anisotropic method and supplying no anisotropy is a no-op to
+within 1e-4, which is what makes it safe to offer at all: `dZ/Z` and
+`da/a + drho/rho` are both second-order-accurate stand-ins for `d(ln Z)`, so
+they agree through second order and differ only at third — the gap divides by
+eight per halving of the contrast.
 
 ## Does the file already carry an interpretation?
 

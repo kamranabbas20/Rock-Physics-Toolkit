@@ -2800,3 +2800,266 @@ def apply_zone_filter(labels, settings):
         return np.ones(labels.shape, dtype=bool)
     selected = set(settings.zones)
     return np.array([label in selected for label in labels], dtype=bool)
+
+
+# --------------------------------------------------------- anisotropy ------
+
+#: Preset shale end members, keyed by the label the picker shows. ``None`` is
+#: the default and means exactly what it says: no anisotropy, and therefore no
+#: change to anything. The named ones come from
+#: :data:`avo_qi.core.anisotropy.LITERATURE_SHALES` — a published *range* to
+#: size the question with, never a stand-in for a measurement of this field.
+ANISOTROPY_PRESETS = {
+    "Isotropic — no anisotropy assumed": None,
+    "Weak shale (ε 0.05, δ 0.02)": "weak",
+    "Moderate shale (ε 0.15, δ 0.08)": "moderate",
+    "Strong shale (ε 0.25, δ 0.15)": "strong",
+    "Enter my own": "custom",
+}
+
+
+def anisotropy_panel(table, angles, a_tol=0.02, key="anisotropy",
+                     split_column=None):
+    """What VTI anisotropy would do to these classes, if the shale has any.
+
+    The one question on this page that is a *sensitivity* rather than a
+    measurement, and it is framed that way deliberately.  Nothing in a LAS
+    file says what a shale's Thomsen parameters are, so the honest thing is
+    not to guess one and quietly reclassify the well; it is to let an
+    interpreter put in the number their field actually has — or a published
+    range, to see whether it matters at all — and show what moves.
+
+    The default is isotropic, so the panel changes nothing until it is told
+    something.
+
+    Returns a :class:`avo_qi.report.PanelReport`.
+    """
+    from avo_qi.core.anisotropy import (LITERATURE_SHALES, Thomsen,
+                                        fitted_gradient_shift,
+                                        thomsen_from_vsh)
+    from avo_qi.core.avo import classify
+
+    panel = PanelReport()
+    if not {"vsh_above", "vsh_below"} <= set(table.columns):
+        st.info(
+            "This needs a shale volume averaged over each reflector's lobes, "
+            "so the well has to carry VSH — assign or compute it on the "
+            "**Load & QC** page. Without it there is nothing to scale the "
+            "anisotropy with, and a single shale value applied to every "
+            "reflector would make the sands anisotropic too.",
+            icon=":material/info:")
+        return panel
+
+    choice = st.selectbox(
+        "Shale anisotropy", list(ANISOTROPY_PRESETS), key=f"{key}_preset",
+        help="Thomsen's ε and δ for the shale end member. The sand end member "
+             "is taken as isotropic, and every reflector is scaled between "
+             "them by its own lobe-averaged VSH.")
+    preset = ANISOTROPY_PRESETS[choice]
+
+    if preset is None:
+        shale = Thomsen()
+    elif preset == "custom":
+        c1, c2 = st.columns(2)
+        shale = Thomsen(
+            epsilon=float(c1.number_input(
+                "ε (shale)", -0.10, 0.60, 0.15, 0.01, key=f"{key}_eps",
+                help="P-wave anisotropy: how much faster the shale is "
+                     "horizontally. Reaches the far-angle term only.")),
+            delta=float(c2.number_input(
+                "δ (shale)", -0.15, 0.40, 0.08, 0.01, key=f"{key}_delta",
+                help="The one the gradient sees, and so the one that moves a "
+                     "class.")))
+    else:
+        shale = LITERATURE_SHALES[preset]
+
+    if shale.is_isotropic:
+        st.caption(
+            "Isotropic: the classes above stand as they are. Pick a shale to "
+            "see what a fabric would do to them. The ranges offered come from "
+            "**Thomsen (1986)**, whose measurements put δ anywhere from "
+            "slightly negative to about 0.2 *within the same lithology* — "
+            "which is why this asks rather than assuming, and why a number "
+            "from your own walkaway VSP or cores beats any of them."
+        )
+        panel.note(
+            "No anisotropy was assumed, so every class above is the isotropic "
+            "one. Thomsen parameters are a measurement this well does not "
+            "carry; nothing here invented a pair.")
+        return panel
+
+    a_vals = table["A_shuey"].to_numpy(float)
+    b_vals = table["B_shuey"].to_numpy(float)
+    vsh_up = table["vsh_above"].to_numpy(float)
+    vsh_lo = table["vsh_below"].to_numpy(float)
+
+    shifts = np.full(len(table), np.nan)
+    for i, (up, lo) in enumerate(zip(vsh_up, vsh_lo)):
+        upper, lower = thomsen_from_vsh(up, shale), thomsen_from_vsh(lo, shale)
+        # thomsen_from_vsh returns None where the shale volume is unknown, and
+        # an unknown fabric is not an isotropic one: leave the shift unknown
+        # rather than reporting "no change" for a reflector nobody measured.
+        if upper is not None and lower is not None:
+            shifts[i] = fitted_gradient_shift(upper, lower, angles)
+
+    known = np.isfinite(shifts) & np.isfinite(b_vals)
+    if not known.any():
+        st.warning(
+            "No reflector has a shale volume on both of its lobes, so none of "
+            "them can be scaled. The anisotropy is unknown here, not zero.",
+            icon=":material/warning:")
+        panel.note("No reflector carries VSH on both lobes, so no shift could "
+                   "be computed.", kind="warn")
+        return panel
+
+    shifted_b = np.where(known, b_vals + shifts, np.nan)
+    was = table["avo_class"].to_numpy(dtype=object)
+    now = np.array([classify(a, b, a_tol) if np.isfinite(b) else None
+                    for a, b in zip(a_vals, shifted_b)], dtype=object)
+    moved = np.array([w != n and n is not None for w, n in zip(was, now)])
+
+    biggest = float(np.nanmax(np.abs(shifts[known])))
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Change class on the fabric", f"{int(moved.sum())} of {int(known.sum())}",
+              help="Same rock, same fluid, same logs — a different label, "
+                   "purely because the shale has a fabric.")
+    m2.metric("Median |shift| from the fabric",
+              f"{float(np.nanmedian(np.abs(shifts[known]))):.4f}")
+    # No delta on this one: Streamlit draws an arrow beside it, and an arrow
+    # on a magnitude reads as "up is better" when the number has no direction
+    # at all. The comparison against a_tol goes in the caption below, where it
+    # can be a sentence instead of a glyph.
+    m3.metric("Largest |shift| from the fabric", f"{biggest:.4f}",
+              help="Compared against the near-zero intercept band in the "
+                   "caption below the figure.")
+    m4.metric("Angle range", f"{angles[0]:.0f}–{angles[-1]:.0f}°",
+              help="The shift is measured over these, because it depends on "
+                   "them — see the caption below the figure.")
+
+    figure = _anisotropy_figure(table, a_vals, b_vals, shifted_b, moved,
+                                a_tol=a_tol, split_column=split_column)
+    st.plotly_chart(figure, use_container_width=True)
+    st.caption(
+        f"Circles are the isotropic classification; diamonds are the same "
+        f"reflectors with a shale of ε {shale.epsilon:.2f}, δ {shale.delta:.2f} "
+        "scaled by each reflector's own lobe VSH. The arrows are **vertical**: "
+        "anisotropy moves the gradient and leaves the intercept alone, so a "
+        "reflector only ever changes class by crossing the B = 0 line or by "
+        "moving within its column. "
+        f"The largest shift is **{biggest / a_tol:.1f}×** the near-zero "
+        f"intercept band (a_tol = {a_tol:.3f}) — above about one, the "
+        "assumption about the shale is as big as the distinction the classes "
+        "are drawn on. Note too that the shift depends on the angle range: a "
+        "two-term fit cannot separate the far-angle term from the gradient, "
+        "so a wider gather leaks more of ε into what is measured as B."
+    )
+
+    listing = pd.DataFrame({
+        "depth": table["depth"] if "depth" in table.columns else table["sample"],
+        "A": a_vals, "B": b_vals, "B (VTI)": shifted_b,
+        "shift": shifts, "class": was, "class (VTI)": now,
+    })
+    if split_column and split_column in table.columns:
+        listing.insert(0, "well", table[split_column].to_numpy())
+    movers = listing[moved]
+
+    if len(movers):
+        st.dataframe(movers.round(4), use_container_width=True, hide_index=True)
+        st.warning(
+            f"{len(movers)} reflector(s) change class on the shale fabric "
+            "alone. Whether that is a finding or a warning depends on whether "
+            "your section really has this anisotropy — but either way these "
+            "are the labels not to build a case on without measuring it.",
+            icon=":material/warning:")
+    else:
+        st.success(
+            "No reflector changes class at this anisotropy. The labels above "
+            "are robust to a shale fabric of this size — which is worth "
+            "knowing, and is not the same as the anisotropy being absent.",
+            icon=":material/check_circle:")
+
+    panel.lead = (
+        f"A sensitivity, not a measurement: a shale end member of ε "
+        f"{shale.epsilon:.2f}, δ {shale.delta:.2f}, scaled to each reflector "
+        "by its own lobe-averaged VSH, against an isotropic sand. Thomsen's δ "
+        "enters the gradient directly, so the class can move with no change "
+        "in the rock or the fluid.")
+    panel.figure(figure, height=560)
+    panel.note(
+        f"<strong>{int(moved.sum())}</strong> of {int(known.sum())} reflectors "
+        f"change class. Largest gradient shift {biggest:.4f}, which is "
+        f"{biggest / a_tol:.1f} times the near-zero intercept band, over a "
+        f"{angles[0]:.0f}–{angles[-1]:.0f}° gather.",
+        kind="warn" if moved.any() else "note")
+    if len(movers):
+        panel.frame(movers.round(4), max_rows=40)
+    return panel
+
+
+def _anisotropy_figure(table, a_vals, b_vals, shifted_b, moved, a_tol=0.02,
+                       split_column=None, height=620):
+    """The A-B plane with each reflector's anisotropy vector drawn on it.
+
+    Deliberately the same idiom as the fluid-vector crossplot: same plane,
+    same shaded class regions, an arrow per reflector from where it is to
+    where the assumption puts it. The two questions — *does the fluid move
+    this* and *does the fabric move this* — deserve to look alike, because an
+    interpreter is weighing them against each other.
+    """
+    finite = np.isfinite(a_vals) & np.isfinite(b_vals)
+    a_lim = max(float(np.nanmax(np.abs(a_vals[finite]))) * 1.3, 0.25) \
+        if finite.any() else 0.25
+    stack = np.concatenate([b_vals[finite], shifted_b[np.isfinite(shifted_b)]])
+    b_lim = max(float(np.nanmax(np.abs(stack))) * 1.3, 0.5) if stack.size else 0.5
+
+    fig = go.Figure()
+    for label, x0, x1, y0, y1 in (
+            ("I", a_tol, a_lim, -b_lim, 0.0), ("IIp", 0.0, a_tol, -b_lim, 0.0),
+            ("IIn", -a_tol, 0.0, -b_lim, 0.0),
+            ("III", -a_lim, -a_tol, -b_lim, 0.0),
+            ("IV", -a_lim, 0.0, 0.0, b_lim)):
+        fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, layer="below",
+                      line=dict(width=0), fillcolor=CLASS_COLOURS[label],
+                      opacity=0.08)
+        fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2, text=label,
+                           showarrow=False, opacity=0.7,
+                           font=dict(size=12, color=CLASS_COLOURS[label]))
+    fig.add_hline(y=0, line=dict(color="#666", width=1))
+    fig.add_vline(x=0, line=dict(color="#666", width=1))
+
+    labels = table["avo_class"].to_numpy(dtype=object)
+    where = (table["depth"] if "depth" in table.columns
+             else table["sample"]).to_numpy(float)
+    for avo_class in CLASS_COLOURS:
+        here = (labels == avo_class) & finite
+        if not here.any():
+            continue
+        for name, values, symbol, size in (
+                ("isotropic", b_vals, "circle", 11),
+                ("with the fabric", shifted_b, "diamond", 9)):
+            fig.add_trace(go.Scatter(
+                x=a_vals[here], y=values[here], mode="markers",
+                name=f"{avo_class} · {name}", legendgroup=name,
+                marker=dict(size=size, color=CLASS_COLOURS[avo_class],
+                            symbol=symbol, line=dict(width=1, color="#fff")),
+                text=[f"{d:,.1f} m" for d in where[here]],
+                hovertemplate="A %{x:.4f}<br>B %{y:.4f}<br>%{text}"
+                              "<extra></extra>"))
+
+    # One arrow per reflector. Vertical by construction — the intercept never
+    # moves — so a long one is a reflector whose class is a statement about
+    # the shale as much as about the sand.
+    for i in np.flatnonzero(finite & np.isfinite(shifted_b)):
+        fig.add_annotation(
+            x=float(a_vals[i]), y=float(shifted_b[i]),
+            ax=float(a_vals[i]), ay=float(b_vals[i]), xref="x", yref="y",
+            axref="x", ayref="y", showarrow=True, arrowhead=2, arrowsize=1.1,
+            arrowwidth=1.6, opacity=0.85,
+            arrowcolor="#B4622D" if moved[i] else "#8899a6")
+
+    fig.update_layout(
+        xaxis_title="Intercept A", yaxis_title="Gradient B",
+        xaxis_range=[-a_lim, a_lim], yaxis_range=[-b_lim, b_lim],
+        height=height, margin=dict(l=70, r=20, t=30, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    return fig

@@ -57,6 +57,7 @@ from avo_qi.core.uncertainty import (  # noqa: E402
     perturb_logs,
 )
 from avo_qi.ui import (  # noqa: E402
+    anisotropy_panel,
     CLASS_COLOURS,
     ab_crossplot,
     avo_attribute_panel,
@@ -153,7 +154,10 @@ if samples.size:
     # no direction.
     c1.metric("Median lobe window", f"{median_lobe:.0f} samples")
     c2.metric("Largest change in A", f"{table['dA_blocking'].abs().max():+.4f}")
-    c3.metric("Reflectors that change class", moved)
+    # Three sections on this page count reflectors that change class, for
+    # three different reasons. Each label names its own cause, so a reader
+    # scrolling past a metric can tell which question it answers.
+    c3.metric("Change class on the blocking", moved)
     st.caption(
         f"The median lobe spans {median_lobe * settings.dt * 1000:.0f} ms across "
         f"both halves, against the ±{window}-sample "
@@ -707,6 +711,23 @@ if confidence_on and len(table):
 elif confidence_on:
     st.info("No reflectors to classify.", icon=":material/info:")
 
+# ----------------------------------------------------------- anisotropy -----
+# The confidence section above asks what the *measurement* error does to a
+# label. This asks what a modelling assumption does to it — the assumption,
+# made silently everywhere else in the toolkit, that the rock is isotropic.
+st.divider()
+st.subheader("What if the shale is anisotropic?")
+st.caption(
+    "Every gradient on this page was fitted assuming the rock either side of "
+    "each interface is isotropic. Shale is not: a bedding-parallel fabric "
+    "makes it transversely isotropic, and Thomsen's **δ** enters the AVO "
+    "gradient directly — so a label can move with no change in the rock, the "
+    "fluid or the logs. Nothing in a LAS file says what δ is, so this asks "
+    "for it rather than assuming one, and does nothing at all until told."
+)
+_anisotropy_panel = anisotropy_panel(table, angles, a_tol=settings.a_tol,
+                                     key="avo_anisotropy")
+
 # --------------------------------------------------------------- table -----
 st.divider()
 st.subheader("Reflector table")
@@ -1098,7 +1119,7 @@ c1.metric("Tuning thickness", f"{tuning_twt * 1000:.1f} ms TWT",
           f"{tuning_thickness_depth(apparent_frequency(page_wavelet, settings.dt), _well_vp):.1f} m "
           f"at {_well_vp:,.0f} m/s", delta_color="off")
 c2.metric("Largest gradient shift", f"{np.nanmax(np.abs(B_tuned - B_thick)):+.4f}")
-c3.metric("Reflectors that change class", int(changed.sum()),
+c3.metric("Change class on thickness", int(changed.sum()),
           delta=None if not changed.any() else "tuning alone", delta_color="off")
 
 tuning_table = pd.DataFrame({
@@ -1615,6 +1636,8 @@ if st.button("Build report", type="primary"):
             _attribute_panel.section("AVO attributes", _emit),
             _property_panel.section("Class against property", _emit),
             _confidence_panel.section("How sure is each class?", _emit),
+            _anisotropy_panel.section("What if the shale is anisotropic?",
+                                      _emit),
         ) if s is not None]
 
         _sections += [

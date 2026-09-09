@@ -127,6 +127,34 @@ Also provide a convenience `reflectivity_series(vp,vs,rho, angles, method)`
 that walks a log and returns an `(n_samples × n_angles)` RC matrix (interface
 `i` between sample `i` and `i+1`; last row zero).
 
+### 4.1a `core/anisotropy.py` — added after the spec was written
+
+The spec assumed isotropy throughout; shale is not isotropic, and the P-P
+gradient sees Thomsen's δ directly. Rüger's weak-anisotropy VTI form is
+provided as a third method, reached as `method="ruger"` with an
+`anisotropy=` argument carrying ε and δ down the log:
+
+`R(θ) = ½ ΔZ/Z̄ + ½[Δα/ᾱ − (2β̄/ᾱ)² ΔG/Ḡ + Δδ] sin²θ + ½[Δα/ᾱ + Δε] sin²θ tan²θ`
+
+with `Z = ρα`, `G = ρβ²`. `ruger_terms` returns `(A, B, C)` directly, since B
+is what the class is made of.
+
+**Contract:** with both media isotropic this must reduce to §4.1's three-term
+form. It does, to third order in the contrasts (< 1e-4 at ordinary log
+contrasts) — `dZ/Z̄` and `Δα/ᾱ + Δρ/ρ̄` are both second-order-accurate
+stand-ins for `d(ln Z)`, so they agree through second order.
+
+**Contract:** nothing supplies ε or δ by default. They are a measurement; all
+defaults are isotropic, and an unknown shale volume yields an unknown
+anisotropy rather than an isotropic one.
+
+**Note for anyone reading B off the three-term form:** `Δδ/2` is the whole of
+the anisotropy in *that* gradient, but a class comes from a two-term fit,
+which cannot separate `sin²θ tan²θ` from `sin²θ` over a finite range. The ε
+contrast therefore leaks into the fitted gradient — 2.11× the textbook shift
+on a 0–40° gather with a moderate shale. `fitted_gradient_shift(upper, lower,
+angles)` gives the number the classification actually uses.
+
 ### 4.2 `core/wavelet.py`
 - `ricker(f, dt, length=0.128) -> (t, w)` — zero-phase Ricker; peak
   frequency `f` Hz, sample `dt` s. Normalise to unit peak amplitude.

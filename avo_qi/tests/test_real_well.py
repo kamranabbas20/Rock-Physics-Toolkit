@@ -936,3 +936,125 @@ class TestAWellWithNoShearSonic:
                 agreed += int(near.iloc[0]["avo_class"] == row["avo_class"])
         assert paired >= 8
         assert agreed / paired < 0.75      # ~58% agree; a long way from all
+
+
+class TestAnisotropyOnARealWell:
+    """What a shale fabric does to 15/9-19-A's classes.
+
+    The demo well is a blocky synthetic whose VSH takes two values, so its
+    anisotropy shifts are huge (0.11) and change nothing, because every
+    reflector sits far from a class boundary. A real well is the useful test:
+    gradational VSH, modest shifts, and labels that sit where they sit.
+
+    The answer here is reassuring rather than dramatic, and is recorded as
+    such: at a moderate literature shale nothing moves, and only the strongest
+    one in Thomsen's range moves a single reflector. That is worth pinning
+    precisely because it is the un-dramatic outcome — if a later change starts
+    reclassifying this well on anisotropy, something is wrong.
+    """
+
+    @staticmethod
+    def shifts(table, angles, shale):
+        from avo_qi.core.anisotropy import (fitted_gradient_shift,
+                                            thomsen_from_vsh)
+
+        out = []
+        for _, row in table.iterrows():
+            upper = thomsen_from_vsh(row["vsh_above"], shale)
+            lower = thomsen_from_vsh(row["vsh_below"], shale)
+            out.append(np.nan if upper is None or lower is None
+                       else fitted_gradient_shift(upper, lower, angles))
+        return np.asarray(out, dtype=float)
+
+    @staticmethod
+    def analysis():
+        from avo_qi.analysis import reflector_analysis
+        from avo_qi.ui import Settings
+
+        well, _, _ = load()
+        return reflector_analysis(well, Settings())
+
+    def test_five_reflectors_have_no_shale_volume_to_scale_with(self):
+        """The 166 m with no VSH is why ``thomsen_from_vsh`` returns None
+        rather than isotropy: those reflectors have an *unknown* fabric, and
+        reporting "no shift" for them would be reporting a measurement nobody
+        made."""
+        from avo_qi.core.anisotropy import LITERATURE_SHALES
+
+        found = self.analysis()
+        shifts = self.shifts(found["table"], found["angles"],
+                             LITERATURE_SHALES["moderate"])
+        assert len(shifts) == 25
+        assert int(np.isfinite(shifts).sum()) == 20
+
+    def test_a_moderate_shale_moves_no_class_here(self):
+        from avo_qi.core.anisotropy import LITERATURE_SHALES
+        from avo_qi.core.avo import classify
+        from avo_qi.ui import Settings
+
+        found = self.analysis()
+        table, angles = found["table"], found["angles"]
+        shifts = self.shifts(table, angles, LITERATURE_SHALES["moderate"])
+        a_tol = Settings().a_tol
+
+        moved = [row["avo_class"] != classify(row["A_shuey"],
+                                              row["B_shuey"] + shift, a_tol)
+                 for (_, row), shift in zip(table.iterrows(), shifts)
+                 if np.isfinite(shift)]
+        assert sum(moved) == 0
+        # ...and not because the shifts are nothing: they are real, just small
+        # against where these reflectors sit.
+        assert np.nanmax(np.abs(shifts)) == pytest.approx(0.0123, abs=5e-4)
+        assert np.nanmax(np.abs(shifts)) < a_tol
+
+    def test_the_strongest_literature_shale_moves_exactly_one(self):
+        from avo_qi.core.anisotropy import LITERATURE_SHALES
+        from avo_qi.core.avo import classify
+        from avo_qi.ui import Settings
+
+        found = self.analysis()
+        table, angles = found["table"], found["angles"]
+        shifts = self.shifts(table, angles, LITERATURE_SHALES["strong"])
+        a_tol = Settings().a_tol
+
+        moves = [(row["depth"], row["avo_class"],
+                  classify(row["A_shuey"], row["B_shuey"] + shift, a_tol))
+                 for (_, row), shift in zip(table.iterrows(), shifts)
+                 if np.isfinite(shift)
+                 and row["avo_class"] != classify(row["A_shuey"],
+                                                  row["B_shuey"] + shift, a_tol)]
+        assert len(moves) == 1
+        depth, was, now = moves[0]
+        assert (was, now) == ("IV", "III")
+        assert depth == pytest.approx(3823, abs=2)
+
+    def test_the_effect_grows_with_the_assumed_fabric(self):
+        """Monotonic in the shale's delta, as it must be, and worth checking
+        because nothing else here would notice a sign error in the scaling."""
+        from avo_qi.core.anisotropy import LITERATURE_SHALES
+
+        found = self.analysis()
+        biggest = [np.nanmax(np.abs(self.shifts(
+            found["table"], found["angles"], LITERATURE_SHALES[name])))
+            for name in ("weak", "moderate", "strong")]
+        assert biggest == sorted(biggest)
+        assert biggest[0] == pytest.approx(0.0036, abs=3e-4)
+
+    def test_a_reflector_with_no_shale_contrast_gets_no_shift(self):
+        """The contrast physics, seen on real data: where the two lobes carry
+        the same shale volume the fabric cancels exactly, however strong it
+        is. If this ever became non-zero the model would have turned
+        anisotropy into a property of a rock instead of of an interface."""
+        from avo_qi.core.anisotropy import LITERATURE_SHALES
+
+        found = self.analysis()
+        table, angles = found["table"], found["angles"]
+        shifts = self.shifts(table, angles, LITERATURE_SHALES["strong"])
+        contrast = (table["vsh_below"] - table["vsh_above"]).to_numpy(float)
+
+        flat = np.isfinite(shifts) & (np.abs(contrast) < 1e-9)
+        if flat.any():
+            assert np.allclose(shifts[flat], 0.0, atol=1e-15)
+        # And the shift tracks the contrast where there is one.
+        both = np.isfinite(shifts) & np.isfinite(contrast)
+        assert np.corrcoef(shifts[both], contrast[both])[0, 1] > 0.99

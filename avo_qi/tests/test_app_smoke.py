@@ -190,6 +190,50 @@ class TestAvoClassificationPage:
         assert at.warning
 
 
+class TestTheAnisotropyPanel:
+    """The one panel on the page that asks a question the well cannot answer.
+
+    Its whole design rests on doing nothing until told something, so that is
+    what gets tested hardest: an interpreter who never touches it must get
+    exactly the classification they get today.
+    """
+
+    def test_it_defaults_to_isotropic(self, avo_page):
+        picker = next(s for s in avo_page.selectbox
+                      if s.key == "avo_anisotropy_preset")
+        assert picker.value.startswith("Isotropic")
+
+    def test_the_default_asserts_no_shift_at_all(self, avo_page):
+        """No metrics, no figure, no reclassification — just the reason why."""
+        labels = {m.label for m in avo_page.metric}
+        assert "Change class on the fabric" not in labels
+
+    def test_choosing_a_shale_produces_shifts(self):
+        at = run_page(os.path.join(PAGES, "4_AVO_Classification.py"), timeout=300)
+        picker = next(s for s in at.selectbox if s.key == "avo_anisotropy_preset")
+        picker.set_value("Strong shale (ε 0.25, δ 0.15)").run(timeout=600)
+        assert not at.exception
+
+        found = {m.label: m.value for m in at.metric}
+        assert found["Change class on the fabric"].endswith(" of 9")
+        # The demo well steps between two shale volumes, so where the two
+        # lobes match the shift is exactly nothing and the median is zero;
+        # where they step it is large.
+        assert found["Median |shift| from the fabric"] == "0.0000"
+        assert float(found["Largest |shift| from the fabric"]) > 0.10
+
+    def test_every_metric_on_the_page_says_what_it_measures(self, avo_page):
+        """Three sections count reflectors that change class — on the
+        blocking, on thickness, and on the fabric — and for a while all three
+        said only "Reflectors that change class". A reader scrolling past one
+        could not tell which question it answered, and a test reading them by
+        label picked whichever came first.
+        """
+        labels = [m.label for m in avo_page.metric]
+        assert len(labels) == len(set(labels)), \
+            f"duplicated metric labels: {sorted({l for l in labels if labels.count(l) > 1})}"
+
+
 @pytest.fixture(scope="module")
 def built_report():
     """The real HTML document, captured on its way to the download button.
