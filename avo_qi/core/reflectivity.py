@@ -9,6 +9,11 @@ interface described by ``(vp1, vs1, rho1, vp2, vs2, rho2)``:
     (2002) convention.
 ``aki_richards_rpp``
     The three-term linearised approximation.
+``ruger_vti_rpp`` (in :mod:`avo_qi.core.anisotropy`)
+    Rüger's VTI form, reached from here as ``method="ruger"`` with an
+    ``anisotropy`` argument carrying epsilon and delta down the log.  It is
+    kept in its own module because it needs Thomsen parameters that the other
+    two do not, and because nothing supplies those by default.
 
 Unit conventions (see SPEC.md section 3) are the caller's responsibility:
 velocities in m/s, densities in g/cc, angles in degrees.  Nothing in this
@@ -159,9 +164,17 @@ def aki_richards_rpp(vp1, vs1, rho1, vp2, vs2, rho2, theta1):
     return term_rho + term_vp + term_vs
 
 
+def _ruger(*args, **kwargs):
+    """Imported late so ``anisotropy`` can import from here without a cycle."""
+    from .anisotropy import ruger_vti_rpp
+
+    return ruger_vti_rpp(*args, **kwargs)
+
+
 METHODS = {
     "zoeppritz": zoeppritz_rpp,
     "aki_richards": aki_richards_rpp,
+    "ruger": _ruger,
 }
 
 
@@ -176,6 +189,11 @@ def _resolve_method(method):
         "aki": "aki_richards",
         "akirichards": "aki_richards",
         "linear": "aki_richards",
+        "ruger": "ruger",
+        "rueger": "ruger",
+        "vti": "ruger",
+        "ruger_vti": "ruger",
+        "anisotropic": "ruger",
     }
     try:
         return METHODS[aliases[key]]
@@ -186,7 +204,8 @@ def _resolve_method(method):
         ) from None
 
 
-def reflectivity_series(vp, vs, rho, angles, method="zoeppritz", post_critical="clip"):
+def reflectivity_series(vp, vs, rho, angles, method="zoeppritz",
+                        post_critical="clip", anisotropy=None):
     """Walk a log and build the angle-dependent reflection-coefficient matrix.
 
     Interface ``i`` sits between sample ``i`` and sample ``i + 1``; the last
@@ -195,6 +214,16 @@ def reflectivity_series(vp, vs, rho, angles, method="zoeppritz", post_critical="
     ``post_critical`` is passed through to the exact solution; leave it at
     ``'clip'`` for anything that gets convolved, and use ``'nan'`` when the
     result feeds an intercept-gradient fit.
+
+    ``anisotropy`` carries Thomsen parameters down the log for
+    ``method='ruger'``: a mapping with ``epsilon`` and ``delta`` arrays the
+    same length as ``vp`` (:func:`avo_qi.core.anisotropy.thomsen_logs_from_vsh`
+    builds one from a shale-volume curve).  A sample whose anisotropy is *not
+    known* — NaN — is read as isotropic here rather than skipped, because
+    blanking the interface would silently drop a reflector from the section;
+    the honest reading of "unknown" belongs upstream, where a caller decides
+    whether it has the curve at all.  It is ignored by the other two methods,
+    which have nowhere to put it.
 
     Returns
     -------
@@ -218,12 +247,45 @@ def reflectivity_series(vp, vs, rho, angles, method="zoeppritz", post_critical="
 
     fn = _resolve_method(method)
     exact = fn is zoeppritz_rpp
+    vti = fn is _ruger
+    if vti:
+        eps, delta = _anisotropy_logs(anisotropy, n)
+
     for i in range(n - 1):
         if not np.all(np.isfinite([vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1]])):
             continue
         if exact:
             rc[i, :] = fn(vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1],
                           angles, post_critical=post_critical)
+        elif vti:
+            rc[i, :] = fn(vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1],
+                          angles,
+                          upper={"epsilon": eps[i], "delta": delta[i]},
+                          lower={"epsilon": eps[i + 1], "delta": delta[i + 1]})
         else:
             rc[i, :] = fn(vp[i], vs[i], rho[i], vp[i + 1], vs[i + 1], rho[i + 1], angles)
     return rc
+
+
+def _anisotropy_logs(anisotropy, n):
+    """Epsilon and delta as two length-``n`` arrays, defaulting to isotropy."""
+    if anisotropy is None:
+        zeros = np.zeros(n, dtype=float)
+        return zeros, zeros
+    try:
+        pair = [np.asarray(anisotropy[key], dtype=float)
+                for key in ("epsilon", "delta")]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            "anisotropy must be a mapping with 'epsilon' and 'delta' arrays"
+        ) from exc
+    out = []
+    for values in pair:
+        values = np.broadcast_to(np.atleast_1d(values), (n,)).astype(float) \
+            if values.size == 1 else values
+        if values.shape != (n,):
+            raise ValueError(
+                f"anisotropy arrays must have one value per sample ({n}), "
+                f"got {values.shape}")
+        out.append(np.where(np.isfinite(values), values, 0.0))
+    return out[0], out[1]
